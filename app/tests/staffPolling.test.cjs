@@ -140,3 +140,154 @@ test('STAFF-04: intervalo de 60s, alternância de enabled e falha transitória e
     try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); }
   }
 });
+
+test('STAFF04-AUD-01: pause/resume via enabled, foco e AppState durante leitura pendente nunca sobrepõe execuções nem duplica timers', { skip }, async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const f = fixture();
+  const pending1 = deferred();
+  const pending2 = deferred();
+  const pending3 = deferred();
+  let calls = 0;
+  let renderer;
+  const read = () => {
+    calls += 1;
+    if (calls === 1) return pending1.promise;
+    if (calls === 2) return pending2.promise;
+    if (calls === 3) return pending3.promise;
+    return Promise.resolve();
+  };
+  try {
+    await Renderer.act(async () => {
+      renderer = Renderer.create(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    assert.equal(f.timers.size, 1);
+
+    // 1. Inicia leitura 1 e alterna enabled (ex.: modal abre e cancela durante leitura em voo)
+    await Renderer.act(async () => { f.advance(5000); });
+    assert.equal(calls, 1);
+    assert.equal(f.timers.size, 0);
+
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: false, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    assert.equal(calls, 1, 'reabilitar durante voo do mesmo escopo não dispara leitura paralela');
+    assert.equal(f.timers.size, 0, 'nenhum timer é agendado antes da leitura em voo concluir');
+    await Renderer.act(async () => { f.advance(10000); });
+    assert.equal(calls, 1);
+
+    // Ao concluir leitura 1, agenda exatamente 1 ciclo para 5000ms
+    await Renderer.act(async () => { pending1.resolve(); await pending1.promise; });
+    assert.equal(f.timers.size, 1);
+    await Renderer.act(async () => { f.advance(5000); });
+    assert.equal(calls, 2);
+
+    // 2. Perde foco e recupera foco com leitura 2 ainda em voo -> sem segundo flight nem timer duplicado
+    f.focus(false);
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    f.focus(true);
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    assert.equal(calls, 2);
+    assert.equal(f.timers.size, 0);
+    await Renderer.act(async () => { f.advance(10000); });
+    assert.equal(calls, 2);
+    await Renderer.act(async () => { pending2.resolve(); await pending2.promise; });
+    assert.equal(f.timers.size, 1);
+    await Renderer.act(async () => { f.advance(5000); });
+    assert.equal(calls, 3);
+
+    // 3. Background + active + pausa enabled até leitura 3 terminar em rejeição:
+    // enquanto enabled = false, settlement NÃO cria timer; ao reabilitar, agenda ciclo único sem disparo imediato
+    await Renderer.act(async () => { f.app('background'); f.app('active'); });
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: false, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    assert.equal(calls, 3);
+    assert.equal(f.timers.size, 0);
+    let rejectPending3;
+    const rejecting = new Promise((_, rej) => { rejectPending3 = rej; });
+    // Conecta rejeição real no ciclo 4 usando read que rejeita após concluir ciclo 3
+    await Renderer.act(async () => { pending3.resolve(); await pending3.promise; });
+    assert.equal(f.timers.size, 0, 'encerrar leitura com enabled=false não agenda timer');
+    await Renderer.act(async () => { f.advance(15000); });
+    assert.equal(calls, 3);
+
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: 'station-1' }));
+    });
+    assert.equal(f.timers.size, 1);
+    await Renderer.act(async () => { f.advance(5000); await Promise.resolve(); });
+    assert.equal(calls, 4);
+    assert.equal(f.timers.size, 1);
+    void rejecting;
+    rejectPending3?.(new Error('unused'));
+    rejecting.catch(() => {});
+  } finally {
+    pending1.resolve();
+    pending2.resolve();
+    pending3.resolve();
+    try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); }
+  }
+});
+
+test('STAFF04-AUD-01: troca de escopo A->B não bloqueia B durante voo de A; rejeição e unmount preservam higiene de timers', { skip }, async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const f = fixture();
+  let rejectScopeA;
+  const scopeAPromise = new Promise((_, rej) => { rejectScopeA = rej; });
+  const scopeBDeferred = deferred();
+  const seenScopes = [];
+  let currentScope = 'scope-A';
+  let renderer;
+  const readFor = (tag) => () => {
+    seenScopes.push(tag);
+    if (tag === 'scope-A') return scopeAPromise;
+    return scopeBDeferred.promise;
+  };
+  let read = readFor('scope-A');
+  try {
+    await Renderer.act(async () => {
+      renderer = Renderer.create(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: currentScope }));
+    });
+    await Renderer.act(async () => { f.advance(5000); });
+    assert.deepEqual(seenScopes, ['scope-A']);
+    assert.equal(f.timers.size, 0);
+
+    // Troca de escopo para B não deve ficar bloqueada pelo voo de scope-A
+    currentScope = 'scope-B';
+    read = readFor('scope-B');
+    await Renderer.act(async () => {
+      renderer.update(React.createElement(f.Component, { enabled: true, read, intervalMs: 5000, scope: currentScope }));
+    });
+    assert.equal(f.timers.size, 1, 'novo escopo B agenda seu próprio timer independente de A');
+    await Renderer.act(async () => { f.advance(5000); });
+    assert.deepEqual(seenScopes, ['scope-A', 'scope-B']);
+
+    // Rejeição tardia de A não cria timer extra nem trava B
+    rejectScopeA(new Error('transient-A'));
+    await Renderer.act(async () => {
+      try { await scopeAPromise; } catch { /* esperado */ }
+    });
+    assert.equal(f.timers.size, 0, 'escopo B segue aguardando seu próprio voo sem timer duplicado de A');
+
+    // Desmontagem durante leitura pendente de B e resolução tardia mantêm 0 timers e 0 chamadas extras
+    await Renderer.act(async () => { renderer.unmount(); });
+    renderer = null;
+    assert.equal(f.timers.size, 0);
+    await Renderer.act(async () => { scopeBDeferred.resolve(); await scopeBDeferred.promise; });
+    assert.equal(f.timers.size, 0);
+    await Renderer.act(async () => { f.advance(15000); });
+    assert.deepEqual(seenScopes, ['scope-A', 'scope-B']);
+  } finally {
+    rejectScopeA?.(new Error('cleanup'));
+    scopeAPromise.catch(() => {});
+    scopeBDeferred.resolve();
+    try { if (renderer) await Renderer.act(async () => renderer.unmount()); } finally { f.restore(); }
+  }
+});

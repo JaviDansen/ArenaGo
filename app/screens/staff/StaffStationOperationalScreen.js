@@ -121,6 +121,10 @@ export default function StaffStationOperationalScreen({
       createKey: randomUUID,
       isCurrent: (context, scope) => same(context, getContext())
         && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
+      onStage: (stage, originScope) => {
+        if (!mounted.current || !same(originScope, getContext())) return;
+        setView((previous) => (previous.busy ? { ...previous, busyKind: stage } : previous));
+      },
     });
   }
   const coordinator = coordinatorRef.current;
@@ -133,6 +137,7 @@ export default function StaffStationOperationalScreen({
     autoRecoverable: false,
     pending: null,
     busy: false,
+    busyKind: null,
     feedback: null,
   });
   const viewRef = useRef(view);
@@ -144,9 +149,36 @@ export default function StaffStationOperationalScreen({
   const autoAttempt = useRef(null);
   const acknowledging = useRef(false);
   const generation = useRef(0);
+  const pollingFlight = useRef(0);
+  const pollSeq = useRef(0);
+  const revokedKindRef = useRef(null);
   const epoch = auth.getSessionEpoch();
   const revision = auth.getIdentityRevision();
   const context = getContext();
+
+  function revokeStationAccess(kind, originScope, nextFeedback = null) {
+    if (!mounted.current || !same(originScope, getContext())) return false;
+    const denyKind = kind === 'session' ? 'session' : 'denied';
+    revokedKindRef.current = denyKind;
+    generation.current += 1;
+    pollSeq.current += 1;
+    pollingFlight.current = 0;
+    dialogRef.current = null;
+    setDialog(null);
+    setView((previous) => ({
+      ...previous,
+      status: 'error',
+      data: null,
+      pending: null,
+      error: denyKind,
+      autoRecoverable: false,
+      busy: false,
+      busyKind: null,
+      feedback: nextFeedback,
+    }));
+    liveRef.current.onAccessDenied?.(denyKind);
+    return true;
+  }
 
   async function handleStationNotFound(originScope, originGeneration) {
     const verifyFn = liveRef.current.onStationNotFound;
@@ -175,6 +207,7 @@ export default function StaffStationOperationalScreen({
     if (outcome?.outcome === 'stale') return;
     if (outcome?.outcome === 'session' || outcome?.outcome === 'event_denied') {
       const denyKind = outcome.outcome === 'session' ? 'session' : 'denied';
+      revokedKindRef.current = denyKind;
       setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: denyKind, autoRecoverable: false }));
       if (!verifyFn) {
         liveRef.current.onAccessDenied?.(denyKind);
@@ -192,9 +225,12 @@ export default function StaffStationOperationalScreen({
   async function refresh(preserveFeedback = false) {
     const initial = getContext();
     const request = ++generation.current;
+    pollingFlight.current = 0;
+    pollSeq.current += 1;
     dialogRef.current = null;
     setDialog(null);
     if (!initial) {
+      revokedKindRef.current = null;
       setView({
         scope: null,
         status: 'loading',
@@ -203,6 +239,7 @@ export default function StaffStationOperationalScreen({
         autoRecoverable: false,
         pending: null,
         busy: false,
+        busyKind: null,
         feedback: null,
       });
       return false;
@@ -212,7 +249,7 @@ export default function StaffStationOperationalScreen({
       scope: initial,
       status: 'loading',
       data: null,
-      error: null,
+      error: revokedKindRef.current,
       autoRecoverable: false,
       feedback: preserveFeedback ? previous.feedback : null,
     }));
@@ -229,36 +266,35 @@ export default function StaffStationOperationalScreen({
         pending = await coordinator.pending(initial);
       }
       if (!current()) return false;
+      revokedKindRef.current = null;
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
       return true;
     } catch (error) {
       if (!same(initial, getContext())) return false;
       if (error?.status === 401 || error?.status === 403) {
-        generation.current += 1;
-        dialogRef.current = null;
-        setDialog(null);
-        const kind = error.status === 401 ? 'session' : 'denied';
-        setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: kind, autoRecoverable: false }));
-        liveRef.current.onAccessDenied?.(kind);
+        revokeStationAccess(error.status === 401 ? 'session' : 'denied', initial, null);
         return false;
       }
       if (request !== generation.current) return false;
       if (error?.status === 404) {
         const nextGen = ++generation.current;
+        pollingFlight.current = 0;
+        pollSeq.current += 1;
         dialogRef.current = null;
         setDialog(null);
         setView((previous) => ({ ...previous, status: 'error', data: null, pending: null, error: 'verifying', autoRecoverable: false }));
         await handleStationNotFound(initial, nextGen);
         return false;
       }
+      const persistedRevocation = revokedKindRef.current;
       const kind = (error?.isNetworkError || error?.isTimeout) ? 'network' : 'unavailable';
       setView((previous) => ({
         ...previous,
         status: 'error',
         data: null,
         pending: stage === 'pending' ? { kind: 'storage_error' } : null,
-        error: kind,
-        autoRecoverable: stage === 'read',
+        error: persistedRevocation ?? kind,
+        autoRecoverable: !persistedRevocation && stage === 'read',
       }));
       return false;
     }
@@ -270,9 +306,12 @@ export default function StaffStationOperationalScreen({
     const currentView = viewRef.current;
     const canRetry = currentView.status === 'error'
       && currentView.autoRecoverable
+      && !revokedKindRef.current
       && isRecoverableError(currentView.error);
     if (
       !scope
+      || revokedKindRef.current
+      || pollingFlight.current === request
       || (currentView.status !== 'ready' && !canRetry)
       || currentView.busy
       || dialogRef.current
@@ -280,11 +319,13 @@ export default function StaffStationOperationalScreen({
       || acknowledging.current
     ) return;
     const wasReady = currentView.status === 'ready';
+    const seq = ++pollSeq.current;
+    pollingFlight.current = request;
     try {
       const data = coordinator
         ? await coordinator.readStationState(scope, experience.id, station.id)
         : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
-      if (request !== generation.current || !same(scope, getContext())) return;
+      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
       if (wasReady) {
         setView((previous) => ({ ...previous, data, error: null, autoRecoverable: false }));
         return;
@@ -297,22 +338,19 @@ export default function StaffStationOperationalScreen({
           pending = { kind: 'storage_error' };
         }
       }
-      if (request !== generation.current || !same(scope, getContext())) return;
+      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
     } catch (error) {
       if (!same(scope, getContext())) return;
       if (error?.status === 401 || error?.status === 403) {
-        generation.current += 1;
-        dialogRef.current = null;
-        setDialog(null);
-        const kind = error.status === 401 ? 'session' : 'denied';
-        setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: kind, autoRecoverable: false }));
-        liveRef.current.onAccessDenied?.(kind);
+        revokeStationAccess(error.status === 401 ? 'session' : 'denied', scope, null);
         return;
       }
-      if (request !== generation.current) return;
+      if (request !== generation.current || seq !== pollSeq.current || revokedKindRef.current) return;
       if (error?.status === 404) {
         const nextGen = ++generation.current;
+        pollingFlight.current = 0;
+        pollSeq.current += 1;
         dialogRef.current = null;
         setDialog(null);
         setView((previous) => ({ ...previous, data: null, status: 'error', pending: null, error: 'verifying', autoRecoverable: false }));
@@ -325,15 +363,21 @@ export default function StaffStationOperationalScreen({
       }
       const kind = (error?.isNetworkError || error?.isTimeout) ? 'network' : 'unavailable';
       setView((previous) => ({ ...previous, status: 'error', data: null, error: kind, autoRecoverable: true }));
+    } finally {
+      if (pollingFlight.current === request && pollSeq.current === seq) {
+        pollingFlight.current = 0;
+      }
     }
   }
 
   const hasModalOpen = Boolean(dialog && !accessDenied && same(dialog.context, context) && !view.busy);
   const recoverableError = view.status === 'error'
     && view.autoRecoverable
+    && !revokedKindRef.current
     && isRecoverableError(view.error);
   const pollingEnabled = Boolean(
     !accessDenied
+    && !revokedKindRef.current
     && context
     && same(view.scope, context)
     && (view.status === 'ready' || recoverableError)
@@ -353,17 +397,24 @@ export default function StaffStationOperationalScreen({
   useEffect(() => {
     mounted.current = true;
     autoAttempt.current = null;
+    revokedKindRef.current = null;
     if (!liveRef.current.accessDenied) void refresh();
     return () => {
       mounted.current = false;
       generation.current += 1;
+      pollSeq.current += 1;
+      pollingFlight.current = 0;
       dialogRef.current = null;
     };
   }, [event.id, experience.id, station.id, auth.user?.id, auth.sessionId, epoch, revision]);
 
   useEffect(() => {
     if (!accessDenied) return;
+    const denyKind = accessDeniedKind === 'session' ? 'session' : 'denied';
+    revokedKindRef.current = denyKind;
     generation.current += 1;
+    pollSeq.current += 1;
+    pollingFlight.current = 0;
     dialogRef.current = null;
     setDialog(null);
     autoAttempt.current = null;
@@ -371,10 +422,11 @@ export default function StaffStationOperationalScreen({
       scope: null,
       status: 'error',
       data: null,
-      error: accessDeniedKind === 'session' ? 'session' : 'denied',
+      error: denyKind,
       autoRecoverable: false,
       pending: null,
       busy: false,
+      busyKind: null,
       feedback: null,
     });
   }, [accessDenied, accessDeniedKind]);
@@ -384,6 +436,7 @@ export default function StaffStationOperationalScreen({
     const scope = view.scope;
     if (
       accessDenied
+      || revokedKindRef.current
       || !coordinator
       || view.status !== 'ready'
       || view.busy
@@ -395,7 +448,7 @@ export default function StaffStationOperationalScreen({
     ) return;
     autoAttempt.current = pending.receiptId;
     acknowledging.current = true;
-    setView((previous) => ({ ...previous, busy: true }));
+    setView((previous) => ({ ...previous, busy: true, busyKind: 'acknowledging' }));
     void (async () => {
       const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
       let verified = false;
@@ -411,13 +464,14 @@ export default function StaffStationOperationalScreen({
       acknowledging.current = false;
       if (same(scope, getContext())) {
         if (verified) setView((previous) => ({ ...previous, feedback: pending.outcome }));
-        setView((previous) => ({ ...previous, busy: false }));
+        setView((previous) => ({ ...previous, busy: false, busyKind: null }));
         await refresh(true);
       } else if (getContext()) void refresh();
     })();
   }, [accessDenied, view.pending, view.scope, coordinator]);
 
   const blocked = !same(view.scope, context)
+    || Boolean(revokedKindRef.current)
     || view.busy
     || view.status !== 'ready'
     || view.error === 'stale'
@@ -435,6 +489,7 @@ export default function StaffStationOperationalScreen({
       !expected
       || dispatching.current
       || acknowledging.current
+      || revokedKindRef.current
       || !coordinator
       || expected.readGen !== generation.current
       || (fromDialog && dialogRef.current !== expected)
@@ -456,10 +511,13 @@ export default function StaffStationOperationalScreen({
       )
     ) return;
     dispatching.current = true;
+    generation.current += 1;
+    pollSeq.current += 1;
+    pollingFlight.current = 0;
     dialogRef.current = null;
     setDialog(null);
     const scope = expected.context;
-    setView((previous) => ({ ...previous, busy: true, feedback: null }));
+    setView((previous) => ({ ...previous, busy: true, busyKind: 'precondition', feedback: null }));
     try {
       let result;
       try {
@@ -475,9 +533,21 @@ export default function StaffStationOperationalScreen({
         result = { kind: 'storage_error' };
       }
       if (!same(scope, getContext())) return;
-      setView((previous) => ({ ...previous, busy: false, feedback: result }));
+      if (
+        (result?.kind === 'rejected' || result?.kind === 'rejected_cleanup_pending')
+        && (result.status === 401 || result.status === 403)
+      ) {
+        const preservedFeedback = (result.phase === 'precondition' || result.kind === 'rejected_cleanup_pending')
+          ? result
+          : null;
+        revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback);
+        return;
+      }
+      setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: result }));
       const refreshedOk = await refresh(true);
-      if (refreshedOk && same(scope, getContext())) liveRef.current.onChanged?.();
+      if (refreshedOk && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
+        liveRef.current.onChanged?.();
+      }
     } finally {
       dispatching.current = false;
     }
@@ -496,12 +566,12 @@ export default function StaffStationOperationalScreen({
       || !expected.receiptId
       || pending.receiptId !== expected.receiptId
     ) return;
-    setView((previous) => ({ ...previous, busy: true }));
+    setView((previous) => ({ ...previous, busy: true, busyKind: 'cancelling' }));
     try {
       if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
     } catch { /* A intenção permanece bloqueada; nova leitura mostra o estado persistido. */ }
     if (same(scope, getContext())) {
-      setView((previous) => ({ ...previous, busy: false }));
+      setView((previous) => ({ ...previous, busy: false, busyKind: null }));
       await refresh();
     }
   }
@@ -582,9 +652,13 @@ export default function StaffStationOperationalScreen({
         <View accessibilityRole="progressbar" style={styles.stateCard}>
           <ActivityIndicator color={c.accent} />
           <Text style={styles.message}>
-            {acknowledging.current
-              ? 'Finalizando reconhecimento seguro...'
-              : 'Processando operação no servidor...'}
+            {view.busyKind === 'acknowledging' || acknowledging.current
+              ? 'Finalizando reconhecimento seguro local...'
+              : view.busyKind === 'cancelling'
+                ? 'Descartando solicitação não enviada...'
+                : view.busyKind === 'precondition'
+                  ? 'Verificando condições antes do envio...'
+                  : 'Processando operação no servidor...'}
           </Text>
         </View>
       )}

@@ -953,3 +953,113 @@ test('exclusão SecureStore pendente serializa reconhecimento e reserva entre co
   assert.equal((await second.pending(scope)).receiptId, keyB);
   assert.equal(posts, 2);
 });
+
+test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase precondition, flags timeout/transient, ordem de onStage e zero POSTs', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const cases = [
+    {
+      label: 'network',
+      err: () => Object.assign(new Error('offline'), { isNetworkError: true }),
+      expected: { kind: 'rejected', phase: 'precondition', status: null, code: null, network: true, timeout: false, transient: true },
+    },
+    {
+      label: 'timeout',
+      err: () => Object.assign(new Error('timeout'), { isTimeout: true }),
+      expected: { kind: 'rejected', phase: 'precondition', status: null, code: null, network: true, timeout: true, transient: true },
+    },
+    {
+      label: '503',
+      err: () => Object.assign(new Error('unavailable'), { status: 503, code: 'SERVICE_UNAVAILABLE' }),
+      expected: { kind: 'rejected', phase: 'precondition', status: 503, code: 'SERVICE_UNAVAILABLE', network: false, timeout: false, transient: true },
+    },
+    {
+      label: 'malformed',
+      malformedPayload: { eventId, stations: 'invalid' },
+      expected: { kind: 'rejected', phase: 'precondition', status: null, code: null, network: false, timeout: false, transient: true },
+    },
+    {
+      label: '401',
+      err: () => Object.assign(new Error('session'), { status: 401, code: 'SESSION_REVOKED' }),
+      expected: { kind: 'rejected', phase: 'precondition', status: 401, code: 'SESSION_REVOKED', network: false, timeout: false, transient: false },
+    },
+    {
+      label: '403',
+      err: () => Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }),
+      expected: { kind: 'rejected', phase: 'precondition', status: 403, code: 'STAFF_EVENT_FORBIDDEN', network: false, timeout: false, transient: false },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const { storage } = secureStaffRig();
+    const stages = [];
+    let posts = 0;
+    const client = {
+      async get() {
+        if (scenario.malformedPayload) return scenario.malformedPayload;
+        throw scenario.err();
+      },
+      async post() {
+        posts += 1;
+        return called();
+      },
+    };
+    const manager = createStaffOperationsCoordinator({
+      client,
+      storage,
+      isCurrent: () => true,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+    });
+    const outcome = await manager.callNext(context, experienceId, stationId);
+    assert.deepEqual(outcome, scenario.expected, scenario.label);
+    assert.deepEqual(stages, ['precondition'], `${scenario.label}: não atinge estágio mutating`);
+    assert.equal(posts, 0, `${scenario.label}: zero POSTs`);
+    assert.equal(await storage.get(userId), null, `${scenario.label}: nenhuma intenção pendente persistida`);
+  }
+
+  // Pré-condição bloqueada por estado ocupado retorna blocked sem POST e sem transitar para mutating
+  {
+    const { storage } = secureStaffRig();
+    const stages = [];
+    let posts = 0;
+    const client = {
+      async get(url) { return url.endsWith('/stations') ? stations(sessionId) : queue(); },
+      async post() { posts += 1; return called(); },
+    };
+    const manager = createStaffOperationsCoordinator({
+      client,
+      storage,
+      isCurrent: () => true,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+    });
+    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'blocked');
+    assert.deepEqual(stages, ['precondition']);
+    assert.equal(posts, 0);
+  }
+
+  // Fluxo confirmado emite ['precondition', 'mutating'] em ordem exata
+  {
+    const { storage } = secureStaffRig();
+    const stages = [];
+    let posts = 0;
+    const client = {
+      async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+      async post() {
+        assert.deepEqual(stages, ['precondition', 'mutating'], 'onStage mutating ocorre antes do POST');
+        posts += 1;
+        return called();
+      },
+    };
+    const manager = createStaffOperationsCoordinator({
+      client,
+      storage,
+      isCurrent: () => true,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+    });
+    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'confirmed');
+    assert.deepEqual(stages, ['precondition', 'mutating']);
+    assert.equal(posts, 1);
+  }
+});

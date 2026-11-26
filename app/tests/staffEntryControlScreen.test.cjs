@@ -99,6 +99,7 @@ function createEntryScreenHarness({
   onPost,
   onPatch,
   onAccessDenied = () => {},
+  onSecureDelete,
   secureInitial = new Map(),
   secureAvailable = true,
   platformOS = 'android',
@@ -144,7 +145,11 @@ function createEntryScreenHarness({
         isAvailableAsync: async () => secureAvailable,
         getItemAsync: async (key) => secureValues.get(key) ?? null,
         setItemAsync: async (key, value) => { secureValues.set(key, value); },
-        deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
+        deleteItemAsync: async (key) => {
+          if (onSecureDelete) await onSecureDelete(key);
+          deleteCalls += 1;
+          secureValues.delete(key);
+        },
       };
     }
     if (name === './staffEntryService') return entrySvc;
@@ -891,7 +896,7 @@ test('STAFF-04: StaffSyncFeedback cobre indicadores honestos, confirmações esp
   );
   assert.equal(
     resolveStaffPollingIndicator({ unavailableError: true, pollingEnabled: false, visible: true }).text,
-    'Atualização indisponível · aguardando recuperação',
+    'Atualização indisponível · aguardando recuperação manual',
   );
   assert.equal(
     resolveStaffPollingIndicator({ pollingEnabled: false, visible: true }).text,
@@ -900,6 +905,23 @@ test('STAFF-04: StaffSyncFeedback cobre indicadores honestos, confirmações esp
   assert.equal(
     resolveStaffPollingIndicator({ pollingEnabled: true, visible: true, intervalSeconds: 5 }).text,
     'Atualização automática ativa · a cada 5s',
+  );
+  // Cadência separada para Eventos e fase (60s) e ausência de afirmação automática sob accessUncertain
+  assert.equal(
+    resolveStaffPollingIndicator({ pollingEnabled: true, visible: true, intervalSeconds: 60, subject: 'Eventos e fase' }).text,
+    'Eventos e fase: atualização automática ativa · a cada 60s',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ stale: true, pollingEnabled: true, visible: true, intervalSeconds: 60, subject: 'Eventos e fase' }).text,
+    'Eventos e fase: dados desatualizados · tentando atualizar a cada 60s',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ stale: true, pollingEnabled: true, visible: false, intervalSeconds: 60, subject: 'Eventos e fase' }).text,
+    'Eventos e fase: dados desatualizados · atualização temporariamente pausada',
+  );
+  assert.equal(
+    resolveStaffPollingIndicator({ unavailableError: true, pollingEnabled: false, visible: true, intervalSeconds: 60, subject: 'Eventos e fase' }).text,
+    'Eventos e fase: atualização indisponível · aguardando recuperação manual',
   );
 
   // Confirmações do Controle de Entrada (incluindo absent com requeued true vs false)
@@ -928,11 +950,15 @@ test('STAFF-04: StaffSyncFeedback cobre indicadores honestos, confirmações esp
     ['ENTRY_CALL_REQUIRED', 'necessário chamar um participante'],
     ['ENTRY_CALL_NOT_PENDING', 'já não está pendente'],
     ['EVENT_ENTRY_UNAVAILABLE', 'não é permitida no estado atual'],
+    ['RESOURCE_NOT_FOUND', 'chamada ou recurso informado não foi encontrado'],
     ['STAFF_EVENT_FORBIDDEN', 'acesso a este evento não está disponível'],
     ['SESSION_REVOKED', 'Sessão inválida'],
   ]) {
     assert.ok(describeEntryRejection(code).includes(fragment), code);
   }
+  assert.ok(describeEntryRejection(null, 401).includes('Sessão inválida'));
+  assert.ok(describeEntryRejection(null, 403).includes('acesso a este evento não está disponível'));
+  assert.ok(describeEntryRejection(null, 404).includes('chamada ou recurso informado não foi encontrado'));
   const unknownEntryMsg = describeEntryRejection('PG_ERROR_23505');
   assert.ok(unknownEntryMsg.includes('Operação recusada pelo servidor'));
   assert.equal(unknownEntryMsg.includes('PG_ERROR_23505'), false);
@@ -951,13 +977,30 @@ test('STAFF-04: StaffSyncFeedback cobre indicadores honestos, confirmações esp
     ['SERVICE_NOT_PENDING', 'chamada já não está pendente'],
     ['EVENT_OPERATION_ENDED', 'não é permitida no estado atual'],
     ['QUEUE_ENTRY_NOT_WAITING', 'A fila mudou'],
+    ['RESOURCE_NOT_FOUND', 'atendimento ou recurso informado não foi encontrado'],
   ]) {
     assert.ok(describeStationRejection(code).includes(fragment), code);
   }
+  assert.ok(describeStationRejection(null, 401).includes('Sessão inválida'));
+  assert.ok(describeStationRejection(null, 403).includes('acesso a este evento não está disponível'));
+  assert.ok(describeStationRejection(null, 404).includes('atendimento ou recurso informado não foi encontrado'));
   const unknownStationMsg = describeStationRejection('RAW_INTERNAL_ERR');
   assert.ok(unknownStationMsg.includes('Operação recusada pelo servidor'));
   assert.equal(unknownStationMsg.includes('RAW_INTERNAL_ERR'), false);
-  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', network: true, code: null }).text.includes('Falha de conexão'));
+  for (const preCase of [
+    { kind: 'rejected', phase: 'precondition', network: true, code: null },
+    { kind: 'rejected', phase: 'precondition', timeout: true, network: true, transient: true, code: null },
+    { kind: 'rejected', phase: 'precondition', status: 503, transient: true, code: null },
+    { kind: 'rejected', phase: 'precondition', status: null, transient: true, code: null },
+  ]) {
+    const preFeedback = describeStationFeedback(preCase);
+    assert.equal(preFeedback.tone, 'warning');
+    assert.equal(preFeedback.text, 'Não foi possível verificar se a operação pode ser realizada. Nenhuma alteração foi enviada. Atualize os dados antes de tentar novamente.');
+  }
+  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', status: 403, transient: false, code: 'STAFF_EVENT_FORBIDDEN' }).text.includes('acesso a este evento não está disponível'));
+  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', status: 401, transient: false, code: null }).text.includes('Sessão inválida'));
+  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', status: 404, transient: false, code: null }).text.includes('atendimento ou recurso informado não foi encontrado'));
+  assert.ok(describeStationFeedback({ kind: 'rejected', phase: 'precondition', status: 409, transient: false, code: 'STATION_UNAVAILABLE' }).text.includes('estação não está disponível'));
   assert.ok(describeStationFeedback({ kind: 'blocked' }).text.includes('estado operacional mudou'));
   assert.ok(describeStationFeedback({ kind: 'confirmed_cleanup_pending' }).text.includes('reconhecimento local ainda não foi concluído'));
   assert.ok(describeStationFeedback({ kind: 'rejected_cleanup_pending' }).text.includes('Recusa registrada pelo servidor'));
@@ -1146,4 +1189,164 @@ test('STAFF-04 tela Controle de Entrada: recuperação automática após erro in
   assert.ok(h.hasText('Operação recusada pelo servidor.'));
   assert.equal(h.hasText('INTERNAL_UNMAPPED_ERR'), false);
   h.unmount();
+});
+
+test('STAFF04-AUD-03: StaffEntryControlRealScreen distingue cancelamento local, reconhecimento local e processamento no servidor', { skip }, async () => {
+  const entrySlot = `arenago.staff.entry.${USER_1}`;
+  let deleteDeferred = null;
+  let postDeferred = null;
+  let currentState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+  });
+
+  const reservedSeed = new Map([
+    [entrySlot, JSON.stringify({
+      userId: USER_1,
+      sessionId: SESSION_1,
+      eventId: EV_A,
+      key: '50000000-0000-4000-8000-000000000093',
+      kind: 'call',
+      participationId: null,
+      callId: null,
+      enabled: null,
+      phase: 'reserved',
+    })],
+  ]);
+
+  const h = createEntryScreenHarness({
+    secureInitial: reservedSeed,
+    onSecureDelete: async () => {
+      if (deleteDeferred) {
+        const d = deleteDeferred;
+        deleteDeferred = null;
+        await d.promise;
+      }
+    },
+    onGet: async () => currentState,
+    onPost: async () => {
+      if (postDeferred) {
+        const d = postDeferred;
+        postDeferred = null;
+        return d.promise;
+      }
+      return {};
+    },
+  });
+
+  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+  await h.mount();
+
+  // 1. Cancelling: mensagem explícita de descarte local (sem afirmar envio ao servidor)
+  deleteDeferred = deferred();
+  const pendingDeleteAck = deleteDeferred;
+  let pCancel;
+  await h.act(async () => {
+    pCancel = h.handler('Descartar solicitação não enviada')();
+  });
+  assert.ok(h.hasExactText('Descartando solicitação não enviada...'));
+  assert.equal(h.hasText('Processando operação no servidor...'), false);
+  await h.act(async () => {
+    pendingDeleteAck.resolve();
+    await pCancel;
+  });
+
+  // 2. Acknowledging vs Mutating: POST retorna terminal -> deleteDeferred segura etapa de reconhecimento local
+  postDeferred = deferred();
+  deleteDeferred = deferred();
+  const ackDeleteDeferred = deleteDeferred;
+  await h.press('Confirmar entrada');
+  let pMutate;
+  await h.act(async () => {
+    pMutate = h.handler('CONFIRMAR ALTERAÇÃO')();
+  });
+  assert.ok(h.hasExactText('Processando operação no servidor...'));
+
+  currentState = buildState({ enabled: true, pendingCall: null, waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }] });
+  await h.act(async () => {
+    postDeferred.resolve({
+      eventId: EV_A,
+      call: { id: CALL_1, participationId: PART_1, status: 'confirmed', calledAt: AT, resolvedAt: AT },
+      participation: { id: PART_1, status: 'active', arenaEnteredAt: AT, finishReason: null, externalQueueOrder: '1' },
+      requeued: false,
+    });
+    await pMutate;
+  });
+  assert.ok(h.hasExactText('Finalizando reconhecimento seguro local...'));
+  await h.act(async () => {
+    ackDeleteDeferred.resolve();
+  });
+  await flush();
+  assert.ok(h.hasText('Entrada confirmada pelo servidor.'));
+  h.unmount();
+});
+
+test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga imediatamente sem GET extra; 404 com GET 200 preserva acesso', { skip }, async () => {
+  const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const pendingState = buildState({
+    enabled: true,
+    pendingCall: { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT },
+    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+  });
+
+  // 1. 403 e 401 em mutação notificam onAccessDenied e limpam dados imediatamente com 0 GETs pós-POST
+  for (const [httpStatus, code, expectedKind, expectedAlert] of [
+    [403, 'STAFF_EVENT_FORBIDDEN', 'denied', 'Acesso ao evento indisponível'],
+    [401, 'SESSION_REVOKED', 'session', 'Sessão inválida'],
+  ]) {
+    let deniedKind = null;
+    let posted = false;
+    let getsAfterPost = 0;
+    const h = createEntryScreenHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onGet: async () => {
+        if (posted) getsAfterPost += 1;
+        return pendingState;
+      },
+      onPost: async () => {
+        posted = true;
+        throw Object.assign(new Error('auth error'), { status: httpStatus, code });
+      },
+    });
+    await h.mount();
+    await h.press('Confirmar entrada');
+    await h.press('CONFIRMAR ALTERAÇÃO');
+    await flush(h);
+    assert.equal(deniedKind, expectedKind);
+    assert.equal(getsAfterPost, 0, `${httpStatus}: não dispara GET extra após negativa em mutação`);
+    assert.equal(h.hasText('Ana Clara'), false);
+    assert.equal(h.hasText('Lucas Ferreira'), false);
+    assert.ok(h.hasText(expectedAlert));
+    assert.equal(h.getDeleteCalls(), 0, `${httpStatus}: recibo preservado no SecureStore`);
+    assert.equal(h.secureValues.size > 0, true);
+    h.unmount();
+  }
+
+  // 2. 404 RESOURCE_NOT_FOUND na mutação + GET 200 mantém tela ativa sem revogar o evento
+  let deniedOn404 = null;
+  let after404 = false;
+  const h404 = createEntryScreenHarness({
+    onAccessDenied: (kind) => { deniedOn404 = kind; },
+    onGet: async () => (
+      after404
+        ? buildState({ enabled: true, pendingCall: null, waiting: [] })
+        : pendingState
+    ),
+    onPost: async () => {
+      after404 = true;
+      throw Object.assign(new Error('not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
+    },
+  });
+  await h404.mount();
+  await h404.press('Confirmar entrada');
+  await h404.press('CONFIRMAR ALTERAÇÃO');
+  await flush(h404);
+  assert.equal(deniedOn404, null);
+  assert.ok(h404.hasText('A chamada ou recurso informado não foi encontrado no servidor. Confira o estado atualizado.'));
+  h404.unmount();
 });

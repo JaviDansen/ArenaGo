@@ -9,6 +9,7 @@ const ENTRY_REJECTION_MESSAGES = {
   ENTRY_CALL_REQUIRED: 'É necessário chamar um participante antes de executar esta ação.',
   ENTRY_CALL_NOT_PENDING: 'A chamada externa já não está pendente. Confira o estado atualizado.',
   EVENT_ENTRY_UNAVAILABLE: 'A operação na fila externa não é permitida no estado atual do evento.',
+  RESOURCE_NOT_FOUND: 'A chamada ou recurso informado não foi encontrado no servidor. Confira o estado atualizado.',
   STAFF_EVENT_FORBIDDEN: 'O acesso a este evento não está disponível.',
   FORBIDDEN: 'O acesso a este evento não está disponível.',
   SESSION_REVOKED: 'Sessão inválida. Entre novamente para continuar.',
@@ -22,11 +23,18 @@ const STATION_REJECTION_MESSAGES = {
   SERVICE_NOT_PENDING: 'A chamada já não está pendente. Atualize o atendimento antes de decidir a próxima ação.',
   EVENT_OPERATION_ENDED: 'A operação não é permitida no estado atual do evento.',
   QUEUE_ENTRY_NOT_WAITING: 'A fila mudou. Confira o próximo participante antes de continuar.',
+  RESOURCE_NOT_FOUND: 'O atendimento ou recurso informado não foi encontrado no servidor. Atualize e confira o estado atual.',
   STAFF_EVENT_FORBIDDEN: 'O acesso a este evento não está disponível.',
   FORBIDDEN: 'O acesso a este evento não está disponível.',
   SESSION_REVOKED: 'Sessão inválida. Entre novamente para continuar.',
   UNAUTHORIZED: 'Sessão inválida. Entre novamente para continuar.',
 };
+
+function formatSubjectText(subject, text) {
+  if (typeof subject !== 'string' || !subject.trim()) return text;
+  const trimmed = subject.trim();
+  return `${trimmed}: ${text.charAt(0).toLowerCase()}${text.slice(1)}`;
+}
 
 export function resolveStaffPollingIndicator({
   hidden = false,
@@ -38,65 +46,66 @@ export function resolveStaffPollingIndicator({
   recoverableError = false,
   unavailableError = false,
   intervalSeconds = 5,
+  subject = null,
 }) {
   if (hidden) return null;
   if (verifying) {
     return {
       tone: 'muted',
-      text: 'Atualização indisponível · verificando autorização',
+      text: formatSubjectText(subject, 'Atualização indisponível · verificando autorização'),
     };
   }
   if (loading) {
     return {
       tone: 'stale',
-      text: 'Atualização temporariamente pausada · carregamento em andamento',
+      text: formatSubjectText(subject, 'Atualização temporariamente pausada · carregamento em andamento'),
     };
   }
   if (stale) {
     if (!pollingEnabled || !visible) {
       return {
         tone: 'stale',
-        text: 'Dados desatualizados · atualização temporariamente pausada',
+        text: formatSubjectText(subject, 'Dados desatualizados · atualização temporariamente pausada'),
       };
     }
     return {
       tone: 'stale',
-      text: `Dados desatualizados · tentando atualizar a cada ${intervalSeconds}s`,
+      text: formatSubjectText(subject, `Dados desatualizados · tentando atualizar a cada ${intervalSeconds}s`),
     };
   }
   if (recoverableError) {
     if (pollingEnabled && visible) {
       return {
         tone: 'muted',
-        text: `Atualização indisponível · aguardando recuperação (a cada ${intervalSeconds}s)`,
+        text: formatSubjectText(subject, `Atualização indisponível · aguardando recuperação (a cada ${intervalSeconds}s)`),
       };
     }
     if (!visible) {
       return {
         tone: 'stale',
-        text: 'Atualização temporariamente pausada',
+        text: formatSubjectText(subject, 'Atualização temporariamente pausada'),
       };
     }
     return {
       tone: 'muted',
-      text: 'Atualização indisponível · aguardando recuperação',
+      text: formatSubjectText(subject, 'Atualização indisponível · aguardando recuperação manual'),
     };
   }
   if (unavailableError) {
     return {
       tone: 'muted',
-      text: 'Atualização indisponível · aguardando recuperação',
+      text: formatSubjectText(subject, 'Atualização indisponível · aguardando recuperação manual'),
     };
   }
   if (!pollingEnabled || !visible) {
     return {
       tone: 'stale',
-      text: 'Atualização temporariamente pausada',
+      text: formatSubjectText(subject, 'Atualização temporariamente pausada'),
     };
   }
   return {
     tone: 'active',
-    text: `Atualização automática ativa · a cada ${intervalSeconds}s`,
+    text: formatSubjectText(subject, `Atualização automática ativa · a cada ${intervalSeconds}s`),
   };
 }
 
@@ -126,10 +135,13 @@ export function describeEntryConfirmed(operation, result) {
   return 'Operação confirmada pelo servidor.';
 }
 
-export function describeEntryRejection(code) {
+export function describeEntryRejection(code, status = null) {
   if (typeof code === 'string' && Object.prototype.hasOwnProperty.call(ENTRY_REJECTION_MESSAGES, code)) {
     return ENTRY_REJECTION_MESSAGES[code];
   }
+  if (status === 401) return ENTRY_REJECTION_MESSAGES.UNAUTHORIZED;
+  if (status === 403) return ENTRY_REJECTION_MESSAGES.FORBIDDEN;
+  if (status === 404) return ENTRY_REJECTION_MESSAGES.RESOURCE_NOT_FOUND;
   return 'Operação recusada pelo servidor. Atualize o estado antes de tentar novamente.';
 }
 
@@ -139,7 +151,7 @@ export function describeEntryNotice(notice) {
     return describeEntryConfirmed(notice.operation, notice.outcome.result);
   }
   if (notice.outcome.kind === 'rejected') {
-    return describeEntryRejection(notice.outcome.code);
+    return describeEntryRejection(notice.outcome.code, notice.outcome.status);
   }
   return 'Operação finalizada pelo servidor.';
 }
@@ -162,10 +174,13 @@ export function describeStationConfirmed(result) {
   return 'Operação confirmada pelo servidor.';
 }
 
-export function describeStationRejection(code) {
+export function describeStationRejection(code, status = null) {
   if (typeof code === 'string' && Object.prototype.hasOwnProperty.call(STATION_REJECTION_MESSAGES, code)) {
     return STATION_REJECTION_MESSAGES[code];
   }
+  if (status === 401) return STATION_REJECTION_MESSAGES.UNAUTHORIZED;
+  if (status === 403) return STATION_REJECTION_MESSAGES.FORBIDDEN;
+  if (status === 404) return STATION_REJECTION_MESSAGES.RESOURCE_NOT_FOUND;
   return 'Operação recusada pelo servidor. Atualize o atendimento antes de decidir a próxima ação.';
 }
 
@@ -174,14 +189,44 @@ export function describeStationFeedback(feedback) {
   if (feedback.kind === 'confirmed') {
     return { tone: 'success', text: describeStationConfirmed(feedback.result) };
   }
-  if (feedback.kind === 'rejected') {
-    if (feedback.phase === 'precondition' && feedback.network && !feedback.code) {
+  if (feedback.kind === 'rejected' && feedback.phase === 'precondition') {
+    if (feedback.status === 401) {
       return {
         tone: 'warning',
-        text: 'Falha de conexão ao verificar a operação. Nenhuma alteração foi enviada. Atualize o atendimento antes de tentar novamente.',
+        text: 'Sessão inválida ao verificar a operação. Nenhuma alteração foi enviada. Entre novamente para continuar.',
       };
     }
-    return { tone: 'warning', text: describeStationRejection(feedback.code) };
+    if (feedback.status === 403) {
+      return {
+        tone: 'warning',
+        text: 'O acesso a esta operação não está disponível. Nenhuma alteração foi enviada.',
+      };
+    }
+    if (feedback.status === 404) {
+      return {
+        tone: 'warning',
+        text: 'Não foi possível localizar o recurso para verificar a operação. Nenhuma alteração foi enviada. Atualize antes de tentar novamente.',
+      };
+    }
+    if (
+      feedback.transient
+      || feedback.network
+      || feedback.timeout
+      || !Number.isInteger(feedback.status)
+      || feedback.status >= 500
+    ) {
+      return {
+        tone: 'warning',
+        text: 'Não foi possível verificar se a operação pode ser realizada. Nenhuma alteração foi enviada. Atualize os dados antes de tentar novamente.',
+      };
+    }
+    return {
+      tone: 'warning',
+      text: `${describeStationRejection(feedback.code, feedback.status)} Nenhuma alteração foi enviada.`,
+    };
+  }
+  if (feedback.kind === 'rejected') {
+    return { tone: 'warning', text: describeStationRejection(feedback.code, feedback.status) };
   }
   if (feedback.kind === 'blocked') {
     return {

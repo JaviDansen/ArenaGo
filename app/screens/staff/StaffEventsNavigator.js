@@ -250,6 +250,7 @@ function StaffEventsProvider({ children }) {
     events: current ? snapshot.events : [],
     selected: current ? snapshot.selected : null,
     error: current ? snapshot.error : null,
+    accessLocked: current ? Boolean(snapshot.accessLocked) : false,
     refresh: store.refresh,
     refreshSilent: store.refreshSilent,
     select: store.select,
@@ -269,9 +270,10 @@ function StaffEventsScreen({ navigation }) {
     const subscription = AppState?.addEventListener?.('change', setAppState);
     return () => subscription?.remove?.();
   }, []);
-  const recoverableEventsError = staff.status === 'error'
+  const recoverableEventsError = !staff.accessLocked
+    && staff.status === 'error'
     && (staff.error === 'network' || staff.error === 'unavailable');
-  const canPollEvents = staff.status === 'ready' || recoverableEventsError;
+  const canPollEvents = !staff.accessLocked && (staff.status === 'ready' || recoverableEventsError);
   useStaffPolling(canPollEvents, staff.refreshSilent, 60000);
   const eventsPollingIndicator = resolveStaffPollingIndicator({
     hidden: staff.status === 'error' && (staff.error === 'session' || staff.error === 'denied'),
@@ -280,6 +282,7 @@ function StaffEventsScreen({ navigation }) {
     visible: focused && appState === 'active',
     stale: staff.error === 'stale',
     recoverableError: recoverableEventsError,
+    unavailableError: Boolean(staff.accessLocked && staff.status === 'error'),
     intervalSeconds: 60,
   });
   const messages = {
@@ -386,7 +389,7 @@ function StaffEventsScreen({ navigation }) {
 
 function StaffEventHomeScreen({ navigation }) {
   const staff = useContext(StaffEventsContext);
-  useStaffPolling(Boolean(staff.selected && staff.status === 'ready'), staff.refreshSilent, 60000, staff.selected?.id);
+  useStaffPolling(Boolean(staff.selected && staff.status === 'ready' && !staff.accessLocked), staff.refreshSilent, 60000, staff.selected?.id);
   const [section, setSection] = useState('panel');
   const [stationId, setStationId] = useState(null);
   const stationVisitGenRef = useRef(0);
@@ -409,7 +412,7 @@ function StaffEventHomeScreen({ navigation }) {
       staff.clearSelection();
     }
   }), [navigation, staff.clearSelection, staff.getSelected, section, returnToPanel]);
-  const selected = staff.isCurrent() ? staff.selected : null;
+  const selected = staff.isCurrent() && !staff.accessLocked ? staff.selected : null;
   const isSubsection = Boolean(selected && section !== 'panel');
 
   function goBack() {
@@ -437,6 +440,14 @@ function StaffEventHomeScreen({ navigation }) {
           openStation={openStation}
           stationVisitGenRef={stationVisitGenRef}
         />
+      ) : (staff.status === 'error' && (staff.error === 'session' || staff.error === 'denied')) || staff.accessLocked ? (
+        <View style={styles.errorCard}>
+          <Text accessibilityRole="alert" style={styles.alertMessage}>
+            {staff.error === 'session'
+              ? 'Não foi possível confirmar sua sessão. Entre novamente ou tente atualizar.'
+              : 'Acesso Staff indisponível para esta conta. Volte aos eventos ou procure o responsável.'}
+          </Text>
+        </View>
       ) : (
         <View style={styles.emptyCard}>
           <Text style={styles.cardTitle}>Selecione um evento</Text>
@@ -628,6 +639,18 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     5000,
     `${event.id}:${stationId}:${epoch}:${revision}`,
   );
+  const eventPhasePollingEnabled = section === 'panel'
+    && store.isCurrent(snapshot.context)
+    && !accessLost
+    && !snapshot.accessUncertain
+    && !snapshot.verifyingAccess
+    && Boolean(staff.selected && staff.status === 'ready' && !staff.accessLocked);
+  useStaffPolling(
+    eventPhasePollingEnabled,
+    () => staff.refreshSilent(),
+    60000,
+    `${event.id}:events:${epoch}:${revision}`,
+  );
   if (!store.isCurrent(snapshot.context)) return null;
 
   const messages = {
@@ -709,10 +732,10 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     || snapshot.stationStatus === 'idle'
     || snapshot.experienceStatus === 'idle'
     || snapshot.entryStatus === 'idle';
-  const panelStale = snapshot.stationError === 'stale'
+  const operationalStale = snapshot.stationError === 'stale'
     || snapshot.experienceError === 'stale'
-    || snapshot.entryError === 'stale'
-    || staff.error === 'stale';
+    || snapshot.entryError === 'stale';
+  const eventPhaseStale = staff.error === 'stale';
   const panelRecoverableError = !accessLost
     && !snapshot.verifyingAccess
     && !snapshot.accessUncertain
@@ -726,10 +749,21 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
     loading: panelLoading,
     pollingEnabled: panelPollingEnabled,
     visible: focused && appState === 'active',
-    stale: panelStale,
+    stale: operationalStale,
     recoverableError: panelRecoverableError,
     unavailableError: Boolean(snapshot.accessUncertain),
     intervalSeconds: 5,
+  });
+  const eventPhaseIndicator = resolveStaffPollingIndicator({
+    hidden: accessLost,
+    loading: staff.status === 'loading',
+    pollingEnabled: eventPhasePollingEnabled,
+    visible: focused && appState === 'active',
+    stale: eventPhaseStale,
+    recoverableError: !staff.accessLocked && staff.status === 'error' && (staff.error === 'network' || staff.error === 'unavailable'),
+    unavailableError: Boolean(snapshot.accessUncertain && !snapshot.verifyingAccess) || Boolean(staff.accessLocked),
+    intervalSeconds: 60,
+    subject: 'Eventos e fase',
   });
 
   return (
@@ -745,9 +779,16 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           <Text style={styles.message}>Verificando acesso ao evento...</Text>
         </View>
       )}
-      {(snapshot.queueError === 'stale' || (section === 'panel' && panelStale)) && (
+      {(snapshot.queueError === 'stale' || (section === 'panel' && operationalStale)) && (
         <View style={styles.warningCard}>
           <Text accessibilityRole="alert" style={styles.warningMessage}>{messages.stale}</Text>
+        </View>
+      )}
+      {section === 'panel' && eventPhaseStale && (
+        <View style={styles.warningCard}>
+          <Text accessibilityRole="alert" style={styles.warningMessage}>
+            Dados de eventos e fase possivelmente desatualizados. Volte aos eventos para atualizar antes de operar.
+          </Text>
         </View>
       )}
 
@@ -920,6 +961,7 @@ function StaffEventDashboard({ event, staff, section, setSection, stationId, set
           )}
 
           <StaffPollingStatusPill indicator={panelPollingIndicator} />
+          <StaffPollingStatusPill indicator={eventPhaseIndicator} />
 
           <Button
             label="Atualizar estações"

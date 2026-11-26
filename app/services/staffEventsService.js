@@ -21,7 +21,7 @@ export async function fetchStaffEvents(client) {
   return parseStaffEvents(await client.get('/staff/events', { auth: true }));
 }
 
-const empty = () => ({ identity: null, status: 'idle', events: [], selected: null, error: null });
+const empty = () => ({ identity: null, status: 'idle', events: [], selected: null, error: null, accessLocked: false });
 const sameIdentity = (a, b) => Boolean(a && b && a.userId === b.userId &&
   a.epoch === b.epoch && a.revision === b.revision);
 const eventsErrorKind = (error) => (
@@ -40,14 +40,25 @@ export function createStaffEventsStore({ client, getIdentity }) {
   let state = empty();
   let generation = 0;
   let silentFlight = false;
+  let revokedKind = null;
   const listeners = new Set();
   const publish = (next) => { state = next; listeners.forEach((listener) => listener(state)); };
   const isCurrent = (identity = state.identity) => sameIdentity(identity, state.identity) &&
     sameIdentity(identity, getIdentity());
 
+  function lockAuthorization(kind, identity) {
+    if (!isCurrent(identity)) return;
+    const authError = kind === 'session' ? 'session' : 'denied';
+    generation += 1;
+    silentFlight = false;
+    revokedKind = authError;
+    publish({ ...state, status: 'error', events: [], selected: null, error: authError, accessLocked: true });
+  }
+
   function setIdentity(identity) {
     generation += 1;
     silentFlight = false;
+    revokedKind = null;
     publish(identity ? { ...empty(), identity, status: 'loading' } : empty());
   }
 
@@ -56,37 +67,46 @@ export function createStaffEventsStore({ client, getIdentity }) {
     if (!isCurrent(identity)) return;
     const requestGeneration = ++generation;
     silentFlight = false;
-    publish({ ...state, status: 'loading', events: [], selected: null, error: null });
+    publish({ ...state, status: 'loading', events: [], selected: null, error: null, accessLocked: Boolean(revokedKind) });
     try {
       const events = await fetchStaffEvents(client);
       if (requestGeneration !== generation || !isCurrent(identity)) return;
-      publish({ ...state, status: 'ready', events, selected: null, error: null });
+      revokedKind = null;
+      publish({ ...state, status: 'ready', events, selected: null, error: null, accessLocked: false });
     } catch (error) {
-      if (requestGeneration !== generation || !isCurrent(identity)) return;
+      if (!isCurrent(identity)) return;
       const kind = eventsErrorKind(error);
-      publish({ ...state, status: 'error', events: [], selected: null, error: kind });
+      if (kind === 'session' || kind === 'denied') {
+        lockAuthorization(kind, identity);
+        return;
+      }
+      if (requestGeneration !== generation) return;
+      publish({ ...state, status: 'error', events: [], selected: null, error: kind, accessLocked: Boolean(revokedKind) });
     }
   }
 
   async function refreshSilent() {
-    const canRetry = state.status === 'error' && isRecoverableEventsError(state.error);
-    if (silentFlight || !isCurrent() || (state.status !== 'ready' && !canRetry)) return;
+    const canRetry = !revokedKind && state.status === 'error' && isRecoverableEventsError(state.error);
+    if (silentFlight || !isCurrent() || revokedKind || (state.status !== 'ready' && !canRetry)) return;
     const identity = state.identity, requestGeneration = generation, wasReady = state.status === 'ready';
     silentFlight = true;
     try {
       const events = await fetchStaffEvents(client);
-      if (requestGeneration !== generation || !isCurrent(identity)) return;
+      if (requestGeneration !== generation || !isCurrent(identity) || revokedKind) return;
       const selected = state.selected ? events.find(item => item.id === state.selected.id) ?? null : null;
-      publish({ ...state, status: 'ready', events, selected, error: null });
+      publish({ ...state, status: 'ready', events, selected, error: null, accessLocked: false });
     } catch (error) {
-      if (requestGeneration !== generation || !isCurrent(identity)) return;
+      if (!isCurrent(identity)) return;
       const kind = eventsErrorKind(error);
       if (kind === 'session' || kind === 'denied') {
-        publish({ ...state, events: [], selected: null, status: 'error', error: kind });
-      } else if (wasReady) {
+        lockAuthorization(kind, identity);
+        return;
+      }
+      if (requestGeneration !== generation || revokedKind) return;
+      if (wasReady) {
         publish({ ...state, error: 'stale' });
       } else {
-        publish({ ...state, status: 'error', events: [], selected: null, error: kind });
+        publish({ ...state, status: 'error', events: [], selected: null, error: kind, accessLocked: false });
       }
     } finally {
       if (requestGeneration === generation) silentFlight = false;
@@ -94,7 +114,7 @@ export function createStaffEventsStore({ client, getIdentity }) {
   }
 
   function select(eventId) {
-    if (!isCurrent() || state.status !== 'ready') return false;
+    if (!isCurrent() || revokedKind || state.accessLocked || state.status !== 'ready') return false;
     const event = state.events.find((item) => item.id === eventId);
     if (!event) return false;
     publish({ ...state, selected: event });

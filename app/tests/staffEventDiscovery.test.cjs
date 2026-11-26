@@ -1252,3 +1252,250 @@ test('STAFF-04 UI: indicadores honestos de polling (60s/5s), recuperação autom
     rig.dispose();
   }
 });
+
+test('STAFF04-AUD-02: negativa 401/403 concorrente com refresh bloqueia 200 atrasado e 503 posterior, isola contas e limpa painel dependente', async () => {
+  // Parte A: contrato da store createStaffEventsStore em corridas e troca de identidade
+  for (const [httpStatus, expectedError] of [
+    [403, 'denied'],
+    [401, 'session'],
+  ]) {
+    let current = identity('u-1', 1, 1);
+    let calls = 0;
+    const queueResponses = [];
+    const store = createStaffEventsStore({
+      client: {
+        get: async () => {
+          calls += 1;
+          const next = queueResponses.shift();
+          return next();
+        },
+      },
+      getIdentity: () => current,
+    });
+
+    store.setIdentity(current);
+    queueResponses.push(async () => ({ events: [event] }));
+    await store.refresh();
+    assert.equal(store.select(event.id), true);
+    assert.equal(store.getSnapshot().accessLocked, false);
+
+    // Refresh B (mais novo) e RefreshSilent A (mais antigo) concorrem na mesma identidade
+    const silentA = deferred();
+    const refreshB = deferred();
+    queueResponses.push(() => silentA.promise);
+    queueResponses.push(() => refreshB.promise);
+
+    const pSilentA = store.refreshSilent();
+    const pRefreshB = store.refresh();
+
+    // Polling A retorna 401/403 mesmo com generation avançada por Refresh B -> trava imediatamente
+    silentA.reject(Object.assign(new Error('auth-lost'), { status: httpStatus }));
+    await pSilentA;
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().accessLocked, true);
+    assert.equal(store.getSnapshot().events.length, 0);
+    assert.equal(store.getSnapshot().selected, null);
+    assert.equal(store.select(event.id), false);
+
+    // 200 atrasado de Refresh B NÃO reabilita nem restaura eventos
+    refreshB.resolve({ events: [event] });
+    await pRefreshB;
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().accessLocked, true);
+    assert.equal(store.getSnapshot().events.length, 0);
+    assert.equal(store.getSnapshot().selected, null);
+
+    // Nova tentativa manual que recebe 503 NÃO desbloqueia refreshSilent nem seleção
+    queueResponses.push(async () => { throw Object.assign(new Error('unavailable'), { status: 503 }); });
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, 'unavailable');
+    assert.equal(store.getSnapshot().accessLocked, true);
+
+    const callsBeforeSilent = calls;
+    await store.refreshSilent();
+    assert.equal(calls, callsBeforeSilent, 'refreshSilent permanece bloqueado enquanto accessLocked=true');
+
+    // Somente nova confirmação 200 legítima desbloqueia e retoma refreshSilent
+    queueResponses.push(async () => ({ events: [event] }));
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'ready');
+    assert.equal(store.getSnapshot().accessLocked, false);
+    assert.equal(store.getSnapshot().events.length, 1);
+
+    // Troca de conta limpa trava anterior e descarta 403 tardio da conta antiga
+    const delayedOldAuth = deferred();
+    queueResponses.push(() => delayedOldAuth.promise);
+    const pOldAccount = store.refresh();
+    current = identity('u-2', 2, 1);
+    store.setIdentity(current);
+    queueResponses.push(async () => ({ events: [event] }));
+    await store.refresh();
+    delayedOldAuth.reject(Object.assign(new Error('stale-403'), { status: 403 }));
+    await pOldAccount;
+    assert.equal(store.getSnapshot().status, 'ready');
+    assert.equal(store.getSnapshot().accessLocked, false);
+  }
+
+  // Parte B: UI integrada do navegador Staff desmonta painel dependente ao receber 403 no polling de eventos
+  let eventsMode = 'ok';
+  const rig = createStaffUiHarness({
+    initialAuth: makeAuthIdentity('u-1', 1, 1),
+    onGet: (url) => {
+      if (url === '/staff/events') {
+        if (eventsMode === '403') return Promise.reject(Object.assign(new Error('forbidden'), { status: 403 }));
+        if (eventsMode === '503') return Promise.reject(Object.assign(new Error('503'), { status: 503 }));
+        return Promise.resolve({
+          events: [{ id: EV_A, name: 'Arena STAFF-04 AUD02', status: 'open', effectivePhase: 'open' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/stations`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences`) {
+        return Promise.resolve({ eventId: EV_A, experiences: [{ id: EXP_1, name: 'Just Dance' }] });
+      }
+      if (url === `/staff/events/${EV_A}/entry-control`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 0,
+          waiting: [],
+          pendingCall: null,
+        });
+      }
+      return Promise.reject(new Error(`URL inesperada: ${url}`));
+    },
+  });
+
+  try {
+    await rig.mount();
+    await rig.press('Selecionar evento Arena STAFF-04 AUD02');
+    await rig.settle();
+    assert.ok(rig.hasText('Just Dance'));
+    assert.ok(rig.hasText('Estação 01'));
+
+    // 403 em polling de eventos enquanto o StaffEventDashboard está aberto limpa seleção e telas filhas
+    eventsMode = '403';
+    await rig.triggerEventsPolling();
+    assert.ok(!rig.hasText('Just Dance'), 'experiências protegidas removidas após perda de acesso aos eventos');
+    assert.ok(!rig.hasText('Estação 01'), 'estações protegidas removidas após perda de acesso aos eventos');
+    assert.ok(!rig.hasText('Controle de Entrada'));
+    assert.ok(rig.hasText('Acesso Staff indisponível para esta conta. Volte aos eventos ou procure o responsável.'));
+    assert.equal(rig.latestEventsPolling()?.enabled, false);
+
+    // Ao voltar e tentar atualização manual com 503, indicador afirma recuperação manual (sem 60s automático)
+    await rig.press('Voltar aos eventos');
+    eventsMode = '503';
+    await rig.press('Atualizar eventos');
+    await rig.settle();
+    assert.ok(rig.hasText('Atualização indisponível · aguardando recuperação manual'));
+    assert.ok(!rig.hasText('a cada 60s'));
+    assert.equal(rig.latestEventsPolling()?.enabled, false);
+
+    // Confirmação 200 restaura normalmente
+    eventsMode = 'ok';
+    await rig.press('Atualizar eventos');
+    await rig.settle();
+    assert.ok(rig.hasText('Arena STAFF-04 AUD02'));
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 60s'));
+  } finally {
+    rig.dispose();
+  }
+});
+
+test('STAFF04-AUD-05: Painel Operacional separa indicador de 5s do indicador de Eventos e fase (60s) em todos os estados de stale e pausa', async () => {
+  let eventsMode = 'ok';
+  let stationsMode = 'ok';
+  const rig = createStaffUiHarness({
+    initialAuth: makeAuthIdentity('u-1', 1, 1),
+    onGet: (url) => {
+      if (url === '/staff/events') {
+        if (eventsMode === '503') return Promise.reject(Object.assign(new Error('503'), { status: 503 }));
+        return Promise.resolve({
+          events: [{ id: EV_A, name: 'Arena STAFF-04 AUD05', status: 'open', effectivePhase: 'open' }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/stations`) {
+        if (stationsMode === 'network') return Promise.reject(Object.assign(new Error('offline'), { isNetworkError: true }));
+        return Promise.resolve({
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Estação 01', availability: 'available', pendingServiceSessionId: null }],
+        });
+      }
+      if (url === `/staff/events/${EV_A}/experiences`) {
+        return Promise.resolve({ eventId: EV_A, experiences: [{ id: EXP_1, name: 'Just Dance' }] });
+      }
+      if (url === `/staff/events/${EV_A}/entry-control`) {
+        return Promise.resolve({
+          eventId: EV_A,
+          externalQueueEnabled: true,
+          canManage: true,
+          observedAt: '2026-11-17T15:00:00.000Z',
+          canCall: false,
+          canConfirm: false,
+          canMarkAbsent: false,
+          canRemove: false,
+          waitingCount: 0,
+          waiting: [],
+          pendingCall: null,
+        });
+      }
+      return Promise.reject(new Error(`URL inesperada: ${url}`));
+    },
+  });
+
+  try {
+    await rig.mount();
+    await rig.press('Selecionar evento Arena STAFF-04 AUD05');
+    await rig.settle();
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 5s'));
+    assert.ok(rig.hasText('Eventos e fase: atualização automática ativa · a cada 60s'));
+
+    // Somente Eventos e fase fica stale: indicador de 5s NÃO afirma que ops está desatualizado nem que Eventos tenta a cada 5s
+    eventsMode = '503';
+    await rig.triggerEventsPolling();
+    assert.ok(rig.hasText('Atualização automática ativa · a cada 5s'));
+    assert.ok(rig.hasText('Eventos e fase: dados desatualizados · tentando atualizar a cada 60s'));
+    assert.ok(rig.hasText('Dados de eventos e fase possivelmente desatualizados. Volte aos eventos para atualizar antes de operar.'));
+    assert.ok(!rig.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    assert.ok(!rig.hasText('Dados operacionais possivelmente desatualizados'));
+
+    // Eventos recupera e apenas operações (estações) fica stale
+    eventsMode = 'ok';
+    await rig.triggerEventsPolling();
+    stationsMode = 'network';
+    await rig.triggerPolling(':stations:');
+    assert.ok(rig.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    assert.ok(rig.hasText('Dados operacionais possivelmente desatualizados'));
+    assert.ok(rig.hasText('Eventos e fase: atualização automática ativa · a cada 60s'));
+    assert.ok(!rig.hasText('Eventos e fase: dados desatualizados'));
+
+    // Ambos stale simultaneamente mantêm cadências honestas separadas e pausa coerente em segundo plano
+    eventsMode = '503';
+    await rig.triggerEventsPolling();
+    assert.ok(rig.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    assert.ok(rig.hasText('Eventos e fase: dados desatualizados · tentando atualizar a cada 60s'));
+
+    await rig.setAppState('background');
+    assert.ok(rig.hasText('Dados desatualizados · atualização temporariamente pausada'));
+    assert.ok(rig.hasText('Eventos e fase: dados desatualizados · atualização temporariamente pausada'));
+
+    await rig.setAppState('active');
+    assert.ok(rig.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    assert.ok(rig.hasText('Eventos e fase: dados desatualizados · tentando atualizar a cada 60s'));
+  } finally {
+    rig.dispose();
+  }
+});

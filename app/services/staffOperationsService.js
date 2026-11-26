@@ -267,7 +267,7 @@ export function classifyStaffOperationError(error) {
   return { kind: 'pending_reconciliation', status, code };
 }
 
-export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent }) {
+export function createStaffOperationsCoordinator({ client, storage, createKey, isCurrent, onStage = null }) {
   if (typeof isCurrent !== 'function' || typeof createKey !== 'function' || storage?.isPersistent !== true ||
       ['get', 'reserve', 'dispatch', 'recordTerminal', 'cancelReserved', 'clear', 'acknowledge']
         .some((name) => typeof storage?.[name] !== 'function'))
@@ -299,11 +299,25 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
       : { kind: existing.phase === 'reserved' ? 'reserved' : 'pending_reconciliation' };
     if (!existing) {
       let possible;
-      try { possible = await check(); }
+      try {
+        if (typeof onStage === 'function') onStage('precondition', context, desired);
+        possible = await check();
+      }
       catch (error) {
         alive(context, desired);
-        return { kind: 'rejected', phase: 'precondition', status: error?.status ?? null,
-          code: error?.code ?? null, network: Boolean(error?.isNetworkError) };
+        const status = Number.isInteger(error?.status) ? error.status : null;
+        const timeout = Boolean(error?.isTimeout);
+        const network = Boolean(error?.isNetworkError || timeout);
+        const transient = network || status === null || status >= 500;
+        return {
+          kind: 'rejected',
+          phase: 'precondition',
+          status,
+          code: typeof error?.code === 'string' ? error.code : null,
+          network,
+          timeout,
+          transient,
+        };
       }
       alive(context, desired);
       if (!possible) return { kind: 'blocked' };
@@ -324,6 +338,7 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
     if (!dispatched) return { kind: 'pending_reconciliation' };
     let outcome;
     try {
+      if (typeof onStage === 'function') onStage('mutating', context, desired);
       const result = await operation(intent.key);
       outcome = { kind: 'confirmed', result };
     } catch (error) {

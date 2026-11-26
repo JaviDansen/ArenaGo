@@ -4027,3 +4027,384 @@ test('STAFF-04 integração ponta a ponta: mutação incerta preserva intenção
     app.dispose();
   }
 });
+
+test('STAFF04-AUD-01/02/04/05 integração ponta a ponta: poll em voo sem sobreposição com modal cancelado, 5s vs 60s, accessUncertain manual e 403 em Eventos', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const expId = '33333333-3333-4333-8333-333333333331';
+  const stationId = '44444444-4444-4444-8444-444444444431';
+  const queueEntryId = '77777777-7777-4777-8777-777777777731';
+  const serviceSessId = '88888888-8888-4888-8888-888888888831';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000011', roles: ['staff'] };
+  const secureValues = new Map();
+
+  let eventsMode = 'ok';
+  let deferNextOpGet = false;
+  let opDeferred = null;
+  let op404AndStations500 = false;
+  let opGets = 0;
+  let stationsGets = 0;
+  let stationPending = {
+    serviceSessionId: serviceSessId,
+    queueEntryId,
+    displayName: 'Diego Costa',
+    calledAt: at,
+  };
+
+  const makeOpState = () => ({
+    eventId: staffEvent.id,
+    experienceId: expId,
+    stationId,
+    availability: 'available',
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: stationPending,
+  });
+
+  const origSetTimeout = globalThis.setTimeout;
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+        deleteItemAsync: async (key) => { secureValues.delete(key); },
+      },
+      http: async (route, options) => {
+        if (route === '/staff/events') {
+          if (eventsMode === '503') return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+          if (eventsMode === '403') return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+          return { events: [staffEvent] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences`) {
+          return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/stations`) {
+          stationsGets += 1;
+          if (op404AndStations500) return { statusCode: 500, body: { code: 'INTERNAL_SERVER_ERROR' } };
+          return {
+            eventId: staffEvent.id,
+            stations: [{
+              id: stationId,
+              experienceId: expId,
+              label: 'Cabine A',
+              availability: 'available',
+              pendingServiceSessionId: stationPending?.serviceSessionId ?? null,
+              pendingCalledAt: stationPending?.calledAt ?? null,
+            }],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/queue`) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expId,
+            waitingCount: 0,
+            canCallWaitingEntries: false,
+            firstWaitingQueueEntryId: null,
+            acceptingNewEntries: true,
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/entry-control`) {
+          return {
+            eventId: staffEvent.id,
+            externalQueueEnabled: true,
+            canManage: true,
+            observedAt: at,
+            pendingCall: null,
+            canCall: false,
+            canConfirm: false,
+            canMarkAbsent: false,
+            canRemove: false,
+            waitingCount: 0,
+            waiting: [],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/operational-state`) {
+          opGets += 1;
+          if (op404AndStations500) return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+          if (deferNextOpGet) {
+            deferNextOpGet = false;
+            let resolve;
+            const promise = new Promise((done) => { resolve = done; });
+            opDeferred = { resolve: () => resolve(makeOpState()) };
+            return promise;
+          }
+          return makeOpState();
+        }
+        if (route === `/staff/events/${staffEvent.id}/service-sessions/${serviceSessId}/complete` && options.method === 'POST') {
+          stationPending = null;
+          return { statusCode: 404, body: { code: 'RESOURCE_NOT_FOUND' } };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+
+    // AUD-05: indicadores separados de 5s e 60s; somente Eventos/fase fica stale sem contaminar 5s
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+    eventsMode = '503';
+    await app.tickTimers(60000);
+    assert.ok(app.hasExactText('Atualização automática ativa · a cada 5s'));
+    assert.ok(app.hasExactText('Eventos e fase: dados desatualizados · tentando atualizar a cada 60s'));
+    assert.ok(app.hasText('Dados de eventos e fase possivelmente desatualizados.'));
+    assert.ok(!app.hasText('Dados desatualizados · tentando atualizar a cada 5s'));
+    eventsMode = 'ok';
+    await app.tickTimers(60000);
+    assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
+
+    // AUD-01: polling com hook real em voo através de abertura + cancelamento de modal não gera sobreposição após 5s
+    await app.press('Selecionar estação Cabine A da experiência Arena VR');
+    assert.ok(app.hasText('Diego Costa'));
+    assert.equal(opGets, 1);
+
+    deferNextOpGet = true;
+    await app.tickTimers(5000);
+    assert.equal(opGets, 2);
+    assert.ok(opDeferred);
+
+    await app.press('Concluir experiência');
+    assert.equal(app.modals()[0].props.visible, true);
+    await app.press('Cancelar');
+    assert.equal(app.modals().length, 0);
+
+    await app.tickTimers(5000);
+    assert.equal(opGets, 2, 'alternância via modal durante voo pendente não duplica timer nem gera GET paralelo');
+
+    await app.act(async () => {
+      opDeferred.resolve();
+      await new Promise((resolve) => origSetTimeout(resolve, 0));
+    });
+    await app.tickTimers(5000);
+    assert.equal(opGets, 3);
+
+    // AUD-04 + AUD-05: 404 na resolução com GET 200 mantém estação e evento; 404 -> /stations 500 ativa recuperação manual
+    const stationsBefore404Complete = stationsGets;
+    await app.press('Concluir experiência');
+    await app.press('CONFIRMAR OPERAÇÃO');
+    assert.equal(stationsGets, stationsBefore404Complete + 1, 'pré-condição faz apenas 1 GET /stations sem disparo destrutivo após 404 de resolução');
+    assert.ok(app.hasText('O atendimento ou recurso informado não foi encontrado no servidor.'));
+
+    op404AndStations500 = true;
+    await app.press('Atualizar atendimento');
+    assert.ok(app.hasExactText('Atualização indisponível · aguardando recuperação manual'));
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasExactText('Atualização indisponível · aguardando recuperação manual'));
+    assert.ok(app.hasExactText('Eventos e fase: atualização indisponível · aguardando recuperação manual'));
+    const opGetsPaused = opGets;
+    await app.tickTimers(5000);
+    assert.equal(opGets, opGetsPaused);
+
+    // AUD-02: recuperação manual restaura painel, e 403 no polling de Eventos desmonta o painel dependente
+    op404AndStations500 = false;
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Arena VR'));
+    assert.ok(app.hasText('Cabine A'));
+
+    eventsMode = '403';
+    await app.tickTimers(60000);
+    assert.ok(!app.hasText('Arena VR'));
+    assert.ok(!app.hasText('Cabine A'));
+    assert.ok(app.hasText('Acesso Staff indisponível para esta conta. Volte aos eventos ou procure o responsável.'));
+  } finally {
+    app.dispose();
+  }
+});
+
+test('STAFF04-AUD-04 integração ponta a ponta: 403 em mutação de Estação e 401 em mutação do Controle de Entrada travam acesso imediato preservando SecureStore', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const expId = '33333333-3333-4333-8333-333333333341';
+  const stationId = '44444444-4444-4444-8444-444444444441';
+  const queueEntryId = '77777777-7777-4777-8777-777777777741';
+  const call1Id = 'dddddddd-dddd-4ddd-8ddd-000000000041';
+  const partAna = 'abcdef00-0000-4000-8000-000000000041';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000012', roles: ['staff'] };
+
+  // Cenário A: 403 no POST /call-next da Estação com GETs posteriores falhando 503
+  {
+    const secureValues = new Map();
+    let deleteCalls = 0;
+    let getsFail503 = false;
+    let postRevokeGets = 0;
+    let posted = false;
+
+    const app = createIntegration({
+      initialUser: staffUser,
+      control: {
+        realStaff: true,
+        manualTimers: true,
+        platformOS: 'android',
+        events: [staffEvent],
+        secureStore: {
+          isAvailableAsync: async () => true,
+          getItemAsync: async (key) => secureValues.get(key) ?? null,
+          setItemAsync: async (key, value) => { secureValues.set(key, value); },
+          deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
+        },
+        http: async (route, options) => {
+          if (route === '/staff/events') return { events: [staffEvent] };
+          if (route === `/staff/events/${staffEvent.id}/experiences`) {
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
+          }
+          if (route === `/staff/events/${staffEvent.id}/stations`) {
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return {
+              eventId: staffEvent.id,
+              stations: [{ id: stationId, experienceId: expId, label: 'Cabine A', availability: 'available', pendingServiceSessionId: null, pendingCalledAt: null }],
+            };
+          }
+          if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/queue`) {
+            return { eventId: staffEvent.id, experienceId: expId, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: queueEntryId, acceptingNewEntries: true };
+          }
+          if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/operational-state`) {
+            if (posted) postRevokeGets += 1;
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return {
+              eventId: staffEvent.id,
+              experienceId: expId,
+              stationId,
+              availability: 'available',
+              canCall: true,
+              waitingCount: 1,
+              waiting: [{ queueEntryId, displayName: 'Diego Costa', position: 1 }],
+              pending: null,
+            };
+          }
+          if (route === `/staff/events/${staffEvent.id}/entry-control`) {
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return { eventId: staffEvent.id, externalQueueEnabled: true, canManage: true, observedAt: at, pendingCall: null, canCall: false, canConfirm: false, canMarkAbsent: false, canRemove: false, waitingCount: 0, waiting: [] };
+          }
+          if (route.endsWith('/call-next') && options.method === 'POST') {
+            posted = true;
+            getsFail503 = true;
+            return { statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } };
+          }
+          return undefined;
+        },
+      },
+    });
+
+    try {
+      await app.mount();
+      await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+      await app.press('Selecionar evento Evento autorizado');
+      await app.press('Selecionar estação Cabine A da experiência Arena VR');
+      assert.ok(app.hasQueueRow(1, 'Diego Costa'));
+
+      await app.press('Chamar próximo');
+      assert.ok(!app.hasText('Diego Costa'));
+      assert.ok(app.hasText('Acesso à estação indisponível.'));
+      assert.equal(postRevokeGets, 0);
+      assert.equal(deleteCalls, 0);
+      assert.equal(secureValues.size > 0, true);
+
+      await app.tickTimers(5000);
+      assert.equal(postRevokeGets, 0);
+
+      await app.press('Voltar ao painel');
+      assert.ok(!app.hasText('Cabine A'));
+      assert.ok(app.hasText('SEM ACESSO'));
+      assert.equal(app.isDisabled('Controle de Entrada'), true);
+      await app.press('Atualizar estações');
+      assert.ok(app.hasText('SEM ACESSO'));
+      assert.equal(app.isDisabled('Controle de Entrada'), true);
+    } finally {
+      app.dispose();
+    }
+  }
+
+  // Cenário B: 401 no POST /confirm do Controle de Entrada trava imediatamente sem GET extra
+  {
+    const secureValues = new Map();
+    let deleteCalls = 0;
+    let getsFail503 = false;
+    let postRevokeEntryGets = 0;
+    let posted = false;
+
+    const app = createIntegration({
+      initialUser: staffUser,
+      control: {
+        realStaff: true,
+        manualTimers: true,
+        platformOS: 'ios',
+        events: [staffEvent],
+        secureStore: {
+          isAvailableAsync: async () => true,
+          getItemAsync: async (key) => secureValues.get(key) ?? null,
+          setItemAsync: async (key, value) => { secureValues.set(key, value); },
+          deleteItemAsync: async (key) => { deleteCalls += 1; secureValues.delete(key); },
+        },
+        http: async (route, options) => {
+          if (route === '/staff/events') return { events: [staffEvent] };
+          if (route === `/staff/events/${staffEvent.id}/experiences`) {
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
+          }
+          if (route === `/staff/events/${staffEvent.id}/stations`) {
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return { eventId: staffEvent.id, stations: [] };
+          }
+          if (route === `/staff/events/${staffEvent.id}/entry-control`) {
+            if (posted) postRevokeEntryGets += 1;
+            if (getsFail503) return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+            return {
+              eventId: staffEvent.id,
+              externalQueueEnabled: true,
+              canManage: true,
+              observedAt: at,
+              pendingCall: { id: call1Id, participationId: partAna, displayName: 'Ana', calledAt: at },
+              canCall: false,
+              canConfirm: true,
+              canMarkAbsent: true,
+              canRemove: true,
+              waitingCount: 0,
+              waiting: [],
+            };
+          }
+          if (route === `/staff/events/${staffEvent.id}/entry-control/calls/${call1Id}/confirm` && options.method === 'POST') {
+            posted = true;
+            getsFail503 = true;
+            return { statusCode: 401, body: { code: 'SESSION_REVOKED' } };
+          }
+          return undefined;
+        },
+      },
+    });
+
+    try {
+      await app.mount();
+      await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+      await app.press('Selecionar evento Evento autorizado');
+      await app.press('Controle de Entrada');
+      assert.ok(app.hasText('Ana'));
+
+      await app.press('Confirmar entrada');
+      await app.press('CONFIRMAR ALTERAÇÃO');
+      assert.ok(!app.hasText('Ana'));
+      assert.ok(app.hasText('Sessão inválida.'));
+      assert.equal(postRevokeEntryGets, 0);
+      assert.equal(deleteCalls, 0);
+      assert.equal(secureValues.size > 0, true);
+
+      await app.tickTimers(5000);
+      assert.equal(postRevokeEntryGets, 0);
+
+      await app.press('Voltar ao painel');
+      assert.ok(app.hasText('Não foi possível confirmar sua sessão.'));
+      assert.equal(app.isDisabled('Controle de Entrada'), true);
+    } finally {
+      app.dispose();
+    }
+  }
+});

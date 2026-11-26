@@ -107,6 +107,7 @@ function createStationHarness({
   onRefresh = () => {},
   onAccessDenied = () => {},
   onStationNotFound,
+  onSecureSet,
   secureInitial = new Map(),
   secureAvailable = true,
   getNow = () => Date.parse('2026-11-19T15:00:23.000Z'),
@@ -155,7 +156,10 @@ function createStationHarness({
       return {
         isAvailableAsync: async () => secureAvailable,
         getItemAsync: async (key) => secureValues.get(key) ?? null,
-        setItemAsync: async (key, value) => { secureValues.set(key, value); },
+        setItemAsync: async (key, value) => {
+          if (onSecureSet) await onSecureSet(key, value);
+          secureValues.set(key, value);
+        },
         deleteItemAsync: async (key) => { secureValues.delete(key); },
       };
     }
@@ -909,8 +913,458 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
     getMode = '404_then_500';
     await h.press('Atualizar atendimento');
     assert.equal(h.getPolling().enabled, false);
-    assert.ok(h.hasExactText('Atualização indisponível · aguardando recuperação'));
+    assert.ok(h.hasExactText('Atualização indisponível · aguardando recuperação manual'));
   } finally {
     h.dispose();
+  }
+});
+
+test('STAFF04-AUD-01: poll() em voo bloqueia reentrada, descarta resposta atrasada após refresh manual e respeita pausa em modal', { skip }, async () => {
+  let opGets = 0;
+  let deferredOp = null;
+  let accessDeniedKind = null;
+  const initialState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const updatedState = {
+    ...initialState,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_2, displayName: 'Camila Souza', position: 1 }],
+  };
+  const pendingState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+  let nextState = initialState;
+
+  const h = createStationHarness({
+    onAccessDenied: (kind) => {
+      accessDeniedKind = kind;
+      void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+    },
+    onGet: async (url) => {
+      if (url.endsWith('/operational-state')) {
+        opGets += 1;
+        if (deferredOp) {
+          const d = deferredOp.shift();
+          if (d) return d.promise;
+        }
+        return nextState;
+      }
+      return {};
+    },
+  });
+
+  try {
+    await h.mount();
+    assert.equal(opGets, 1);
+    assert.ok(h.hasQueueRow(1, 'Ana Clara'));
+
+    // 1. Dispara poll 1 pendente; segunda chamada de poll enquanto em voo não gera GET paralelo
+    const poll1Deferred = deferred();
+    const manualDeferred = deferred();
+    deferredOp = [poll1Deferred, manualDeferred];
+    let pPoll1;
+    await h.act(async () => {
+      pPoll1 = h.getPolling().read();
+    });
+    assert.equal(opGets, 2);
+    await h.act(async () => {
+      await h.getPolling().read();
+    });
+    assert.equal(opGets, 2, 'reentrada de poll no mesmo ciclo em voo é ignorada');
+
+    // Refresh manual durante poll pendente conclui com estado novo; resposta atrasada do poll 1 é descartada
+    let pManual;
+    await h.act(async () => {
+      pManual = h.handler('Atualizar atendimento')();
+    });
+    assert.equal(opGets, 3);
+    await h.act(async () => {
+      manualDeferred.resolve(updatedState);
+      await pManual;
+    });
+    assert.ok(h.hasQueueRow(1, 'Camila Souza'));
+
+    await h.act(async () => {
+      poll1Deferred.resolve(initialState);
+      await pPoll1;
+    });
+    assert.ok(h.hasQueueRow(1, 'Camila Souza'));
+    assert.equal(h.hasText('Ana Clara'), false, 'resposta atrasada de poll não sobrescreve refresh recente');
+
+    // 2. Modal aberto pausa polling e bloqueia poll.read direta; cancelar reabilita polling
+    nextState = pendingState;
+    await h.press('Atualizar atendimento');
+    assert.equal(h.getPolling().enabled, true);
+    await h.press('Concluir experiência');
+    assert.equal(h.modals()[0].props.visible, true);
+    assert.equal(h.getPolling().enabled, false);
+    const getsDuringModal = opGets;
+    await h.act(async () => {
+      await h.getPolling().read();
+    });
+    assert.equal(opGets, getsDuringModal, 'poll() recusa execução enquanto modal estiver aberto');
+    await h.press('Cancelar');
+    assert.equal(h.modals().length, 0);
+    assert.equal(h.getPolling().enabled, true);
+
+    // 3. Negativa 403 em poll em voo não é descartada mesmo se refresh manual concorrente iniciar antes da resposta
+    const poll403 = deferred();
+    const concurrentManual = deferred();
+    deferredOp = [poll403, concurrentManual];
+    let pLate403;
+    let pManualConcurrent;
+    await h.act(async () => {
+      pLate403 = h.getPolling().read();
+      pManualConcurrent = h.handler('Atualizar atendimento')();
+    });
+    await h.act(async () => {
+      poll403.reject(Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }));
+      await pLate403;
+    });
+    assert.equal(accessDeniedKind, 'denied');
+    assert.equal(h.hasText('Ana Clara'), false);
+    await h.act(async () => {
+      concurrentManual.resolve(updatedState);
+      await pManualConcurrent;
+    });
+    assert.equal(h.hasText('Camila Souza'), false);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitórias de pré-condição sem POST nem recusa', { skip }, async () => {
+  let stationsDeferred = null;
+  let postDeferred = null;
+  let preErrorMode = null;
+  let postCalls = 0;
+
+  const baseState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const calledState = {
+    ...baseState,
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+  let activeState = baseState;
+
+  const h = createStationHarness({
+    onGet: async (url) => {
+      if (url.endsWith('/stations')) {
+        if (stationsDeferred) {
+          const d = stationsDeferred;
+          stationsDeferred = null;
+          return d.promise;
+        }
+        if (preErrorMode === 'network') throw Object.assign(new Error('offline'), { isNetworkError: true });
+        if (preErrorMode === 'timeout') throw Object.assign(new Error('timeout'), { isTimeout: true });
+        if (preErrorMode === '503') throw Object.assign(new Error('unavailable'), { status: 503 });
+        if (preErrorMode === 'malformed') return { eventId: EV_A, stations: 'invalid' };
+        return {
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }],
+        };
+      }
+      if (url.endsWith('/queue')) {
+        return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+      }
+      return activeState;
+    },
+    onPost: async () => {
+      postCalls += 1;
+      if (postDeferred) {
+        const d = postDeferred;
+        postDeferred = null;
+        return d.promise;
+      }
+      activeState = calledState;
+      return {
+        serviceSession: {
+          id: SESS_1,
+          queueEntryId: ENTRY_1,
+          experienceId: EXP_1,
+          station: { id: ST_1, label: 'Cabine 01' },
+          status: 'pending',
+          calledAt: '2026-11-19T15:00:00.000Z',
+        },
+      };
+    },
+  });
+
+  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+  try {
+    await h.mount();
+
+    // 1. Distingue pré-condição de processamento no servidor antes do POST
+    stationsDeferred = deferred();
+    postDeferred = deferred();
+    let inflight;
+    await h.act(async () => {
+      inflight = h.handler('Chamar próximo')();
+    });
+    assert.ok(h.hasExactText('Verificando condições antes do envio...'));
+    assert.equal(postCalls, 0);
+
+    await h.act(async () => {
+      stationsDeferred.resolve({
+        eventId: EV_A,
+        stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }],
+      });
+    });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+    assert.equal(postCalls, 1);
+
+    activeState = calledState;
+    await h.act(async () => {
+      postDeferred.resolve({
+        serviceSession: {
+          id: SESS_1,
+          queueEntryId: ENTRY_1,
+          experienceId: EXP_1,
+          station: { id: ST_1, label: 'Cabine 01' },
+          status: 'pending',
+          calledAt: '2026-11-19T15:00:00.000Z',
+        },
+      });
+      await inflight;
+    });
+    await flush();
+    assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
+
+    // 2. Volta para waiting e valida todas as falhas transitórias de pré-condição sem POST nem texto de recusa
+    h.secureValues.clear();
+    activeState = baseState;
+    await h.press('Atualizar atendimento');
+    const postsBeforePreFailures = postCalls;
+    for (const mode of ['network', 'timeout', '503', 'malformed']) {
+      preErrorMode = mode;
+      await h.press('Chamar próximo');
+      await flush();
+      assert.equal(postCalls, postsBeforePreFailures, `${mode}: zero POSTs enviados`);
+      assert.ok(
+        h.hasText('Não foi possível verificar se a operação pode ser realizada. Nenhuma alteração foi enviada.'),
+        `${mode}: mensagem clara de pré-condição sem envio`,
+      );
+      assert.equal(h.hasText('Operação recusada'), false, `${mode}: não afirma recusa do servidor`);
+      preErrorMode = null;
+      await h.press('Atualizar atendimento');
+    }
+  } finally {
+    h.dispose();
+  }
+});
+
+test('STAFF04-AUD-04: 401/403 em pré-condição, mutação e cleanup_pending revoga de imediato; 404 com GET 200 mantém evento', { skip }, async () => {
+  const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const baseState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const pendingState = {
+    ...baseState,
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+
+  // Cenário 1: 403 na pré-condição da estação -> revoga imediatamente, zero POSTs e zero GET pós-falha
+  {
+    let deniedKind = null;
+    let getsAfterMounted = 0;
+    let mounted = false;
+    let postCalls = 0;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onGet: async (url) => {
+        if (mounted && url.endsWith('/operational-state')) getsAfterMounted += 1;
+        if (url.endsWith('/stations')) throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+        return baseState;
+      },
+      onPost: async () => { postCalls += 1; return {}; },
+    });
+    try {
+      await h.mount();
+      mounted = true;
+      await h.press('Chamar próximo');
+      assert.equal(deniedKind, 'denied');
+      assert.equal(postCalls, 0);
+      assert.equal(getsAfterMounted, 0, '403 na pré-condição não dispara refresh() adicional');
+      assert.equal(h.hasText('Ana Clara'), false);
+      assert.ok(h.hasText('Acesso à estação indisponível.'));
+    } finally {
+      h.dispose();
+    }
+  }
+
+  // Cenário 2: 401 na mutação -> revoga imediatamente para session, preserva recibo no SecureStore e zero GET pós-401
+  {
+    let deniedKind = null;
+    let opGetsAfterPost = 0;
+    let posted = false;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onGet: async (url) => {
+        if (posted && url.endsWith('/operational-state')) opGetsAfterPost += 1;
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        return baseState;
+      },
+      onPost: async () => {
+        posted = true;
+        throw Object.assign(new Error('session revoked'), { status: 401, code: 'SESSION_REVOKED' });
+      },
+    });
+    try {
+      await h.mount();
+      await h.press('Chamar próximo');
+      assert.equal(deniedKind, 'session');
+      assert.equal(opGetsAfterPost, 0);
+      assert.equal(h.hasText('Ana Clara'), false);
+      assert.ok(h.hasText('Sessão inválida. Entre novamente.'));
+      const saved = JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`));
+      assert.equal(saved.phase, 'terminal');
+      assert.equal(saved.outcome.status, 401);
+    } finally {
+      h.dispose();
+    }
+  }
+
+  // Cenário 3: 403 na mutação + falha ao gravar recibo (rejected_cleanup_pending) revoga de imediato e preserva dispatching
+  {
+    let deniedKind = null;
+    let opGetsAfterPost = 0;
+    let posted = false;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onSecureSet: async (_, raw) => {
+        const parsed = JSON.parse(raw);
+        if (parsed.phase === 'terminal') throw new Error('secure-write-failed');
+      },
+      onGet: async (url) => {
+        if (posted && url.endsWith('/operational-state')) opGetsAfterPost += 1;
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        return baseState;
+      },
+      onPost: async () => {
+        posted = true;
+        throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+      },
+    });
+    try {
+      await h.mount();
+      await h.press('Chamar próximo');
+      assert.equal(deniedKind, 'denied');
+      assert.equal(opGetsAfterPost, 0);
+      assert.equal(h.hasText('Ana Clara'), false);
+      const saved = JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`));
+      assert.equal(saved.phase, 'dispatching');
+    } finally {
+      h.dispose();
+    }
+  }
+
+  // Cenário 4: 404 RESOURCE_NOT_FOUND ao concluir atendimento seguido de GET 200 mantém o evento sem chamar onStationNotFound
+  {
+    let deniedKind = null;
+    let notFoundCalls = 0;
+    let resolved = false;
+    const h = createStationHarness({
+      initialStation: { id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: SESS_1 },
+      onAccessDenied: (kind) => { deniedKind = kind; },
+      onStationNotFound: async () => { notFoundCalls += 1; return { outcome: 'event_denied', kind: 'denied' }; },
+      onGet: async (url) => {
+        if (url.endsWith('/stations')) {
+          return {
+            eventId: EV_A,
+            stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: resolved ? null : SESS_1 }],
+          };
+        }
+        if (url.endsWith('/operational-state')) {
+          return resolved ? { ...baseState, waitingCount: 0, waiting: [], canCall: false } : pendingState;
+        }
+        return {};
+      },
+      onPost: async () => {
+        resolved = true;
+        throw Object.assign(new Error('not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
+      },
+    });
+    try {
+      await h.mount();
+      await h.press('Concluir experiência');
+      await h.press('CONFIRMAR OPERAÇÃO');
+      await flush(h);
+      assert.equal(notFoundCalls, 0, '404 na resolução com GET 200 não dispara verificação destrutiva de estação');
+      assert.equal(deniedKind, null);
+      assert.ok(h.hasText('O atendimento ou recurso informado não foi encontrado no servidor.'));
+    } finally {
+      h.dispose();
+    }
   }
 });

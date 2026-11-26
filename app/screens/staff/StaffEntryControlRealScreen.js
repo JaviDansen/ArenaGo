@@ -148,6 +148,7 @@ export default function StaffEntryControlRealScreen({
   const [snapshot, setSnapshot] = useState(store.getSnapshot());
   const [notice, setNotice] = useState(null);
   const [staleDialogMessage, setStaleDialogMessage] = useState(null);
+  const [busyStage, setBusyStage] = useState(null);
   const autoAttempt = useRef(null);
   const [dialog, setDialog] = useState(null);
   const dialogRef = useRef(null);
@@ -161,6 +162,7 @@ export default function StaffEntryControlRealScreen({
     autoAttempt.current = null;
     setNotice(null);
     setStaleDialogMessage(null);
+    setBusyStage(null);
     store.setContext(getContext());
     setDialog(null);
     if (!liveRef.current.accessDenied) void store.refresh();
@@ -176,6 +178,7 @@ export default function StaffEntryControlRealScreen({
     setDialog(null);
     setNotice(null);
     setStaleDialogMessage(null);
+    setBusyStage(null);
     autoAttempt.current = null;
     store.setContext(null);
   }, [accessDenied, store]);
@@ -234,12 +237,17 @@ export default function StaffEntryControlRealScreen({
       || autoAttempt.current === intent.key
     ) return;
     autoAttempt.current = intent.key;
+    setBusyStage('acknowledging');
     void (async () => {
-      const result = await store.acknowledge(intent.key);
-      if (result.kind === 'done' && store.isCurrent(scope)) {
-        setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
+      try {
+        const result = await store.acknowledge(intent.key);
+        if (result.kind === 'done' && store.isCurrent(scope)) {
+          setNotice({ key: intent.key, outcome: intent.outcome, operation: intent.kind });
+        }
+        if (result.kind === 'blocked') autoAttempt.current = null;
+      } finally {
+        setBusyStage(null);
       }
-      if (result.kind === 'blocked') autoAttempt.current = null;
     })();
   }, [accessDenied, snapshot, store]);
 
@@ -295,6 +303,7 @@ export default function StaffEntryControlRealScreen({
     ) return;
     setNotice(null);
     setStaleDialogMessage(null);
+    setBusyStage('mutating');
     return store.mutate(action);
   };
 
@@ -335,6 +344,7 @@ export default function StaffEntryControlRealScreen({
     }
     setNotice(null);
     setStaleDialogMessage(null);
+    setBusyStage('mutating');
     return store.mutate(expected.action);
   };
 
@@ -382,9 +392,11 @@ export default function StaffEntryControlRealScreen({
         <View accessibilityRole="progressbar" style={styles.stateCard}>
           <ActivityIndicator color={c.accent} />
           <Text style={styles.message}>
-            {pending?.phase === 'terminal'
-              ? 'Finalizando reconhecimento seguro...'
-              : 'Processando operação no servidor...'}
+            {busyStage === 'cancelling' || pending?.phase === 'reserved'
+              ? 'Descartando solicitação não enviada...'
+              : busyStage === 'acknowledging' || pending?.phase === 'terminal'
+                ? 'Finalizando reconhecimento seguro local...'
+                : 'Processando operação no servidor...'}
           </Text>
         </View>
       )}
@@ -468,7 +480,10 @@ export default function StaffEntryControlRealScreen({
             label="Descartar solicitação não enviada"
             variant="secondary"
             disabled={snapshot.busy}
-            onPress={() => { void store.cancelReserved(pending.key); }}
+            onPress={() => {
+              setBusyStage('cancelling');
+              void store.cancelReserved(pending.key);
+            }}
           />
         </View>
       )}

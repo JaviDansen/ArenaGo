@@ -161,9 +161,12 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
       callId: ['confirm_call','absent','remove'].includes(action.kind) ? call.id : null,
       enabled: action.kind === 'toggle' ? action.enabled : null, phase: 'reserved' };
     if (!validEntryId(intent.key)) throw new Error('Chave de entrada inválida.');
+    readGeneration += 1;
+    silentFlight = false;
     publish({ busy: true, feedback: null, knownOutcome: null });
     const work = async () => {
       let knownOutcome = null;
+      let authFailure = null;
       try {
         const reserved = await storage.reserve(intent);
         if (!isCurrent(context)) return { kind: 'stale' };
@@ -192,16 +195,43 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
         }
         // O resultado definitivo pertence à intenção original, inclusive após logout.
         knownOutcome = outcome;
+        if (outcome.kind === 'rejected' && (outcome.status === 401 || outcome.status === 403)) {
+          authFailure = outcome.status === 401 ? 'session' : 'denied';
+          if (isCurrent(context)) {
+            revokedKind = authFailure;
+            readGeneration += 1;
+            silentFlight = false;
+            publish({ status: 'error', data: null, error: revokedKind });
+          }
+        }
         await storage.finish(intent, outcome);
         if (!isCurrent(context)) return { kind: 'stale' };
-        publish({ pending: { ...intent, phase: 'terminal', outcome }, feedback: outcome.kind });
+        if (authFailure) {
+          publish({
+            pending: { ...intent, phase: 'terminal', outcome },
+            feedback: 'rejected',
+            status: 'error',
+            data: null,
+            error: authFailure,
+          });
+        } else {
+          publish({ pending: { ...intent, phase: 'terminal', outcome }, feedback: outcome.kind });
+        }
         return { kind: outcome.kind, status: outcome.status };
       } catch {
         if (!isCurrent(context)) return { kind: 'stale' };
-        publish({ storageError: true, feedback: 'storage', knownOutcome });
+        publish({
+          storageError: true,
+          feedback: 'storage',
+          knownOutcome,
+          ...(authFailure ? { status: 'error', data: null, error: authFailure } : {}),
+        });
         return { kind: 'storage_error' };
       } finally {
-        if (isCurrent(context)) { publish({ busy: false }); await refresh(); }
+        if (isCurrent(context)) {
+          publish({ busy: false });
+          if (!authFailure) await refresh();
+        }
       }
     };
     flight = work();

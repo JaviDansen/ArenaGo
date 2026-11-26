@@ -379,3 +379,178 @@ test('STAFF-04: falha de armazenamento ao gravar recusa definitiva preserva know
   assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'blocked');
   assert.equal(r.calls.filter((c) => c.method === 'POST').length, 1);
 });
+
+for (const [httpStatus, code, expectedError] of [
+  [403, 'STAFF_EVENT_FORBIDDEN', 'denied'],
+  [401, 'SESSION_REVOKED', 'session'],
+]) {
+  test(`STAFF04-AUD-04: ${httpStatus} em mutação do Controle de Entrada trava acesso de imediato, ignora GET 200 atrasado e 503 posterior, preserva recibo e respeita troca de conta`, async () => {
+    const persisted = adapter();
+    let getMode = 'ok';
+    let delayedPoll = null;
+    const calls = [];
+    const client = {
+      get: async (path, opts) => {
+        calls.push({ method: 'GET', path, opts });
+        if (getMode === 'deferred') {
+          delayedPoll = defer();
+          return delayedPoll.promise;
+        }
+        if (getMode === '503') throw Object.assign(new Error('unavailable'), { status: 503 });
+        return body();
+      },
+      post: async (path, payload, opts) => {
+        calls.push({ method: 'POST', path, payload, opts });
+        throw Object.assign(new Error('auth-denied'), { status: httpStatus, code });
+      },
+      patch: async (path, payload, opts) => {
+        calls.push({ method: 'PATCH', path, payload, opts });
+        return { eventId: context.eventId, externalQueueEnabled: payload.enabled, releasedCount: 0, changedAt: at };
+      },
+    };
+    let current = { ...context };
+    const store = api.createStaffEntryStore({
+      client,
+      storage: persisted.storage,
+      getContext: () => current,
+      createKey: () => id(95),
+    });
+    store.setContext(current);
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'ready');
+    assert.equal(store.getSnapshot().data.waiting[0].displayName, 'Ana');
+
+    // Dispara poll lento seguido de mutação que falha com 401/403
+    getMode = 'deferred';
+    const pendingPoll = store.poll();
+    const outcome = await store.mutate({ kind: 'call' });
+    assert.equal(outcome.kind, 'rejected');
+    assert.equal(outcome.status, httpStatus);
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().data, null, 'dados nominais removidos imediatamente sem depender de GET posterior');
+    assert.equal(store.getSnapshot().pending?.phase, 'terminal');
+    assert.equal((await persisted.storage.get(context.userId)).key, id(95));
+
+    // GET 200 atrasado (iniciado antes da negativa) nunca restaura acesso nem dados nominais
+    delayedPoll.resolve(body());
+    await pendingPoll;
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().data, null);
+
+    // Polling automático permanece bloqueado (0 GETs extras); refresh manual com 503 mantém a trava
+    const getsAfterRevoke = calls.filter((c) => c.method === 'GET').length;
+    await store.poll();
+    assert.equal(calls.filter((c) => c.method === 'GET').length, getsAfterRevoke);
+
+    getMode = '503';
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal(store.getSnapshot().data, null);
+    const getsAfterManual503 = calls.filter((c) => c.method === 'GET').length;
+    await store.poll();
+    assert.equal(calls.filter((c) => c.method === 'GET').length, getsAfterManual503);
+
+    // Reconhecimento local limpa recibo mantendo o bloqueio até revalidação legítima ou troca de conta
+    await store.acknowledge(id(95));
+    assert.equal(store.getSnapshot().status, 'error');
+    assert.equal(store.getSnapshot().error, expectedError);
+    assert.equal((await store.mutate({ kind: 'call' })).kind, 'blocked');
+
+    // Revalidação manual legítima 200 restaura o acesso
+    getMode = 'ok';
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'ready');
+    assert.equal(store.getSnapshot().error, null);
+    assert.equal(store.getSnapshot().data.waiting[0].displayName, 'Ana');
+
+    // Troca de conta limpa estado/trava anterior e não vaza acesso da conta antiga
+    current = { ...context, userId: id(99), sessionId: id(98), epoch: 2, revision: 1 };
+    store.setContext(current);
+    await store.refresh();
+    assert.equal(store.getSnapshot().status, 'ready');
+    assert.equal(store.getSnapshot().error, null);
+  });
+}
+
+test('STAFF04-AUD-04: 403 em mutação com falha SecureStore mantém acesso bloqueado, dispatching intacto e knownOutcome', async () => {
+  const persisted = adapter(new Map(), { phase: 'terminal', mode: 'before' });
+  const r = await rig({
+    persisted,
+    post: async () => { throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }); },
+  });
+  const outcome = await r.store.mutate({ kind: 'call' });
+  assert.equal(outcome.kind, 'storage_error');
+  assert.equal(r.store.getSnapshot().status, 'error');
+  assert.equal(r.store.getSnapshot().error, 'denied');
+  assert.equal(r.store.getSnapshot().data, null);
+  assert.equal(r.store.getSnapshot().pending?.phase, 'dispatching');
+  assert.equal(r.store.getSnapshot().pending?.key, id(20));
+  assert.equal(r.store.getSnapshot().knownOutcome?.kind, 'rejected');
+  assert.equal(r.store.getSnapshot().knownOutcome?.status, 403);
+  const getsBefore = r.calls.filter((c) => c.method === 'GET').length;
+  await r.store.poll();
+  assert.equal(r.calls.filter((c) => c.method === 'GET').length, getsBefore);
+  assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'blocked');
+});
+
+test('STAFF04-AUD-04: 404 RESOURCE_NOT_FOUND na resolução de chamada mantém evento válido com GET 200 e só revoga se GET confirmar 403/404', async () => {
+  const activeCall = { id: id(60), participationId: id(4), displayName: 'Ana', calledAt: at };
+  const stateWithCall = {
+    ...body(),
+    pendingCall: activeCall,
+    canCall: false,
+    canConfirm: true,
+    canMarkAbsent: true,
+    canRemove: true,
+  };
+  let nextGetMode = 'resolved_200';
+  const persisted = adapter();
+  const client = {
+    get: async () => {
+      if (nextGetMode === 'forbidden_403') throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+      if (nextGetMode === 'resolved_200') {
+        return { ...body(), pendingCall: null, waitingCount: 0, waiting: [], canCall: false };
+      }
+      return stateWithCall;
+    },
+    post: async () => {
+      throw Object.assign(new Error('not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
+    },
+    patch: async () => ({ eventId: context.eventId, externalQueueEnabled: true, releasedCount: 0, changedAt: at }),
+  };
+
+  // Caso 1: chamada já foi resolvida fora da sessão, mas evento continua válido (GET 200)
+  nextGetMode = 'initial';
+  const store = api.createStaffEntryStore({
+    client,
+    storage: persisted.storage,
+    getContext: () => context,
+    createKey: () => id(30),
+  });
+  store.setContext(context);
+  await store.refresh();
+  const resValid = await store.mutate({ kind: 'confirm_call', callId: id(60) });
+  assert.equal(resValid.kind, 'rejected');
+  assert.equal(resValid.status, 404);
+  assert.equal(resValid.code, 'RESOURCE_NOT_FOUND');
+  assert.notEqual(store.getSnapshot().error, 'denied', '404 da chamada não presume revogação imediata do evento');
+  nextGetMode = 'resolved_200';
+  await store.refresh();
+  assert.equal(store.getSnapshot().status, 'ready');
+  assert.equal(store.getSnapshot().error, null);
+
+  // Caso 2: GET posterior confirma 403 -> evento é efetivamente revogado
+  nextGetMode = 'initial';
+  await store.acknowledge(id(30));
+  await store.refresh();
+  const resRevoked = await store.mutate({ kind: 'confirm_call', callId: id(60) });
+  assert.equal(resRevoked.status, 404);
+  nextGetMode = 'forbidden_403';
+  await store.refresh();
+  assert.equal(store.getSnapshot().status, 'error');
+  assert.equal(store.getSnapshot().error, 'denied');
+  assert.equal(store.getSnapshot().data, null);
+});
