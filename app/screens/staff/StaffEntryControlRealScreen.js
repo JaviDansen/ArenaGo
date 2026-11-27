@@ -415,6 +415,7 @@ export default function StaffEntryControlRealScreen({
               const stage = snapshot.busyKind ?? busyStage;
               if (stage === 'preparing') return 'Preparando solicitação com segurança...';
               if (stage === 'dispatching') return 'Registrando envio seguro...';
+              if (stage === 'persisting') return 'Registrando resultado com segurança...';
               if (stage === 'cancelling') return 'Descartando solicitação não enviada...';
               if (stage === 'acknowledging') return 'Finalizando reconhecimento seguro local...';
               return 'Processando operação no servidor...';

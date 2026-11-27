@@ -1,5 +1,5 @@
 diff --git a/app/screens/staff/StaffEntryControlRealScreen.js b/app/screens/staff/StaffEntryControlRealScreen.js
-index 9f781a5..3c6981b 100644
+index 9f781a5..b7e0971 100644
 --- a/app/screens/staff/StaffEntryControlRealScreen.js
 +++ b/app/screens/staff/StaffEntryControlRealScreen.js
 @@ -16,6 +16,11 @@ import {
@@ -176,7 +176,7 @@ index 9f781a5..3c6981b 100644
  
    const data = snapshot.data;
    const dialogVisible = Boolean(!accessDenied && dialog && evaluateEntryDialog(dialog, snapshot, store).valid);
-@@ -388,6 +407,22 @@ export default function StaffEntryControlRealScreen({
+@@ -388,6 +407,23 @@ export default function StaffEntryControlRealScreen({
          </View>
        )}
  
@@ -188,6 +188,7 @@ index 9f781a5..3c6981b 100644
 +              const stage = snapshot.busyKind ?? busyStage;
 +              if (stage === 'preparing') return 'Preparando solicitação com segurança...';
 +              if (stage === 'dispatching') return 'Registrando envio seguro...';
++              if (stage === 'persisting') return 'Registrando resultado com segurança...';
 +              if (stage === 'cancelling') return 'Descartando solicitação não enviada...';
 +              if (stage === 'acknowledging') return 'Finalizando reconhecimento seguro local...';
 +              return 'Processando operação no servidor...';
@@ -199,7 +200,7 @@ index 9f781a5..3c6981b 100644
        {snapshot.status === 'error' && (
          <View style={styles.errorCard}>
            <Text accessibilityRole="alert" style={styles.alertMessage}>
-@@ -428,6 +463,14 @@ export default function StaffEntryControlRealScreen({
+@@ -428,6 +464,14 @@ export default function StaffEntryControlRealScreen({
          </View>
        )}
  
@@ -214,7 +215,7 @@ index 9f781a5..3c6981b 100644
        {!defaultStaffEntryIntentStorage.isPersistent && (
          <View style={styles.warningCard}>
            <Text style={styles.warningMessage}>
-@@ -459,7 +502,16 @@ export default function StaffEntryControlRealScreen({
+@@ -459,7 +503,16 @@ export default function StaffEntryControlRealScreen({
              label="Descartar solicitação não enviada"
              variant="secondary"
              disabled={snapshot.busy}
@@ -232,7 +233,7 @@ index 9f781a5..3c6981b 100644
            />
          </View>
        )}
-@@ -524,12 +576,7 @@ export default function StaffEntryControlRealScreen({
+@@ -524,12 +577,7 @@ export default function StaffEntryControlRealScreen({
          </>
        )}
  
@@ -246,7 +247,7 @@ index 9f781a5..3c6981b 100644
  
        <EntryActionButton
          label="Atualizar fila de entrada"
-@@ -563,10 +610,4 @@ const styles = StyleSheet.create({
+@@ -563,10 +611,4 @@ const styles = StyleSheet.create({
    alertMessage: { color: '#FECACA', fontSize: 14, lineHeight: 20 },
    warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
    successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
@@ -483,7 +484,7 @@ index 73a0a82..3af3a76 100644
              label="Atualizar estações"
              variant="secondary"
 diff --git a/app/screens/staff/StaffStationOperationalScreen.js b/app/screens/staff/StaffStationOperationalScreen.js
-index 38147f3..f14a61f 100644
+index 38147f3..eb91700 100644
 --- a/app/screens/staff/StaffStationOperationalScreen.js
 +++ b/app/screens/staff/StaffStationOperationalScreen.js
 @@ -16,10 +16,16 @@ import {
@@ -503,20 +504,34 @@ index 38147f3..f14a61f 100644
  
  function ActionButton({ label, onPress, disabled = false, variant = 'primary' }) {
    const isSecondary = variant === 'secondary';
-@@ -113,8 +119,28 @@ export default function StaffStationOperationalScreen({
+@@ -113,8 +119,43 @@ export default function StaffStationOperationalScreen({
        },
        storage: defaultStaffIntentStorage,
        createKey: randomUUID,
 -      isCurrent: (context, scope) => same(context, getContext())
-+      isCurrent: (context, scope) => !revokedKindRef.current
-+        && same(context, getContext())
-         && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
+-        && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
++      isCurrent: (ctx, scope) => !revokedKindRef.current
++        && (ctx?.visitId === undefined || ctx.visitId === visitIdRef.current)
++        && same(ctx, getContext())
++        && (!scope || (scope.stationId === ctx.stationId && scope.eventId === ctx.eventId)),
 +      onStage: (stage, originScope) => {
-+        if (!mounted.current || revokedKindRef.current || !same(originScope, getContext())) return;
++        if (
++          !mounted.current
++          || revokedKindRef.current
++          || !originScope
++          || originScope.visitId !== visitIdRef.current
++          || originScope.opId !== activeOpIdRef.current
++          || !same(originScope, getContext())
++        ) return;
 +        setView((previous) => (previous.busy ? { ...previous, busyKind: stage } : previous));
 +      },
 +      onAuthError: (info) => {
-+        if (!info?.context || !same(info.context, getContext())) return;
++        const originScope = info?.context;
++        if (
++          !originScope
++          || (originScope.visitId !== undefined && originScope.visitId !== visitIdRef.current)
++          || !same(originScope, getContext())
++        ) return;
 +        const feedback = info.phase === 'precondition'
 +          ? {
 +              kind: 'rejected',
@@ -528,12 +543,14 @@ index 38147f3..f14a61f 100644
 +              transient: false,
 +            }
 +          : null;
-+        revokeStationAccess(info.kind, info.context, feedback);
++        if (revokeStationAccess(info.kind, originScope, feedback) && originScope.opId) {
++          revokedByOpRef.current = originScope.opId;
++        }
 +      },
      });
    }
    const coordinator = coordinatorRef.current;
-@@ -124,8 +150,10 @@ export default function StaffStationOperationalScreen({
+@@ -124,8 +165,10 @@ export default function StaffStationOperationalScreen({
      status: 'loading',
      data: null,
      error: null,
@@ -544,13 +561,17 @@ index 38147f3..f14a61f 100644
      feedback: null,
    });
    const viewRef = useRef(view);
-@@ -137,10 +165,38 @@ export default function StaffStationOperationalScreen({
+@@ -137,10 +180,42 @@ export default function StaffStationOperationalScreen({
    const autoAttempt = useRef(null);
    const acknowledging = useRef(false);
    const generation = useRef(0);
 +  const pollingFlight = useRef(0);
 +  const pollSeq = useRef(0);
 +  const revokedKindRef = useRef(null);
++  const visitIdRef = useRef(0);
++  const opSeqRef = useRef(0);
++  const activeOpIdRef = useRef(0);
++  const revokedByOpRef = useRef(0);
    const epoch = auth.getSessionEpoch();
    const revision = auth.getIdentityRevision();
    const context = getContext();
@@ -583,7 +604,7 @@ index 38147f3..f14a61f 100644
    async function handleStationNotFound(originScope, originGeneration) {
      const verifyFn = liveRef.current.onStationNotFound;
      let outcome;
-@@ -159,7 +215,7 @@ export default function StaffStationOperationalScreen({
+@@ -159,7 +234,7 @@ export default function StaffStationOperationalScreen({
          } else if (verifyError?.status === 403 || verifyError?.status === 404) {
            outcome = { outcome: 'event_denied', kind: 'denied' };
          } else {
@@ -592,7 +613,7 @@ index 38147f3..f14a61f 100644
            outcome = { outcome: 'uncertain', kind: verifyKind };
          }
        }
-@@ -168,7 +224,8 @@ export default function StaffStationOperationalScreen({
+@@ -168,7 +243,8 @@ export default function StaffStationOperationalScreen({
      if (outcome?.outcome === 'stale') return;
      if (outcome?.outcome === 'session' || outcome?.outcome === 'event_denied') {
        const denyKind = outcome.outcome === 'session' ? 'session' : 'denied';
@@ -602,7 +623,7 @@ index 38147f3..f14a61f 100644
        if (!verifyFn) {
          liveRef.current.onAccessDenied?.(denyKind);
        }
-@@ -176,19 +233,32 @@ export default function StaffStationOperationalScreen({
+@@ -176,19 +252,32 @@ export default function StaffStationOperationalScreen({
      }
      if (outcome?.outcome === 'uncertain') {
        const errKind = outcome.kind === 'network' ? 'network' : 'unavailable';
@@ -638,7 +659,7 @@ index 38147f3..f14a61f 100644
        return false;
      }
      setView((previous) => ({
-@@ -196,7 +266,8 @@ export default function StaffStationOperationalScreen({
+@@ -196,51 +285,54 @@ export default function StaffStationOperationalScreen({
        scope: initial,
        status: 'loading',
        data: null,
@@ -647,13 +668,29 @@ index 38147f3..f14a61f 100644
 +      autoRecoverable: false,
        feedback: preserveFeedback ? previous.feedback : null,
      }));
-     const current = () => request === generation.current && same(initial, getContext());
-@@ -212,35 +283,35 @@ export default function StaffStationOperationalScreen({
-         pending = await coordinator.pending(initial);
-       }
+-    const current = () => request === generation.current && same(initial, getContext());
++    const visitAtStart = visitIdRef.current;
++    const current = () => visitAtStart === visitIdRef.current
++      && request === generation.current
++      && same(initial, getContext());
+     let stage = 'read';
+     try {
+-      const data = coordinator
+-        ? await coordinator.readStationState(initial, experience.id, station.id)
+-        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
++      const data = await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
        if (!current()) return false;
--      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null }));
 +      revokedKindRef.current = null;
++      revokedByOpRef.current = 0;
+       let pending = null;
+       if (coordinator) {
+         stage = 'pending';
+-        pending = await coordinator.pending(initial);
++        pending = await coordinator.pending({ ...initial, visitId: visitAtStart });
+       }
+-      if (!current()) return false;
+-      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null }));
++      if (!current() || revokedKindRef.current) return false;
 +      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
        return true;
      } catch (error) {
@@ -694,7 +731,7 @@ index 38147f3..f14a61f 100644
        }));
        return false;
      }
-@@ -249,51 +320,84 @@ export default function StaffStationOperationalScreen({
+@@ -249,51 +341,83 @@ export default function StaffStationOperationalScreen({
    async function poll() {
      const scope = getContext();
      const request = generation.current;
@@ -716,15 +753,17 @@ index 38147f3..f14a61f 100644
        || acknowledging.current
      ) return;
 +    const wasReady = currentView.status === 'ready';
++    const visitAtStart = visitIdRef.current;
 +    const seq = ++pollSeq.current;
 +    pollingFlight.current = request;
      try {
-       const data = coordinator
-         ? await coordinator.readStationState(scope, experience.id, station.id)
-         : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
+-      const data = coordinator
+-        ? await coordinator.readStationState(scope, experience.id, station.id)
+-        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
 -      if (request === generation.current && same(scope, getContext())) {
 -        setView((previous) => ({ ...previous, data, error: null }));
-+      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
++      const data = await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
++      if (visitAtStart !== visitIdRef.current || request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
 +      if (wasReady) {
 +        setView((previous) => ({ ...previous, data, error: null, autoRecoverable: false }));
 +        return;
@@ -732,15 +771,16 @@ index 38147f3..f14a61f 100644
 +      let pending = null;
 +      if (coordinator) {
 +        try {
-+          pending = await coordinator.pending(scope);
++          pending = await coordinator.pending({ ...scope, visitId: visitAtStart });
 +        } catch {
 +          pending = { kind: 'storage_error' };
 +        }
        }
-+      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
++      if (visitAtStart !== visitIdRef.current || request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
 +      setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
      } catch (error) {
-       if (!same(scope, getContext())) return;
+-      if (!same(scope, getContext())) return;
++      if (visitAtStart !== visitIdRef.current || !same(scope, getContext())) return;
        if (error?.status === 401 || error?.status === 403) {
 -        generation.current += 1;
 -        dialogRef.current = null;
@@ -793,14 +833,25 @@ index 38147f3..f14a61f 100644
      && !view.busy
      && !hasModalOpen
      && !dispatching.current
-@@ -310,17 +414,24 @@ export default function StaffStationOperationalScreen({
+@@ -309,18 +433,37 @@ export default function StaffStationOperationalScreen({
+ 
    useEffect(() => {
      mounted.current = true;
++    visitIdRef.current += 1;
++    activeOpIdRef.current = 0;
++    revokedByOpRef.current = 0;
++    dispatching.current = false;
++    acknowledging.current = false;
      autoAttempt.current = null;
 +    revokedKindRef.current = null;
      if (!liveRef.current.accessDenied) void refresh();
      return () => {
        mounted.current = false;
++      visitIdRef.current += 1;
++      activeOpIdRef.current = 0;
++      revokedByOpRef.current = 0;
++      dispatching.current = false;
++      acknowledging.current = false;
        generation.current += 1;
 +      pollSeq.current += 1;
 +      pollingFlight.current = 0;
@@ -812,13 +863,15 @@ index 38147f3..f14a61f 100644
      if (!accessDenied) return;
 +    const denyKind = accessDeniedKind === 'session' ? 'session' : 'denied';
 +    revokedKindRef.current = denyKind;
++    activeOpIdRef.current = 0;
++    revokedByOpRef.current = 0;
      generation.current += 1;
 +    pollSeq.current += 1;
 +    pollingFlight.current = 0;
      dialogRef.current = null;
      setDialog(null);
      autoAttempt.current = null;
-@@ -328,9 +439,11 @@ export default function StaffStationOperationalScreen({
+@@ -328,9 +471,11 @@ export default function StaffStationOperationalScreen({
        scope: null,
        status: 'error',
        data: null,
@@ -831,7 +884,7 @@ index 38147f3..f14a61f 100644
        feedback: null,
      });
    }, [accessDenied, accessDeniedKind]);
-@@ -340,6 +453,7 @@ export default function StaffStationOperationalScreen({
+@@ -340,6 +485,7 @@ export default function StaffStationOperationalScreen({
      const scope = view.scope;
      if (
        accessDenied
@@ -839,23 +892,42 @@ index 38147f3..f14a61f 100644
        || !coordinator
        || view.status !== 'ready'
        || view.busy
-@@ -351,7 +465,7 @@ export default function StaffStationOperationalScreen({
+@@ -349,31 +495,35 @@ export default function StaffStationOperationalScreen({
+       || autoAttempt.current === pending.receiptId
+       || acknowledging.current
      ) return;
++    const ackVisitId = visitIdRef.current;
      autoAttempt.current = pending.receiptId;
      acknowledging.current = true;
 -    setView((previous) => ({ ...previous, busy: true }));
 +    setView((previous) => ({ ...previous, busy: true, busyKind: 'acknowledging' }));
      void (async () => {
-       const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
+-      const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
++      const target = { ...scope, visitId: ackVisitId, serviceSessionId: pending.serviceSessionId ?? null };
        let verified = false;
-@@ -367,13 +481,14 @@ export default function StaffStationOperationalScreen({
-       acknowledging.current = false;
-       if (same(scope, getContext())) {
+       try {
+         const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
+-        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && same(scope, getContext())) {
++        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && ackVisitId === visitIdRef.current && same(scope, getContext())) {
+           await coordinator.acknowledgeTerminal(target, pending.receiptId);
+           // O marcador concluído e a ausência do recibo precisam ser confirmados por nova leitura.
+-          const remaining = await coordinator.pending(scope);
++          const remaining = await coordinator.pending({ ...scope, visitId: ackVisitId });
+           verified = remaining.kind === 'none';
+         }
+       } catch { /* A releitura manterá o bloqueio se o armazenamento falhar. */ }
+-      acknowledging.current = false;
+-      if (same(scope, getContext())) {
++      if (ackVisitId === visitIdRef.current) acknowledging.current = false;
++      if (ackVisitId === visitIdRef.current && !revokedKindRef.current && same(scope, getContext())) {
          if (verified) setView((previous) => ({ ...previous, feedback: pending.outcome }));
 -        setView((previous) => ({ ...previous, busy: false }));
 +        setView((previous) => ({ ...previous, busy: false, busyKind: null }));
          await refresh(true);
-       } else if (getContext()) void refresh();
+-      } else if (getContext()) void refresh();
++      } else if (ackVisitId === visitIdRef.current && !revokedKindRef.current && getContext()) {
++        void refresh();
++      }
      })();
    }, [accessDenied, view.pending, view.scope, coordinator]);
  
@@ -864,7 +936,7 @@ index 38147f3..f14a61f 100644
      || view.busy
      || view.status !== 'ready'
      || view.error === 'stale'
-@@ -391,6 +506,7 @@ export default function StaffStationOperationalScreen({
+@@ -391,6 +541,7 @@ export default function StaffStationOperationalScreen({
        !expected
        || dispatching.current
        || acknowledging.current
@@ -872,7 +944,7 @@ index 38147f3..f14a61f 100644
        || !coordinator
        || expected.readGen !== generation.current
        || (fromDialog && dialogRef.current !== expected)
-@@ -412,10 +528,13 @@ export default function StaffStationOperationalScreen({
+@@ -412,30 +563,63 @@ export default function StaffStationOperationalScreen({
        )
      ) return;
      dispatching.current = true;
@@ -883,17 +955,36 @@ index 38147f3..f14a61f 100644
      setDialog(null);
      const scope = expected.context;
 -    setView((previous) => ({ ...previous, busy: true, feedback: null }));
++    const originVisitId = visitIdRef.current;
++    const opId = ++opSeqRef.current;
++    activeOpIdRef.current = opId;
++    const opScope = { ...scope, visitId: originVisitId, opId };
 +    setView((previous) => ({ ...previous, busy: true, busyKind: 'precondition', feedback: null }));
      try {
        let result;
        try {
-@@ -430,10 +549,35 @@ export default function StaffStationOperationalScreen({
+         const action = expected.action;
+         result = action.kind === 'call'
+-          ? await coordinator.callNext(scope, experience.id, station.id)
++          ? await coordinator.callNext(opScope, experience.id, station.id)
+           : action.kind === 'complete'
+-            ? await coordinator.complete(scope, action.serviceSessionId, station.id)
++            ? await coordinator.complete(opScope, action.serviceSessionId, station.id)
+             : action.kind === 'absent'
+-              ? await coordinator.absent(scope, action.serviceSessionId, station.id)
+-              : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
++              ? await coordinator.absent(opScope, action.serviceSessionId, station.id)
++              : await coordinator.removeCalled(opScope, experience.id, station.id, action.serviceSessionId);
        } catch {
          result = { kind: 'storage_error' };
        }
 -      if (!same(scope, getContext())) return;
 -      setView((previous) => ({ ...previous, busy: false, feedback: result }));
-+      const alreadyRevokedBeforeReturn = Boolean(revokedKindRef.current);
++      const isExactOriginContext = mounted.current
++        && !liveRef.current.accessDenied
++        && originVisitId === visitIdRef.current
++        && opSeqRef.current === opId
++        && same(scope, getContext());
 +      if (
 +        (result?.kind === 'rejected' || result?.kind === 'rejected_cleanup_pending')
 +        && (result.status === 401 || result.status === 403)
@@ -901,32 +992,32 @@ index 38147f3..f14a61f 100644
 +        const preservedFeedback = (result.phase === 'precondition' || result.kind === 'rejected_cleanup_pending')
 +          ? result
 +          : null;
-+        if (!same(scope, getContext())) {
-+          if (
-+            alreadyRevokedBeforeReturn
-+            && preservedFeedback
-+            && mounted.current
-+            && liveRef.current.event?.id === scope.eventId
-+            && liveRef.current.auth?.user?.id === scope.userId
-+          ) {
-+            setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: preservedFeedback }));
-+          }
++        if (!isExactOriginContext) {
 +          return;
 +        }
-+        revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback);
++        if (revokedKindRef.current && revokedByOpRef.current !== opId) {
++          return;
++        }
++        if (revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback)) {
++          revokedByOpRef.current = opId;
++        }
 +        return;
 +      }
-+      if (!same(scope, getContext()) || revokedKindRef.current) return;
++      if (!isExactOriginContext || revokedKindRef.current) return;
 +      setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: result }));
        const refreshedOk = await refresh(true);
 -      if (refreshedOk && same(scope, getContext())) liveRef.current.onChanged?.();
-+      if (refreshedOk && !revokedKindRef.current && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
++      if (refreshedOk && !revokedKindRef.current && originVisitId === visitIdRef.current && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
 +        liveRef.current.onChanged?.();
 +      }
      } finally {
-       dispatching.current = false;
+-      dispatching.current = false;
++      if (activeOpIdRef.current === opId) activeOpIdRef.current = 0;
++      if (originVisitId === visitIdRef.current) dispatching.current = false;
      }
-@@ -452,12 +596,12 @@ export default function StaffStationOperationalScreen({
+   }
+ 
+@@ -452,12 +636,12 @@ export default function StaffStationOperationalScreen({
        || !expected.receiptId
        || pending.receiptId !== expected.receiptId
      ) return;
@@ -941,7 +1032,7 @@ index 38147f3..f14a61f 100644
        await refresh();
      }
    }
-@@ -505,26 +649,18 @@ export default function StaffStationOperationalScreen({
+@@ -505,26 +689,18 @@ export default function StaffStationOperationalScreen({
      || data?.availability !== 'available';
    const showUnavailableHint = Boolean(data && !data.pending && data.availability === 'unavailable');
    const showCallClosedHint = Boolean(data && !data.pending && data.availability === 'available' && !data.canCall && data.waitingCount > 0);
@@ -980,7 +1071,7 @@ index 38147f3..f14a61f 100644
  
    return (
      <View style={styles.content}>
-@@ -542,6 +678,21 @@ export default function StaffStationOperationalScreen({
+@@ -542,6 +718,27 @@ export default function StaffStationOperationalScreen({
          </View>
        )}
  
@@ -994,7 +1085,13 @@ index 38147f3..f14a61f 100644
 +                ? 'Descartando solicitação não enviada...'
 +                : view.busyKind === 'precondition'
 +                  ? 'Verificando condições antes do envio...'
-+                  : 'Processando operação no servidor...'}
++                  : view.busyKind === 'preparing'
++                    ? 'Preparando solicitação com segurança...'
++                    : view.busyKind === 'dispatching'
++                      ? 'Registrando envio seguro...'
++                      : view.busyKind === 'persisting'
++                        ? 'Registrando resultado com segurança...'
++                        : 'Processando operação no servidor...'}
 +          </Text>
 +        </View>
 +      )}
@@ -1002,7 +1099,7 @@ index 38147f3..f14a61f 100644
        {view.status === 'error' && view.error === 'verifying' && (
          <View accessibilityRole="progressbar" style={styles.stateCard}>
            <ActivityIndicator color={c.accent} />
-@@ -561,31 +712,13 @@ export default function StaffStationOperationalScreen({
+@@ -561,31 +758,13 @@ export default function StaffStationOperationalScreen({
          </View>
        )}
  
@@ -1041,7 +1138,7 @@ index 38147f3..f14a61f 100644
            </Text>
          </View>
        )}
-@@ -680,12 +813,7 @@ export default function StaffStationOperationalScreen({
+@@ -680,12 +859,7 @@ export default function StaffStationOperationalScreen({
          </View>
        )}
  
@@ -1055,7 +1152,7 @@ index 38147f3..f14a61f 100644
  
        <ActionButton
          label="Atualizar atendimento"
-@@ -723,12 +851,6 @@ const styles = StyleSheet.create({
+@@ -723,12 +897,6 @@ const styles = StyleSheet.create({
    warningMessage: { color: '#FDE68A', fontSize: 14, lineHeight: 20 },
    successMessage: { color: '#A7F3D0', fontSize: 14, lineHeight: 20 },
    helperNote: { color: c.muted, fontSize: 13, lineHeight: 19 },
@@ -1528,7 +1625,7 @@ index a878f86..0d52bfe 100644
        if (revision === generation && request === queueGeneration) silentQueue = false;
      }
 diff --git a/app/services/staffEntryService.js b/app/services/staffEntryService.js
-index 554563e..2354ab6 100644
+index 554563e..c101d93 100644
 --- a/app/services/staffEntryService.js
 +++ b/app/services/staffEntryService.js
 @@ -63,7 +63,7 @@ export function parseEntryResult(body, intent) {
@@ -1624,7 +1721,7 @@ index 554563e..2354ab6 100644
          let outcome;
          try {
            const options = { auth: true, retryOnUnauthorized: false, outcomeUnknownOnNetworkError: true,
-@@ -176,46 +199,74 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
+@@ -176,46 +199,76 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
            outcome = { kind: 'confirmed', result: parseEntryResult(body, intent) };
          } catch (error) {
            if (!isDefinitiveEntryRejection(error)) {
@@ -1643,8 +1740,10 @@ index 554563e..2354ab6 100644
 +            revokedKind = authFailure;
 +            readGeneration += 1;
 +            silentFlight = false;
-+            publish({ status: 'error', data: null, error: revokedKind });
++            publish({ status: 'error', data: null, error: revokedKind, busy: false, busyKind: null });
 +          }
++        } else if (sameOperationScope()) {
++          publish({ busyKind: 'persisting' });
 +        }
          await storage.finish(intent, outcome);
 -        if (!isCurrent(context)) return { kind: 'stale' };
@@ -1832,7 +1931,7 @@ index 6828843..975bd07 100644
      if (!event) return false;
      publish({ ...state, selected: event });
 diff --git a/app/services/staffOperationsService.js b/app/services/staffOperationsService.js
-index 54ef8fe..bda7eb2 100644
+index 54ef8fe..88169bb 100644
 --- a/app/services/staffOperationsService.js
 +++ b/app/services/staffOperationsService.js
 @@ -267,7 +267,14 @@ export function classifyStaffOperationError(error) {
@@ -1851,36 +1950,65 @@ index 54ef8fe..bda7eb2 100644
    if (typeof isCurrent !== 'function' || typeof createKey !== 'function' || storage?.isPersistent !== true ||
        ['get', 'reserve', 'dispatch', 'recordTerminal', 'cancelReserved', 'clear', 'acknowledge']
          .some((name) => typeof storage?.[name] !== 'function'))
-@@ -299,11 +306,38 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+@@ -287,6 +294,34 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+     alive(context);
+     return intent;
+   }
++  function createPreconditionAuthGuard(context, desired) {
++    let notified = false;
++    function reportIfAuthError(error) {
++      const status = Number.isInteger(error?.status) ? error.status : null;
++      if ((status !== 401 && status !== 403) || notified) return;
++      if (!isCurrent(context, desired)) return;
++      notified = true;
++      if (typeof onAuthError === 'function') {
++        try {
++          onAuthError({
++            kind: status === 401 ? 'session' : 'denied',
++            status,
++            code: typeof error?.code === 'string' ? error.code : null,
++            phase: 'precondition',
++            context,
++            desired,
++          });
++        } catch { /* Não mascarar a recusa prévia nem interromper observadores irmãos. */ }
++      }
++    }
++    function observe(promise) {
++      return Promise.resolve(promise).catch((error) => {
++        reportIfAuthError(error);
++        throw error;
++      });
++    }
++    return { observe, reportIfAuthError, wasNotified: () => notified };
++  }
+   async function execute(context, desired, check, operation) {
+     contextValid(context);
+     const existing = await getIntent(context);
+@@ -298,12 +333,31 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+       ? { kind: 'terminal_pending', outcome: existing.outcome, receiptId: existing.key }
        : { kind: existing.phase === 'reserved' ? 'reserved' : 'pending_reconciliation' };
      if (!existing) {
++      const preconditionGuard = createPreconditionAuthGuard(context, desired);
        let possible;
 -      try { possible = await check(); }
 +      try {
 +        if (typeof onStage === 'function') onStage('precondition', context, desired);
-+        possible = await check();
++        possible = await check(preconditionGuard.observe);
 +      }
        catch (error) {
-         alive(context, desired);
+-        alive(context, desired);
 -        return { kind: 'rejected', phase: 'precondition', status: error?.status ?? null,
 -          code: error?.code ?? null, network: Boolean(error?.isNetworkError) };
++        if (!preconditionGuard.wasNotified()) {
++          alive(context, desired);
++          preconditionGuard.reportIfAuthError(error);
++        }
 +        const status = Number.isInteger(error?.status) ? error.status : null;
 +        const timeout = Boolean(error?.isTimeout);
 +        const network = Boolean(error?.isNetworkError || timeout);
 +        const transient = network || status === null || status >= 500;
 +        const code = typeof error?.code === 'string' ? error.code : null;
-+        if ((status === 401 || status === 403) && typeof onAuthError === 'function') {
-+          try {
-+            onAuthError({
-+              kind: status === 401 ? 'session' : 'denied',
-+              status,
-+              code,
-+              phase: 'precondition',
-+              context,
-+              desired,
-+            });
-+          } catch { /* Não mascarar a recusa prévia classificada. */ }
-+        }
 +        return {
 +          kind: 'rejected',
 +          phase: 'precondition',
@@ -1893,7 +2021,24 @@ index 54ef8fe..bda7eb2 100644
        }
        alive(context, desired);
        if (!possible) return { kind: 'blocked' };
-@@ -323,29 +357,47 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+@@ -311,6 +365,7 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+     const intent = { ...desired, key: createKey(), phase: 'reserved' };
+     requireIds(intent.key);
+     alive(context, desired);
++    if (typeof onStage === 'function') onStage('preparing', context, desired);
+     const reservation = await storage.reserve(intent);
+     if (!isCurrent(context, desired)) {
+       if (reservation?.created) { try { await storage.cancelReserved(context.userId, intent.key); } catch { /* ainda bloqueada ou removida */ } }
+@@ -318,34 +373,58 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+     }
+     if (!reservation?.created) return { kind: 'pending_reconciliation' };
+     let dispatched;
+-    try { dispatched = await storage.dispatch(context.userId, intent.key); }
++    try {
++      if (typeof onStage === 'function') onStage('dispatching', context, desired);
++      dispatched = await storage.dispatch(context.userId, intent.key);
++    }
+     catch { return isCurrent(context, desired) ? { kind: 'storage_error' } : { kind: 'stale' }; }
      if (!isCurrent(context, desired)) return { kind: 'stale' };
      if (!dispatched) return { kind: 'pending_reconciliation' };
      let outcome;
@@ -1924,6 +2069,9 @@ index 54ef8fe..bda7eb2 100644
 +      }
      }
 -    // A resposta histórica pertence à intenção original mesmo após logout.
++    if (!revokedByCurrentAuth && typeof onStage === 'function' && isCurrent(context, desired)) {
++      onStage('persisting', context, desired);
++    }
 +    // A resposta histórica pertence à intenção original mesmo após logout ou bloqueio imediato de autorização.
      try { await storage.recordTerminal(context.userId, intent.key, outcome); }
      catch {
@@ -1946,8 +2094,66 @@ index 54ef8fe..bda7eb2 100644
    }
    function single(work, context, scope) {
      if (inflight) return Promise.resolve({ kind: 'busy' });
+@@ -378,10 +457,10 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         contextValid(context); requireIds(experienceId, stationId);
+         const desired = { kind: 'call', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+           experienceId, stationId, serviceSessionId: null };
+-        return execute(context, desired, async () => {
++        return execute(context, desired, async (observe) => {
+           const [queue, { stations }] = await Promise.all([
+-            fetchStaffQueue(client, context.eventId, experienceId),
+-            fetchStaffStations(client, context.eventId),
++            observe(fetchStaffQueue(client, context.eventId, experienceId)),
++            observe(fetchStaffStations(client, context.eventId)),
+           ]);
+           const station = stations.find((s) => s.id === stationId && s.experienceId === experienceId);
+           return Boolean(queue.waitingCount > 0 && queue.canCallWaitingEntries && station
+@@ -395,8 +474,8 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         contextValid(context); requireIds(serviceSessionId, stationId);
+         const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+           experienceId: null, stationId, serviceSessionId };
+-        return execute(context, desired, async () => {
+-          const { stations } = await fetchStaffStations(client, context.eventId);
++        return execute(context, desired, async (observe) => {
++          const { stations } = await observe(fetchStaffStations(client, context.eventId));
+           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
+         }, (key) => completeStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+       }, context, { ...context, kind: 'complete', experienceId: null, stationId, serviceSessionId });
+@@ -407,8 +486,8 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         contextValid(context); requireIds(serviceSessionId, stationId);
+         const desired = { kind: 'absent', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
+           experienceId: null, stationId, serviceSessionId };
+-        return execute(context, desired, async () => {
+-          const { stations } = await fetchStaffStations(client, context.eventId);
++        return execute(context, desired, async (observe) => {
++          const { stations } = await observe(fetchStaffStations(client, context.eventId));
+           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
+         }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+       }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
+@@ -419,8 +498,8 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         contextValid(context); requireIds(experienceId, stationId, serviceSessionId);
+         const desired = { kind: 'remove_called', userId: context.userId, eventId: context.eventId,
+           sessionId: context.sessionId, experienceId, stationId, serviceSessionId };
+-        return execute(context, desired, async () => {
+-          const { stations } = await fetchStaffStations(client, context.eventId);
++        return execute(context, desired, async (observe) => {
++          const { stations } = await observe(fetchStaffStations(client, context.eventId));
+           return stations.some(s => s.id === stationId && s.experienceId === experienceId &&
+             s.pendingServiceSessionId === serviceSessionId);
+         }, key => removeCalledStaff(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
+@@ -432,8 +511,8 @@ export function createStaffOperationsCoordinator({ client, storage, createKey, i
+         contextValid(context); requireIds(experienceId, stationId, queueEntryId);
+         const desired = { kind: 'remove', userId: context.userId, eventId: context.eventId,
+           sessionId: context.sessionId, experienceId, stationId, serviceSessionId: null, queueEntryId };
+-        return execute(context, desired, async () => {
+-          const state = await fetchStaffStationState(client, context.eventId, experienceId, stationId);
++        return execute(context, desired, async (observe) => {
++          const state = await observe(fetchStaffStationState(client, context.eventId, experienceId, stationId));
+           return state.waiting.some(row => row.queueEntryId === queueEntryId);
+         }, key => removeWaitingStaff(client, { eventId: context.eventId, experienceId, queueEntryId,
+           idempotencyKey: key }));
 diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
-index ac51dd2..68f3f61 100644
+index ac51dd2..44d2935 100644
 --- a/app/tests/roleRoutingIntegration.test.cjs
 +++ b/app/tests/roleRoutingIntegration.test.cjs
 @@ -183,6 +183,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
@@ -1958,7 +2164,7 @@ index ac51dd2..68f3f61 100644
          'services/staffIntentStorage', 'services/staffDashboardService', 'services/staffOperationsService',
          'screens/staff/useStaffPolling', 'screens/staff/components/StaffLiveScreen',
          'screens/admin/components/AdminLiveUI', 'screens/admin/components/adminTheme'].includes(target)) {
-@@ -3666,3 +3667,1021 @@ test('STAFF03-AUD-04 integração com timer real: substituição da chamada dura
+@@ -3666,3 +3667,1198 @@ test('STAFF03-AUD-04 integração com timer real: substituição da chamada dura
      app.dispose();
    }
  });
@@ -2980,6 +3186,183 @@ index ac51dd2..68f3f61 100644
 +    app.dispose();
 +  }
 +});
++
++test('STAFF04-AUD-08/09/10 integração ponta a ponta: 403 tardio após 503 em pré-condição paralela, recuperação oficial no Painel e estágio "Registrando resultado com segurança..."', { skip }, async () => {
++  const at = '2026-11-10T15:00:00.000Z';
++  const expId = '33333333-3333-4333-8333-333333333388';
++  const stationId = '44444444-4444-4444-8444-444444444488';
++  const queueEntryId = '77777777-7777-4777-8777-777777777788';
++  const serviceSessId = '88888888-8888-4888-8888-888888888888';
++  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000088', roles: ['staff'] };
++  const secureValues = new Map();
++  const origSetTimeout = globalThis.setTimeout;
++
++  let preconditionMode = 'ok';
++  let slowStationsReject = null;
++  let receiptGate = null;
++  let postCount = 0;
++  let stationPending = null;
++  let stationWaiting = [{ queueEntryId, displayName: 'Diego Costa', position: 1 }];
++
++  const app = createIntegration({
++    initialUser: staffUser,
++    control: {
++      realStaff: true,
++      manualTimers: true,
++      platformOS: 'android',
++      events: [staffEvent],
++      secureStore: {
++        isAvailableAsync: async () => true,
++        getItemAsync: async (key) => secureValues.get(key) ?? null,
++        setItemAsync: async (key, value) => {
++          if (receiptGate && key.endsWith('.receipt')) {
++            const g = receiptGate;
++            receiptGate = null;
++            await g.promise;
++          }
++          secureValues.set(key, value);
++        },
++        deleteItemAsync: async (key) => { secureValues.delete(key); },
++      },
++      http: async (route, options) => {
++        if (route === '/staff/events') return { events: [staffEvent] };
++        if (route === `/staff/events/${staffEvent.id}/experiences`) {
++          return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
++        }
++        if (route === `/staff/events/${staffEvent.id}/stations`) {
++          if (preconditionMode === 'split_503_then_403') {
++            return new Promise((done) => {
++              slowStationsReject = () => done({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
++            });
++          }
++          return {
++            eventId: staffEvent.id,
++            stations: [{
++              id: stationId,
++              experienceId: expId,
++              label: 'Cabine A',
++              availability: 'available',
++              pendingServiceSessionId: stationPending?.serviceSessionId ?? null,
++              pendingCalledAt: stationPending?.calledAt ?? null,
++            }],
++          };
++        }
++        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/queue`) {
++          if (preconditionMode === 'split_503_then_403') {
++            return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
++          }
++          return {
++            eventId: staffEvent.id,
++            experienceId: expId,
++            waitingCount: stationWaiting.length,
++            canCallWaitingEntries: stationWaiting.length > 0 && !stationPending,
++            firstWaitingQueueEntryId: stationWaiting[0]?.queueEntryId ?? null,
++            acceptingNewEntries: true,
++          };
++        }
++        if (route === `/staff/events/${staffEvent.id}/entry-control`) {
++          return {
++            eventId: staffEvent.id,
++            externalQueueEnabled: true,
++            canManage: true,
++            observedAt: at,
++            pendingCall: null,
++            canCall: false,
++            canConfirm: false,
++            canMarkAbsent: false,
++            canRemove: false,
++            waitingCount: 0,
++            waiting: [],
++          };
++        }
++        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/operational-state`) {
++          return {
++            eventId: staffEvent.id,
++            experienceId: expId,
++            stationId,
++            availability: 'available',
++            canCall: stationWaiting.length > 0 && !stationPending,
++            waitingCount: stationWaiting.length,
++            waiting: stationWaiting,
++            pending: stationPending,
++          };
++        }
++        if (route.endsWith('/call-next') && options.method === 'POST') {
++          postCount += 1;
++          const next = stationWaiting.shift();
++          stationPending = {
++            serviceSessionId: serviceSessId,
++            queueEntryId: next.queueEntryId,
++            displayName: next.displayName,
++            calledAt: at,
++          };
++          return {
++            serviceSession: {
++              id: serviceSessId,
++              queueEntryId: next.queueEntryId,
++              experienceId: expId,
++              station: { id: stationId, label: 'Cabine A' },
++              status: 'pending',
++              calledAt: at,
++            },
++          };
++        }
++        return undefined;
++      },
++    },
++  });
++
++  try {
++    await app.mount();
++    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
++    await app.press('Selecionar evento Evento autorizado');
++    await app.press('Selecionar estação Cabine A da experiência Arena VR');
++    assert.ok(app.hasQueueRow(1, 'Diego Costa'));
++
++    // 1. AUD-08: /queue retorna 503 primeiro, depois /stations retorna 403 -> bloqueia imediatamente sem POST
++    preconditionMode = 'split_503_then_403';
++    await app.press('Chamar próximo');
++    assert.equal(postCount, 0);
++    assert.ok(app.hasText('Nenhuma alteração foi enviada.'));
++
++    await app.act(async () => {
++      slowStationsReject();
++      await new Promise((resolve) => origSetTimeout(resolve, 0));
++    });
++    assert.ok(!app.hasText('Diego Costa'));
++    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível.'));
++    assert.equal(postCount, 0);
++
++    // 2. AUD-09: recuperação oficial via retorno ao Painel + Atualizar estações (200) restaura acesso
++    preconditionMode = 'ok';
++    await app.press('Voltar ao painel');
++    assert.ok(app.hasText('SEM ACESSO'));
++    await app.press('Atualizar estações');
++    assert.ok(app.hasText('Cabine A'));
++    await app.press('Selecionar estação Cabine A da experiência Arena VR');
++    assert.ok(app.hasQueueRow(1, 'Diego Costa'));
++
++    // 3. AUD-10: durante escrita local de .receipt após confirmação 200, exibe 'Registrando resultado com segurança...'
++    let resolveReceipt;
++    receiptGate = { promise: new Promise((yes) => { resolveReceipt = yes; }) };
++    let pCall;
++    await app.act(async () => {
++      pCall = app.handler('Chamar próximo')();
++    });
++    assert.ok(app.hasExactText('Registrando resultado com segurança...'));
++    assert.equal(app.hasText('Participante chamado. Operação confirmada pelo servidor.'), false);
++
++    await app.act(async () => {
++      resolveReceipt();
++      await pCall;
++      await new Promise((resolve) => origSetTimeout(resolve, 0));
++    });
++    assert.ok(app.hasText('Participante chamado. Operação confirmada pelo servidor.'));
++    assert.equal(postCount, 1);
++  } finally {
++    app.dispose();
++  }
++});
 diff --git a/app/tests/staffDashboard.test.cjs b/app/tests/staffDashboard.test.cjs
 index 7a97ab4..718b33c 100644
 --- a/app/tests/staffDashboard.test.cjs
@@ -3095,10 +3478,10 @@ index 9f4b9a0..16471f0 100644
  
  test('controle de entrada real não carrega estado demonstrativo', () => {
 diff --git a/app/tests/staffEntryControl.test.cjs b/app/tests/staffEntryControl.test.cjs
-index f003e8a..4937607 100644
+index f003e8a..c9ac05f 100644
 --- a/app/tests/staffEntryControl.test.cjs
 +++ b/app/tests/staffEntryControl.test.cjs
-@@ -289,3 +289,460 @@ test('R3-02: negativa 403/404 ou 401 em GET anterior não é descartada por refr
+@@ -289,3 +289,521 @@ test('R3-02: negativa 403/404 ou 401 em GET anterior não é descartada por refr
      assert.equal(r.store.getSnapshot().error, null);
    }
  });
@@ -3559,8 +3942,69 @@ index f003e8a..4937607 100644
 +    assert.equal(store.getSnapshot().error, 'denied');
 +  }
 +});
++
++test('STAFF04-AUD-10 (store Entrada): busyKind transita para persisting em storage.finish de confirmação ou 409, mas limpa imediatamente em 401/403 e nunca aparece em uncertain', async () => {
++  for (const scenario of ['confirmed', 'rejected_409', 'auth_403', 'uncertain']) {
++    const finishGate = defer();
++    const seenBusyKinds = [];
++    const saved = new Map();
++    const customStorage = {
++      isPersistent: true,
++      async get(user) { return saved.get(user) ?? null; },
++      async reserve(intent) { saved.set(intent.userId, intent); return { created: true, intent }; },
++      async dispatch(intent) { saved.set(intent.userId, { ...intent, phase: 'dispatching' }); return true; },
++      async finish(intent, outcome) {
++        await finishGate.promise;
++        saved.set(intent.userId, { ...intent, phase: 'terminal', outcome });
++        return true;
++      },
++      async acknowledge() { return true; },
++      async cancelReserved() { return true; },
++    };
++    const store = api.createStaffEntryStore({
++      client: {
++        get: async () => body(),
++        post: async () => {
++          if (scenario === 'confirmed') return callResult();
++          if (scenario === 'rejected_409') throw Object.assign(new Error('409'), { status: 409, code: 'ENTRY_NOT_FIRST' });
++          if (scenario === 'auth_403') throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
++          throw Object.assign(new Error('timeout'), { isTimeout: true });
++        },
++        patch: async () => ({}),
++      },
++      storage: customStorage,
++      getContext: () => context,
++      createKey: () => id(70),
++    });
++    store.subscribe((snap) => {
++      if (snap.busy && snap.busyKind && seenBusyKinds[seenBusyKinds.length - 1] !== snap.busyKind) {
++        seenBusyKinds.push(snap.busyKind);
++      }
++    });
++    store.setContext(context);
++    await store.refresh();
++
++    const pMutate = store.mutate({ kind: 'call' });
++    await new Promise((r) => setTimeout(r, 10));
++
++    if (scenario === 'confirmed' || scenario === 'rejected_409') {
++      assert.equal(store.getSnapshot().busy, true);
++      assert.equal(store.getSnapshot().busyKind, 'persisting');
++      assert.deepEqual(seenBusyKinds, ['preparing', 'dispatching', 'mutating', 'persisting']);
++    } else if (scenario === 'auth_403') {
++      assert.equal(store.getSnapshot().busy, false, '403 prioriza bloqueio imediato sem manter busy visível');
++      assert.equal(store.getSnapshot().busyKind, null);
++      assert.equal(store.getSnapshot().data, null);
++      assert.equal(seenBusyKinds.includes('persisting'), false);
++    } else {
++      assert.equal(seenBusyKinds.includes('persisting'), false);
++    }
++    finishGate.resolve();
++    await pMutate;
++  }
++});
 diff --git a/app/tests/staffEntryControlScreen.test.cjs b/app/tests/staffEntryControlScreen.test.cjs
-index 485e09a..b566f3e 100644
+index 485e09a..928f004 100644
 --- a/app/tests/staffEntryControlScreen.test.cjs
 +++ b/app/tests/staffEntryControlScreen.test.cjs
 @@ -99,6 +99,8 @@ function createEntryScreenHarness({
@@ -3612,7 +4056,7 @@ index 485e09a..b566f3e 100644
      if (name === './useStaffPolling') {
        return {
          useStaffPolling(enabled, read, intervalMs, scope) {
-@@ -820,3 +837,627 @@ test('STAFF-03 modal seguro, incerteza dispatching e limpeza imediata em revoga
+@@ -820,3 +837,767 @@ test('STAFF-03 modal seguro, incerteza dispatching e limpeza imediata em revoga
    assert.ok(h401.hasText('Sessão inválida'));
    h401.unmount();
  });
@@ -4240,6 +4684,146 @@ index 485e09a..b566f3e 100644
 +  assert.ok(h404.hasText('A chamada ou recurso informado não foi encontrado no servidor. Confira o estado atualizado.'));
 +  h404.unmount();
 +});
++
++test('STAFF04-AUD-10 (tela Entrada): exibe "Registrando resultado com segurança..." durante storage.finish sem indicar sucesso prematuro nem atrasar bloqueio 403', { skip }, async () => {
++  const EV_B = '22222222-2222-4222-8222-222222222222';
++  const entrySlot = `arenago.staff.entry.${USER_1}`;
++  let terminalGate = null;
++  let ackGate = null;
++  let postGate = null;
++  let activeEventId = EV_A;
++  const makeState = (evId, withCall = true) => ({
++    eventId: evId,
++    externalQueueEnabled: true,
++    canManage: true,
++    observedAt: AT,
++    pendingCall: withCall ? { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT } : null,
++    waitingCount: 1,
++    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
++    canCall: !withCall,
++    canConfirm: withCall,
++    canMarkAbsent: withCall,
++    canRemove: withCall,
++  });
++  let currentState = makeState(EV_A, true);
++
++  const h = createEntryScreenHarness({
++    onSecureSet: async (_, raw) => {
++      const parsed = JSON.parse(raw);
++      if (terminalGate && parsed.phase === 'terminal') {
++        const g = terminalGate;
++        terminalGate = null;
++        await g.deferred.promise;
++        if (g.fail) throw g.fail;
++      }
++      if (ackGate && parsed.phase === 'acknowledged') {
++        const g = ackGate;
++        ackGate = null;
++        await g.promise;
++      }
++    },
++    onGet: async () => ({ ...currentState, eventId: activeEventId }),
++    onPost: () => postGate.promise,
++  });
++
++  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
++  await h.mount();
++
++  // 1, 2 e 6: servidor pendente -> confirmado com finish pendente -> reconhecimento local posterior
++  postGate = deferred();
++  terminalGate = { deferred: deferred(), fail: null };
++  ackGate = deferred();
++  const tGate1 = terminalGate.deferred;
++  const aGate1 = ackGate;
++
++  await h.press('Confirmar entrada');
++  let pConfirm;
++  await h.act(async () => { pConfirm = h.handler('CONFIRMAR ALTERAÇÃO')(); });
++  assert.ok(h.hasExactText('Processando operação no servidor...'));
++
++  currentState = makeState(EV_A, false);
++  await h.act(async () => {
++    postGate.resolve({
++      eventId: EV_A,
++      call: { id: CALL_1, participationId: PART_1, status: 'confirmed', calledAt: AT, resolvedAt: AT },
++      participation: { id: PART_1, status: 'active', arenaEnteredAt: AT, finishReason: null, externalQueueOrder: '1' },
++      requeued: false,
++    });
++  });
++  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
++  assert.equal(h.hasText('Entrada confirmada pelo servidor.'), false, 'não antecipa sucesso antes de persistir');
++
++  await h.act(async () => {
++    tGate1.resolve();
++    await pConfirm;
++  });
++  assert.ok(h.hasExactText('Finalizando reconhecimento seguro local...'));
++
++  await h.act(async () => { aGate1.resolve(); });
++  await flush();
++  assert.ok(h.hasText('Entrada confirmada pelo servidor.'));
++
++  // 3 e 5: recusa definitiva não-auth (409) mostra 'Registrando resultado com segurança...', e falha em finish informa erro de armazenamento
++  currentState = makeState(EV_A, true);
++  await h.press('Atualizar fila de entrada');
++  postGate = deferred();
++  terminalGate = { deferred: deferred(), fail: new Error('finish-write-error') };
++  const tGateFail = terminalGate.deferred;
++  await h.press('Confirmar entrada');
++  let pRejectFail;
++  await h.act(async () => { pRejectFail = h.handler('CONFIRMAR ALTERAÇÃO')(); });
++  await h.act(async () => {
++    postGate.reject(Object.assign(new Error('not-pending'), { status: 409, code: 'ENTRY_CALL_NOT_PENDING' }));
++  });
++  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
++  await h.act(async () => {
++    tGateFail.resolve();
++    await pRejectFail;
++  });
++  await flush();
++  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
++  assert.ok(h.hasText('O servidor recusou a alteração, mas o registro local não foi confirmado.'));
++
++  // 7 e 8: troca de contexto durante finish pendente e resultado desconhecido (timeout)
++  h.secureValues.delete(entrySlot);
++  currentState = makeState(EV_A, true);
++  await h.press('Atualizar fila de entrada');
++  postGate = deferred();
++  await h.press('Confirmar entrada');
++  let pUncertain;
++  await h.act(async () => { pUncertain = h.handler('CONFIRMAR ALTERAÇÃO')(); });
++  await h.act(async () => {
++    postGate.reject(Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true }));
++    await pUncertain;
++  });
++  await flush();
++  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
++  assert.ok(h.hasText('O resultado de uma solicitação ainda não foi confirmado.'));
++
++  h.secureValues.delete(entrySlot);
++  activeEventId = EV_B;
++  currentState = makeState(EV_B, true);
++  await h.rerender({ event: { id: EV_B, name: 'Arena Evento B' } });
++  postGate = deferred();
++  terminalGate = { deferred: deferred(), fail: null };
++  const tGateCtx = terminalGate.deferred;
++  await h.press('Confirmar entrada');
++  let pCtx;
++  await h.act(async () => { pCtx = h.handler('CONFIRMAR ALTERAÇÃO')(); });
++  await h.act(async () => {
++    postGate.reject(Object.assign(new Error('409'), { status: 409, code: 'ENTRY_CALL_NOT_PENDING' }));
++  });
++  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
++  activeEventId = EV_A;
++  currentState = makeState(EV_A, true);
++  await h.rerender({ event: { id: EV_A, name: 'Arena Oficial UNDB' } });
++  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
++  await h.act(async () => {
++    tGateCtx.resolve();
++    await pCtx;
++  });
++  h.unmount();
++});
 diff --git a/app/tests/staffEventDiscovery.test.cjs b/app/tests/staffEventDiscovery.test.cjs
 index ad1da2a..bf6d28d 100644
 --- a/app/tests/staffEventDiscovery.test.cjs
@@ -4818,10 +5402,10 @@ index ad1da2a..bf6d28d 100644
 +  }
 +});
 diff --git a/app/tests/staffOperationsService.integration.test.cjs b/app/tests/staffOperationsService.integration.test.cjs
-index 11422ff..e291526 100644
+index 11422ff..76ab9d7 100644
 --- a/app/tests/staffOperationsService.integration.test.cjs
 +++ b/app/tests/staffOperationsService.integration.test.cjs
-@@ -953,3 +953,310 @@ test('exclusão SecureStore pendente serializa reconhecimento e reserva entre co
+@@ -953,3 +953,594 @@ test('exclusão SecureStore pendente serializa reconhecimento e reserva entre co
    assert.equal((await second.pending(scope)).receiptId, keyB);
    assert.equal(posts, 2);
  });
@@ -4910,7 +5494,7 @@ index 11422ff..e291526 100644
 +    assert.equal(posts, 0);
 +  }
 +
-+  // Fluxo confirmado emite ['precondition', 'mutating'] em ordem exata
++  // Fluxo confirmado emite estágios ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting'] em ordem exata
 +  {
 +    const { storage } = secureStaffRig();
 +    const stages = [];
@@ -4918,7 +5502,7 @@ index 11422ff..e291526 100644
 +    const client = {
 +      async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
 +      async post() {
-+        assert.deepEqual(stages, ['precondition', 'mutating'], 'onStage mutating ocorre antes do POST');
++        assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating'], 'onStage mutating ocorre antes do POST');
 +        posts += 1;
 +        return called();
 +      },
@@ -4931,7 +5515,7 @@ index 11422ff..e291526 100644
 +      onStage: (stage) => stages.push(stage),
 +    });
 +    assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'confirmed');
-+    assert.deepEqual(stages, ['precondition', 'mutating']);
++    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
 +    assert.equal(posts, 1);
 +  }
 +});
@@ -5130,6 +5714,290 @@ index 11422ff..e291526 100644
 +    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, 403);
 +    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${otherUser}.receipt`)).outcome.kind, 'confirmed');
 +    assert.equal(postCount, 2);
++  }
++});
++
++test('STAFF04-AUD-08 (coordenador): leituras preliminares paralelas propagam 401/403 mesmo após 503 irmão ou com irmã pendente, sem duplicar nem vazar identidade', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
++
++  // 1 e 2: /queue 503 depois /stations 403, e inverso (/stations 503 depois /queue 401)
++  for (const [firstRoute, authStatus, authCode, expectedKind] of [
++    ['queue', 403, 'STAFF_EVENT_FORBIDDEN', 'denied'],
++    ['stations', 401, 'SESSION_REVOKED', 'session'],
++  ]) {
++    const rig = secureStaffRig();
++    const qGate = defer();
++    const sGate = defer();
++    const events = [];
++    let locked = false;
++    let posts = 0;
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        get(url) { return url.endsWith('/stations') ? sGate.promise : qGate.promise; },
++        async post() { posts += 1; return called(); },
++      },
++      storage: rig.storage,
++      isCurrent: () => !locked,
++      createKey: () => key,
++      onAuthError: (info) => {
++        locked = true;
++        events.push(`auth:${info.kind}:${info.status}:${info.phase}`);
++      },
++    });
++
++    const pCall = manager.callNext(context, experienceId, stationId);
++    const firstGate = firstRoute === 'queue' ? qGate : sGate;
++    const secondGate = firstRoute === 'queue' ? sGate : qGate;
++
++    firstGate.reject(Object.assign(new Error('503'), { status: 503, code: 'SERVICE_UNAVAILABLE' }));
++    const res = await pCall;
++    events.push(`callNext:${res.kind}:${res.status}:${res.transient}`);
++    assert.equal(res.kind, 'rejected');
++    assert.equal(res.phase, 'precondition');
++    assert.equal(res.status, 503);
++    assert.equal(res.transient, true);
++    assert.equal(locked, false, 'ainda sem bloqueio de auth enquanto apenas 503 ocorreu');
++    assert.equal(posts, 0);
++
++    // A segunda leitura preliminar rejeita posteriormente com 401/403 -> onAuthError dispara imediatamente
++    secondGate.reject(Object.assign(new Error('auth-denied'), { status: authStatus, code: authCode }));
++    await new Promise((r) => setTimeout(r, 0));
++    assert.equal(locked, true);
++    assert.deepEqual(events, [
++      'callNext:rejected:503:true',
++      `auth:${expectedKind}:${authStatus}:precondition`,
++    ]);
++    assert.equal(posts, 0);
++    assert.equal(rig.values.size, 0);
++  }
++
++  // 3 e 4: uma leitura recebe 403 ou 401 enquanto a consulta irmã permanece pendente (bloqueio imediato sem aguardar irmã e sem duplicar)
++  for (const [fastRoute, authStatus, expectedKind] of [
++    ['queue', 403, 'denied'],
++    ['stations', 401, 'session'],
++  ]) {
++    const rig = secureStaffRig();
++    const qGate = defer();
++    const sGate = defer();
++    let authNotifications = 0;
++    let locked = false;
++    let posts = 0;
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        get(url) { return url.endsWith('/stations') ? sGate.promise : qGate.promise; },
++        async post() { posts += 1; return called(); },
++      },
++      storage: rig.storage,
++      isCurrent: () => !locked,
++      createKey: () => key,
++      onAuthError: (info) => {
++        authNotifications += 1;
++        locked = true;
++        assert.equal(info.kind, expectedKind);
++        assert.equal(info.phase, 'precondition');
++      },
++    });
++
++    const pCall = manager.callNext(context, experienceId, stationId);
++    const fastGate = fastRoute === 'queue' ? qGate : sGate;
++    const pendingSibling = fastRoute === 'queue' ? sGate : qGate;
++
++    fastGate.reject(Object.assign(new Error('auth'), { status: authStatus }));
++    const out = await pCall;
++
++    // Asserção ANTES de resolver a consulta irmã pendente
++    assert.equal(locked, true);
++    assert.equal(authNotifications, 1);
++    assert.equal(out.kind, 'rejected');
++    assert.equal(out.phase, 'precondition');
++    assert.equal(out.status, authStatus);
++    assert.equal(out.transient, false);
++    assert.equal(posts, 0);
++    assert.equal(rig.values.size, 0);
++
++    // Irmã rejeitando depois com 403/401 ou resolvendo 200 não duplica onAuthError nem inicia POST
++    if (fastRoute === 'queue') {
++      pendingSibling.reject(Object.assign(new Error('dup-auth'), { status: authStatus }));
++    } else {
++      pendingSibling.resolve(queue());
++    }
++    await new Promise((r) => setTimeout(r, 0));
++    assert.equal(authNotifications, 1);
++    assert.equal(posts, 0);
++  }
++
++  // 5 e 6: erro transitório + 200 retorna falha prévia sem authError; 200 + 200 permite mutação legítima
++  {
++    const rig = secureStaffRig();
++    let failQueue = true;
++    let authCalls = 0;
++    let posts = 0;
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        async get(url) {
++          if (url.endsWith('/stations')) return stations();
++          if (failQueue) throw Object.assign(new Error('503'), { status: 503 });
++          return queue();
++        },
++        async post() { posts += 1; return called(); },
++      },
++      storage: rig.storage,
++      isCurrent: () => true,
++      createKey: () => key,
++      onAuthError: () => { authCalls += 1; },
++    });
++    const rTransient = await manager.callNext(context, experienceId, stationId);
++    assert.equal(rTransient.kind, 'rejected');
++    assert.equal(rTransient.transient, true);
++    assert.equal(authCalls, 0);
++    assert.equal(posts, 0);
++
++    failQueue = false;
++    const rOk = await manager.callNext(context, experienceId, stationId);
++    assert.equal(rOk.kind, 'confirmed');
++    assert.equal(authCalls, 0);
++    assert.equal(posts, 1);
++  }
++
++  // 7 e 8: negativa tardia após troca de identidade/sessão é ignorada; revalidação legítima permite nova operação
++  {
++    const rig = secureStaffRig();
++    const qGate = defer();
++    const sGate = defer();
++    let activeSession = context.sessionId;
++    let locked = false;
++    const authEvents = [];
++    let useGates = true;
++    let posts = 0;
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        get(url) {
++          if (!useGates) return Promise.resolve(url.endsWith('/stations') ? stations() : queue());
++          return url.endsWith('/stations') ? sGate.promise : qGate.promise;
++        },
++        async post() { posts += 1; return called(); },
++      },
++      storage: rig.storage,
++      isCurrent: (ctx) => !locked && ctx.sessionId === activeSession,
++      createKey: () => key,
++      onAuthError: (info) => {
++        locked = true;
++        authEvents.push(info.context.sessionId);
++      },
++    });
++
++    const pOld = manager.callNext(context, experienceId, stationId);
++    qGate.reject(Object.assign(new Error('503'), { status: 503 }));
++    await pOld;
++
++    // Troca de sessão antes da resposta tardia 403 de /stations
++    activeSession = '10000000-0000-4000-8000-000000000099';
++    sGate.reject(Object.assign(new Error('stale-403'), { status: 403 }));
++    await new Promise((r) => setTimeout(r, 0));
++    assert.equal(locked, false, 'negativa tardia de sessão antiga não bloqueia sessão nova');
++    assert.deepEqual(authEvents, []);
++
++    useGates = false;
++    const nextRes = await manager.callNext({ ...context, sessionId: activeSession }, experienceId, stationId);
++    assert.equal(nextRes.kind, 'confirmed');
++    assert.equal(posts, 1);
++  }
++});
++
++test('STAFF04-AUD-10 (coordenador): emite persisting durante recordTerminal e clear em confirmação ou recusa não-auth, mas nunca em 401/403 ou uncertain', async () => {
++  const { createStaffOperationsCoordinator } = await service;
++  const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
++
++  // 1, 2 e 4: POST pendente (mutating) -> resposta confirmada com recordTerminal pendente (persisting) -> clear pendente (persisting)
++  {
++    const rig = secureStaffRig();
++    const postGate = defer();
++    const recordGate = defer();
++    const clearGate = defer();
++    const stages = [];
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
++        post: () => postGate.promise,
++      },
++      storage: {
++        ...rig.storage,
++        async recordTerminal(u, k, o) {
++          assert.equal(stages[stages.length - 1], 'persisting', 'persisting já ativo ao iniciar recordTerminal');
++          await recordGate.promise;
++          return rig.storage.recordTerminal(u, k, o);
++        },
++        async clear(u, k) {
++          assert.equal(stages[stages.length - 1], 'persisting', 'persisting permanece ativo durante clear');
++          await clearGate.promise;
++          return rig.storage.clear(u, k);
++        },
++      },
++      isCurrent: () => true,
++      createKey: () => key,
++      onStage: (stage) => stages.push(stage),
++    });
++
++    const pCall = manager.callNext(context, experienceId, stationId);
++    await new Promise((r) => setTimeout(r, 10));
++    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating']);
++
++    postGate.resolve(called());
++    await new Promise((r) => setTimeout(r, 10));
++    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
++
++    recordGate.resolve();
++    await new Promise((r) => setTimeout(r, 10));
++    clearGate.resolve();
++    assert.equal((await pCall).kind, 'confirmed');
++    const scope = { ...context, stationId, serviceSessionId: sessionId };
++    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
++  }
++
++  // 3 e 5: recusa definitiva não-auth (409) emite persisting e trata falha de recordTerminal sem indicar sucesso
++  {
++    const rig = secureStaffRig();
++    const stages = [];
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
++        async post() { throw Object.assign(new Error('empty'), { status: 409, code: 'QUEUE_EMPTY' }); },
++      },
++      storage: {
++        ...rig.storage,
++        async recordTerminal() { throw new Error('disk-error'); },
++      },
++      isCurrent: () => true,
++      createKey: () => key,
++      onStage: (stage) => stages.push(stage),
++    });
++    const out = await manager.callNext(context, experienceId, stationId);
++    assert.equal(out.kind, 'rejected_cleanup_pending');
++    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
++  }
++
++  // 7 e 8: resultado desconhecido (timeout) e negativa 403 NUNCA emitem persisting
++  for (const err of [
++    Object.assign(new Error('timeout'), { isTimeout: true }),
++    Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }),
++  ]) {
++    const rig = secureStaffRig();
++    const stages = [];
++    let locked = false;
++    const manager = createStaffOperationsCoordinator({
++      client: {
++        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
++        async post() { throw err; },
++      },
++      storage: rig.storage,
++      isCurrent: () => !locked,
++      createKey: () => key,
++      onStage: (stage) => stages.push(stage),
++      onAuthError: () => { locked = true; },
++    });
++    await manager.callNext(context, experienceId, stationId);
++    assert.equal(stages.includes('persisting'), false);
 +  }
 +});
 diff --git a/app/tests/staffPolling.test.cjs b/app/tests/staffPolling.test.cjs
@@ -5344,7 +6212,7 @@ index e477c7f..0dd0673 100644
 +  }
 +});
 diff --git a/app/tests/staffStationOperational.test.cjs b/app/tests/staffStationOperational.test.cjs
-index bfd4b2e..bb61679 100644
+index bfd4b2e..61007d4 100644
 --- a/app/tests/staffStationOperational.test.cjs
 +++ b/app/tests/staffStationOperational.test.cjs
 @@ -107,6 +107,8 @@ function createStationHarness({
@@ -5395,7 +6263,7 @@ index bfd4b2e..bb61679 100644
      if (name === './useStaffPolling') {
        return {
          useStaffPolling(enabled, read, intervalMs, scope) {
-@@ -685,3 +701,995 @@ test('STAFF-02 + STAFF02-AUD-01/05: troca de estação/evento, stale/erro no ind
+@@ -685,3 +701,1402 @@ test('STAFF-02 + STAFF02-AUD-01/05: troca de estação/evento, stale/erro no ind
      h.dispose();
    }
  });
@@ -6391,12 +7259,419 @@ index bfd4b2e..bb61679 100644
 +    }
 +  }
 +});
++
++test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela revoga imediatamente mesmo após 503 irmão ou com irmã pendente e descarta GET 200 atrasado', { skip }, async () => {
++  const baseState = {
++    eventId: EV_A,
++    experienceId: EXP_1,
++    stationId: ST_1,
++    availability: 'available',
++    canCall: true,
++    waitingCount: 1,
++    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
++    pending: null,
++  };
++
++  // Caso 1: /queue falha primeiro com 503, GET /operational-state fica em voo e /stations falha depois com 403
++  {
++    const qGate = deferred();
++    const sGate = deferred();
++    let opDeferred = null;
++    let deniedKind = null;
++    let postCalls = 0;
++    const h = createStationHarness({
++      onAccessDenied: (kind) => { deniedKind = kind; },
++      onGet: (url) => {
++        if (url.endsWith('/queue')) return qGate.promise;
++        if (url.endsWith('/stations')) return sGate.promise;
++        if (opDeferred) {
++          const d = opDeferred;
++          opDeferred = null;
++          return d.promise;
++        }
++        return Promise.resolve(baseState);
++      },
++      onPost: async () => { postCalls += 1; return {}; },
++    });
++    try {
++      await h.mount();
++      assert.ok(h.hasQueueRow(1, 'Ana Clara'));
++
++      // Inicia Chamar próximo; /queue rejeita 503 primeiro, e o refresh(true) pós-503 fica em voo (opDeferred)
++      const slowOpRead = deferred();
++      let pCall;
++      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
++      opDeferred = slowOpRead;
++      await h.act(async () => {
++        qGate.reject(Object.assign(new Error('503'), { status: 503 }));
++        await pCall;
++      });
++      assert.equal(deniedKind, null);
++      assert.equal(postCalls, 0);
++
++      // /stations rejeita posteriormente com 403 -> revoga imediatamente e invalida slowOpRead 200 atrasado
++      await h.act(async () => {
++        sGate.reject(Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }));
++      });
++      assert.equal(deniedKind, 'denied');
++      assert.equal(h.hasText('Ana Clara'), false);
++      assert.ok(h.hasText('Acesso à estação indisponível.'));
++
++      await h.act(async () => {
++        slowOpRead.resolve(baseState);
++      });
++      assert.equal(h.hasText('Ana Clara'), false, 'resposta 200 atrasada não restaura dados protegidos');
++    } finally {
++      qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 0, canCallWaitingEntries: false, firstWaitingQueueEntryId: null });
++      sGate.resolve({ eventId: EV_A, stations: [] });
++      h.dispose();
++    }
++  }
++
++  // Caso 2: /stations rejeita com 401 enquanto /queue permanece pendente -> bloqueia ANTES da resolução de /queue
++  {
++    const qGate = deferred();
++    const sGate = deferred();
++    let deniedKind = null;
++    let postCalls = 0;
++    const h = createStationHarness({
++      onAccessDenied: (kind) => {
++        deniedKind = kind;
++        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
++      },
++      onGet: (url) => {
++        if (url.endsWith('/queue')) return qGate.promise;
++        if (url.endsWith('/stations')) return sGate.promise;
++        return Promise.resolve(baseState);
++      },
++      onPost: async () => { postCalls += 1; return {}; },
++    });
++    try {
++      await h.mount();
++      let pCall;
++      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
++      await h.act(async () => {
++        sGate.reject(Object.assign(new Error('401'), { status: 401, code: 'SESSION_REVOKED' }));
++        await pCall;
++      });
++      // Antes de resolver qGate:
++      assert.equal(deniedKind, 'session');
++      assert.equal(postCalls, 0);
++      assert.equal(h.hasText('Ana Clara'), false);
++      assert.ok(h.hasText('Sessão inválida. Entre novamente.'));
++    } finally {
++      qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 });
++      h.dispose();
++    }
++  }
++});
++
++test('STAFF04-AUD-09 (tela Estação): isola feedback tardio entre contas, sessões, estações, visitas e contextos bloqueados, e preserva revalidação GET 200 legítima', { skip }, async () => {
++  const USER_2 = 'abcdef00-0000-4000-8000-000000000002';
++  const SESSION_2 = '10000000-0000-4000-8000-000000000002';
++  const makeState = (stId, name) => ({
++    eventId: EV_A,
++    experienceId: EXP_1,
++    stationId: stId,
++    availability: 'available',
++    canCall: true,
++    waitingCount: 1,
++    waiting: [{ queueEntryId: ENTRY_1, displayName: name, position: 1 }],
++    pending: null,
++  });
++
++  // Cenários 1 a 6: POST 403 + falha tardia em recordTerminal (rejected_cleanup_pending) nunca vaza feedback visual para outro contexto/visita, mas preserva intenção persistida
++  for (const transition of ['other_account', 'new_session_same_account', 'other_station_same_event', 'exit_and_return_same_station', 'other_blocked_context']) {
++    const recordGate = deferred();
++    let currentStationId = ST_1;
++    let participantName = 'Ana Clara';
++    const h = createStationHarness({
++      onSecureSet: async (key) => {
++        if (key.endsWith('.receipt')) {
++          await recordGate.promise;
++          throw new Error('receipt-write-failed');
++        }
++      },
++      onGet: async (url) => {
++        if (url.endsWith('/stations')) {
++          return { eventId: EV_A, stations: [{ id: currentStationId, experienceId: EXP_1, label: 'Cabine', availability: 'available', pendingServiceSessionId: null }] };
++        }
++        if (url.endsWith('/queue')) {
++          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
++        }
++        return makeState(currentStationId, participantName);
++      },
++      onPost: async () => {
++        throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
++      },
++    });
++
++    try {
++      await h.mount();
++      let inflight;
++      await h.act(async () => { inflight = h.handler('Chamar próximo')(); });
++
++      if (transition === 'other_account') {
++        participantName = 'Fila Conta 2';
++        await h.rerender({
++          auth: {
++            isAuthenticated: true,
++            user: { id: USER_2, roles: ['staff'] },
++            sessionId: SESSION_2,
++            isIdentityVerified: () => true,
++            getSessionEpoch: () => 2,
++            getIdentityRevision: () => 2,
++          },
++        });
++      } else if (transition === 'new_session_same_account') {
++        participantName = 'Fila Nova Sessão';
++        await h.rerender({
++          auth: {
++            isAuthenticated: true,
++            user: { id: USER_1, roles: ['staff'] },
++            sessionId: SESSION_2,
++            isIdentityVerified: () => true,
++            getSessionEpoch: () => 2,
++            getIdentityRevision: () => 1,
++          },
++        });
++      } else if (transition === 'other_station_same_event') {
++        currentStationId = ST_2;
++        participantName = 'Fila Estação 2';
++        await h.rerender({
++          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
++        });
++      } else if (transition === 'exit_and_return_same_station') {
++        currentStationId = ST_2;
++        await h.rerender({
++          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
++        });
++        currentStationId = ST_1;
++        participantName = 'Retorno Estação 1';
++        await h.rerender({
++          station: { id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null },
++        });
++      } else {
++        await h.rerender({
++          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
++          accessDenied: true,
++          accessDeniedKind: 'session',
++        });
++      }
++
++      await h.act(async () => {
++        recordGate.resolve();
++        await inflight;
++      });
++
++      assert.equal(
++        h.hasText('Recusa registrada pelo servidor, mas a limpeza local falhou'),
++        false,
++        `${transition}: não publica feedback tardio fora do escopo/visita original`,
++      );
++      // Persistência histórica da intenção original permanece intacta em dispatching (pois .receipt falhou)
++      assert.equal(JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`)).phase, 'dispatching');
++    } finally {
++      recordGate.resolve();
++      h.dispose();
++    }
++  }
++
++  // Cenários 7 e 8: após negativa 403, erro transitório 503 em Atualizar atendimento NÃO reabilita, mas GET 200 legítimo revalida
++  {
++    let opMode = 'ok';
++    const h = createStationHarness({
++      onGet: async (url) => {
++        if (opMode === '403') throw Object.assign(new Error('403'), { status: 403 });
++        if (opMode === '503') throw Object.assign(new Error('503'), { status: 503 });
++        if (url.endsWith('/operational-state')) return makeState(ST_1, 'Ana Revalidada');
++        return {};
++      },
++      onPost: async () => ({}),
++    });
++    try {
++      await h.mount();
++      opMode = '403';
++      await h.press('Atualizar atendimento');
++      assert.ok(h.hasText('Acesso à estação indisponível.'));
++      assert.equal(h.getPolling().enabled, false);
++
++      // Erro transitório 503 mantém trava 'denied' e polling desligado
++      opMode = '503';
++      await h.press('Atualizar atendimento');
++      assert.ok(h.hasText('Acesso à estação indisponível.'));
++      assert.equal(h.getPolling().enabled, false);
++
++      // Revalidação GET 200 legítima recupera o acesso sem falhar em coordinator.readStationState
++      opMode = 'ok';
++      await h.press('Atualizar atendimento');
++      assert.ok(h.hasQueueRow(1, 'Ana Revalidada'));
++      assert.equal(h.getPolling().enabled, true);
++    } finally {
++      h.dispose();
++    }
++  }
++});
++
++test('STAFF04-AUD-10 (tela Estação): exibe "Registrando resultado com segurança..." em recordTerminal/clear sem indicar sucesso prematuro nem expor 403', { skip }, async () => {
++  const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
++  const primaryKey = `arenago.staff.operation.${USER_1}`;
++  const receiptKey = `${primaryKey}.receipt`;
++  const ackKey = `${primaryKey}.ack`;
++  const waitingState = {
++    eventId: EV_A,
++    experienceId: EXP_1,
++    stationId: ST_1,
++    availability: 'available',
++    canCall: true,
++    waitingCount: 1,
++    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
++    pending: null,
++  };
++  const calledState = {
++    ...waitingState,
++    canCall: false,
++    waitingCount: 0,
++    waiting: [],
++    pending: {
++      serviceSessionId: SESS_1,
++      queueEntryId: ENTRY_1,
++      displayName: 'Ana Clara',
++      calledAt: '2026-11-19T15:00:00.000Z',
++    },
++  };
++  let activeState = waitingState;
++  let postGate = null;
++  let receiptGate = null;
++  let clearGate = null;
++  let ackGate = null;
++
++  const h = createStationHarness({
++    onSecureSet: async (key) => {
++      if (receiptGate && key === receiptKey) {
++        const g = receiptGate;
++        receiptGate = null;
++        await g.deferred.promise;
++        if (g.fail) throw g.fail;
++      }
++      if (ackGate && key === ackKey) {
++        const g = ackGate;
++        ackGate = null;
++        await g.promise;
++      }
++    },
++    onSecureDelete: async (key) => {
++      if (clearGate && key === primaryKey) {
++        const g = clearGate;
++        clearGate = null;
++        await g.promise;
++      }
++    },
++    onGet: async (url) => {
++      if (url.endsWith('/stations')) {
++        return {
++          eventId: EV_A,
++          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: activeState.pending?.serviceSessionId ?? null }],
++        };
++      }
++      if (url.endsWith('/queue')) {
++        return { eventId: EV_A, experienceId: EXP_1, waitingCount: activeState.waitingCount, canCallWaitingEntries: activeState.canCall, firstWaitingQueueEntryId: activeState.waiting[0]?.queueEntryId ?? null };
++      }
++      return activeState;
++    },
++    onPost: () => postGate.promise,
++  });
++
++  try {
++    await h.mount();
++
++    // 1, 2, 4 e 6: servidor pendente -> recordTerminal pendente -> clear pendente -> reconhecimento posterior
++    postGate = deferred();
++    receiptGate = { deferred: deferred(), fail: null };
++    clearGate = deferred();
++    ackGate = deferred();
++    const rGate1 = receiptGate.deferred;
++    const cGate1 = clearGate;
++    const aGate1 = ackGate;
++
++    let pOp;
++    await h.act(async () => { pOp = h.handler('Chamar próximo')(); });
++    assert.ok(h.hasExactText('Processando operação no servidor...'));
++
++    activeState = calledState;
++    await h.act(async () => {
++      postGate.resolve({
++        serviceSession: {
++          id: SESS_1,
++          queueEntryId: ENTRY_1,
++          experienceId: EXP_1,
++          station: { id: ST_1, label: 'Cabine 01' },
++          status: 'pending',
++          calledAt: '2026-11-19T15:00:00.000Z',
++        },
++      });
++    });
++    assert.ok(h.hasExactText('Registrando resultado com segurança...'));
++    assert.equal(h.hasText('Participante chamado. Operação confirmada pelo servidor.'), false, 'sem confirmação visual antes da persistência');
++
++    await h.act(async () => { rGate1.resolve(); });
++    assert.ok(h.hasExactText('Registrando resultado com segurança...'), 'permanece registrando durante clear primário');
++
++    await h.act(async () => {
++      cGate1.resolve();
++      await pOp;
++    });
++    // Dispara ciclo de reconhecimento em próxima leitura/efeito ou verifica confirmação
++    aGate1.resolve();
++    await flush(h);
++    assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
++
++    // 3: recusa definitiva não-auth (409) com persistência pendente também usa 'Registrando resultado com segurança...'
++    h.secureValues.clear();
++    await h.press('Atualizar atendimento');
++    postGate = deferred();
++    receiptGate = { deferred: deferred(), fail: null };
++    const rGate409 = receiptGate.deferred;
++    await h.press('Concluir experiência');
++    let pReject;
++    await h.act(async () => { pReject = h.handler('CONFIRMAR OPERAÇÃO')(); });
++    assert.ok(h.hasExactText('Processando operação no servidor...'));
++
++    await h.act(async () => {
++      postGate.reject(Object.assign(new Error('not-pending'), { status: 409, code: 'SERVICE_NOT_PENDING' }));
++    });
++    assert.ok(h.hasExactText('Registrando resultado com segurança...'));
++    await h.act(async () => {
++      rGate409.resolve();
++      await pReject;
++    });
++    await flush(h);
++    assert.ok(h.hasText('A chamada já não está pendente.'));
++
++    // 8: resultado desconhecido (timeout) nunca mostra 'Registrando resultado com segurança...' nem sucesso
++    h.secureValues.clear();
++    await h.press('Atualizar atendimento');
++    postGate = deferred();
++    await h.press('Concluir experiência');
++    let pUncertain;
++    await h.act(async () => { pUncertain = h.handler('CONFIRMAR OPERAÇÃO')(); });
++    await h.act(async () => {
++      postGate.reject(Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true }));
++      await pUncertain;
++    });
++    await flush(h);
++    assert.equal(h.hasText('Registrando resultado com segurança...'), false);
++    assert.ok(h.hasText('O resultado exige verificação ou reconciliação.'));
++  } finally {
++    h.dispose();
++  }
++});
 diff --git a/docs/STAFF_04_SINCRONIZACAO_FEEDBACK_SEGURO.md b/docs/STAFF_04_SINCRONIZACAO_FEEDBACK_SEGURO.md
 new file mode 100644
-index 0000000..fd6bc2c
+index 0000000..8ab1e63
 --- /dev/null
 +++ b/docs/STAFF_04_SINCRONIZACAO_FEEDBACK_SEGURO.md
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,621 @@
 +# ArenaGo — STAFF-04 | Sincronização e Feedback Seguro
 +
 +## 1. Objetivos e Escopo
@@ -6542,15 +7817,16 @@ index 0000000..fd6bc2c
 +   - `StaffEventDashboard`: observa `useIsFocused()` e `AppState`, habilita recuperação automática em `pollQueue` para erro inicial transitório, consolida como fonte única dentro do evento selecionado o `useStaffPolling(..., 60000)` de `Eventos e fase` (cobrindo Painel, Controle de Entrada e Estação com a mesma condição `eventPhasePollingEnabled` do indicador), separa `operationalStale` (5s) de `eventPhaseStale` (`60s` em `Eventos e fase`) e apresenta `<StaffPollingStatusPill indicator={panelPollingIndicator} />` e `<StaffPollingStatusPill indicator={eventPhaseIndicator} />`.
 +6. **[app/screens/staff/StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js) + [app/services/staffOperationsService.js](../app/services/staffOperationsService.js):**
 +   - Classificação uniforme de `error?.isTimeout` como `'network'` em `refresh()` e `handleStationNotFound()`.
-+   - Trava de voo/sequência em `poll()` (`pollingFlight`/`pollSeq`), barreira síncrona `!revokedKindRef.current` durante `reserve()`/`dispatch()` e callback `onAuthError` em [staffOperationsService.js](../app/services/staffOperationsService.js) antes de `storage.recordTerminal()`/`clear()`, bloqueando UI e Painel imediatamente mantendo a persistência do recibo `.receipt` para a intenção original; `404` contextual mantido via `/operational-state` + `/stations`.
++   - Trava de voo/sequência em `poll()` (`pollingFlight`/`pollSeq`), guarda individual por leitura preliminar (`createPreconditionAuthGuard` observando `fetchStaffQueue` e `fetchStaffStations` em paralelo sem ocultar `401`/`403` atrás de `503`/rede concorrente), barreira síncrona `!revokedKindRef.current` durante `reserve()`/`dispatch()` e callback `onAuthError` em [staffOperationsService.js](../app/services/staffOperationsService.js) antes de `storage.recordTerminal()`/`clear()`, bloqueando UI e Painel imediatamente mantendo a persistência do recibo `.receipt` para a intenção original; `404` contextual mantido via `/operational-state` + `/stations`.
++   - Isolamento estrito de contexto e visita (`visitIdRef`, `opSeqRef`, `activeOpIdRef` + escopo completo de 6 campos `userId`, `sessionId`, `eventId`, `stationId`, `epoch`, `revision` e `!accessDenied`) para qualquer publicação tardia de feedback ou `onStage`, além de revalidação GET direta em `refresh()` (`fetchStaffStationState`) limpando `revokedKindRef.current` apenas após resposta `200` válida da visita/geração corrente (enquanto a recuperação oficial sob `accessDenied` ocorre pelo retorno ao Painel em `Atualizar estações`).
 +   - Flag explícita `autoRecoverable` diferenciando erro inicial transitório de leitura (`autoRecoverable: true`, habilitando recuperação por GET a cada 5s com releitura obrigatória de `coordinator.pending(scope)` antes de liberar `ready`) de erro de acesso incerto após `404` / falha de `SecureStore` (`autoRecoverable: false`, preservando integralmente STAFF02-AUD-01 Caso C).
 +   - Adoção de `describeStationFeedback`, `resolveStaffPollingIndicator` e `<StaffPollingStatusPill />`, mantendo a pausa de polling durante modais (STAFF-02).
-+   - Adição do banner explícito de processamento (`view.busy` + `busyKind`) diferenciando `"Verificando condições antes do envio..."`, `"Processando operação no servidor..."`, `"Finalizando reconhecimento seguro local..."` e `"Descartando solicitação não enviada..."`.
++   - Adição do banner explícito de processamento (`view.busy` + `busyKind`) diferenciando `"Verificando condições antes do envio..."`, `"Preparando solicitação com segurança..."`, `"Registrando envio seguro..."`, `"Processando operação no servidor..."`, `"Registrando resultado com segurança..."`, `"Finalizando reconhecimento seguro local..."` e `"Descartando solicitação não enviada..."`.
 +7. **[app/screens/staff/StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) + [app/services/staffEntryService.js](../app/services/staffEntryService.js):**
 +   - Habilitação de `pollingEnabled` também para erro inicial recuperável (`network`/`unavailable`) quando `!revokedKind`, mantendo polling de 5s ativo durante modais com invalidação `evaluateEntryDialog` (STAFF-03).
-+   - Reação imediata a `401`/`403` em `mutate()` antes de `storage.finish()`, trava síncrona `revokedKind` entre `reserve()`, `dispatch()` e HTTP (cancelando apenas `reserved` não enviada e preservando `dispatching`) e supressão de GET extra pós-negativa.
++   - Reação imediata a `401`/`403` em `mutate()` (limpando `data` e encerrando `busy`/`busyKind` antes de `storage.finish()`), trava síncrona `revokedKind` entre `reserve()`, `dispatch()` e HTTP (cancelando apenas `reserved` não enviada e preservando `dispatching`) e supressão de GET extra pós-negativa.
 +   - Adoção de `describeEntryNotice`, `resolveStaffPollingIndicator` e `<StaffPollingStatusPill />` (incluindo diferenciação de `absent` com `requeued: true` vs `false` e todos os códigos reais de recusa do backend).
-+   - `busyKind` geracional na store e banner explícito na tela diferenciando `"Preparando solicitação com segurança..."`, `"Registrando envio seguro..."`, `"Processando operação no servidor..."`, `"Finalizando reconhecimento seguro local..."` e `"Descartando solicitação não enviada..."` (sem inferir descarte via `pending?.phase === 'reserved'`), além de aviso dedicado para `knownOutcome.kind === 'rejected'` quando a gravação local do recibo falha.
++   - `busyKind` geracional na store e banner explícito na tela diferenciando `"Preparando solicitação com segurança..."`, `"Registrando envio seguro..."`, `"Processando operação no servidor..."`, `"Registrando resultado com segurança..."`, `"Finalizando reconhecimento seguro local..."` e `"Descartando solicitação não enviada..."` (sem inferir descarte via `pending?.phase === 'reserved'`), além de aviso dedicado para `knownOutcome.kind === 'rejected'` quando a gravação local do recibo falha.
 +
 +---
 +
@@ -6560,8 +7836,8 @@ index 0000000..fd6bc2c
 +|---|---|---|
 +| **Seleção de eventos (60s)** | Falha no primeiro GET interrompia polling permanentemente; `403` não separado de `unavailable`; sem indicador visual de sincronização. | Recuperação automática por GET a cada 60s em `network`/`timeout`/`503`/inválida; `403` separado como `denied` com trava `accessLocked` contra `200`/`503` atrasados; indicador honesto ligado a foco e `AppState`. |
 +| **Painel Operacional (5s + 60s fase)** | Sem indicador visual de polling; `timeout` classificado como `unavailable`; `experienceError`/`staff.error === 'stale'` não apareciam no aviso de desatualização do painel. | Indicador operacional de `5s` (`stations`/`experiences`/`entry-control`/`accessUncertain`/`verifyingAccess`) separado do indicador dedicado de **Eventos e fase (`60s`)**, com `timeout` classificado como `network`, banners `stale` separados e sinalização explícita de recuperação manual em `accessUncertain`/`accessLocked`. |
-+| **Estação — Fila e Atendimento (5s)** | Falha inicial em `/operational-state` ou `/queue` interrompia polling até ação manual; sem estado visual `busy`; `call`/`complete`/`remove_called` com texto genérico; recusas sem mapeamento de códigos backend; `uncertain`/`cleanup_pending`/`storage_error` com texto único. | Recuperação automática por GET a cada 5s em falhas transitórias iniciais (reconsultando `SecureStore` antes de liberar `ready`), preservando Caso C (`404`→`500`) sem polling automático (`aguardando recuperação manual`); trava contra `poll()` concorrente; reação imediata a `401`/`403` em pré-condição/mutação; estágios `busy` distintos (`precondition`/`mutating`/`acknowledging`/`cancelling`); falhas prévias sem afirmar envio; mapeamento de códigos backend e pausa durante modais preservada (STAFF-02). |
-+| **Controle de Entrada (5s)** | Falha inicial em `/entry-control` interrompia polling; sem estado visual `busy`; `absent` não distinguia `requeued: true` vs `false`; recusas mapeavam apenas `ENTRY_NOT_FIRST`; recusa com erro de gravação local sem mensagem própria. | Recuperação automática por GET a cada 5s em falhas transitórias iniciais (preservando intenções do `SecureStore` antes de liberar `ready`); reação imediata a `401`/`403` em mutação sem aguardar GET; estágios `busy` distintos (`mutating`/`acknowledging`/`cancelling`); `absent` distingue reinserção vs corte; códigos reais de recusa mapeados (incluindo `RESOURCE_NOT_FOUND`); aviso para `knownOutcome.kind === 'rejected'`; polling ativo com invalidação de modais preservado (STAFF-03). |
++| **Estação — Fila e Atendimento (5s)** | Falha inicial em `/operational-state` ou `/queue` interrompia polling até ação manual; sem estado visual `busy`; `call`/`complete`/`remove_called` com texto genérico; recusas sem mapeamento de códigos backend; `uncertain`/`cleanup_pending`/`storage_error` com texto único. | Recuperação automática por GET a cada 5s em falhas transitórias iniciais (reconsultando `SecureStore` antes de liberar `ready`), preservando Caso C (`404`→`500`) sem polling automático (`aguardando recuperação manual`); trava contra `poll()` concorrente; reação imediata a `401`/`403` em pré-condições paralelas e mutações; isolamento completo de contexto/visita; estágios `busy` distintos (`precondition`/`preparing`/`dispatching`/`mutating`/`persisting`/`acknowledging`/`cancelling`); falhas prévias sem afirmar envio; mapeamento de códigos backend e pausa durante modais preservada (STAFF-02). |
++| **Controle de Entrada (5s)** | Falha inicial em `/entry-control` interrompia polling; sem estado visual `busy`; `absent` não distinguia `requeued: true` vs `false`; recusas mapeavam apenas `ENTRY_NOT_FIRST`; recusa com erro de gravação local sem mensagem própria. | Recuperação automática por GET a cada 5s em falhas transitórias iniciais (preservando intenções do `SecureStore` antes de liberar `ready`); reação imediata a `401`/`403` em mutação sem aguardar GET ou gravação local; estágios `busy` distintos (`preparing`/`dispatching`/`mutating`/`persisting`/`acknowledging`/`cancelling`); `absent` distingue reinserção vs corte; códigos reais de recusa mapeados (incluindo `RESOURCE_NOT_FOUND`); aviso para `knownOutcome.kind === 'rejected'`; polling ativo com invalidação de modais preservado (STAFF-03). |
 +| **Indicador de `stale` durante pausa** | Em `stale`, exibia `"tentando atualizar a cada 5s"` mesmo quando a tela perdia foco ou ia para segundo plano. | Quando `!pollingEnabled \|\| !visible`, exibe `"Dados desatualizados · atualização temporariamente pausada"`, refletindo fielmente a pausa real do timer. |
 +| **Participante (`externalEntryCall`)** | Contrato `GET /api/v1/participations/current` com validação estrita, `syncStale` e limpeza em `401`/`403` (STAFF-03). | Preservado integralmente sem alterações desnecessárias e sem edição das telas do Heliom. |
 +
@@ -6577,7 +7853,7 @@ index 0000000..fd6bc2c
 +| **2. Estado atualizado** | Apresenta exclusivamente os dados validados pelos parsers estritos; libera botões apenas conforme permissões oficiais retornadas pela API (`canCall`, `canConfirm`, `canMarkAbsent`, `canRemove`, `canManage`, `availability`). |
 +| **3. Atualização silenciosa** | Executa somente GET sem sobreposição (`useStaffPolling`), atualizando dados na tela sem spinner bloqueante nem fechamento indevido de conteúdo válido (exceto invalidação de modal obsoleto no Controle de Entrada ou `401`/`403`/`404`). |
 +| **4. Dados desatualizados (`stale`)** | Preserva a última leitura válida, exibe card de alerta `stale`, bloqueia mutações sensíveis e sinaliza no indicador se está tentando atualizar ou se o ciclo está temporariamente pausado. |
-+| **5. Operação em andamento (`busy`)** | Exibe card `progressbar` específico do estágio (`Verificando condições antes do envio...`, `Preparando solicitação com segurança...`, `Registrando envio seguro...`, `Processando operação no servidor...`, `Finalizando reconhecimento seguro local...` ou `Descartando solicitação não enviada...`), bloqueia acionamentos conflitantes/duplo toque e pausa o polling operacional durante a execução local/servidor. |
++| **5. Operação em andamento (`busy`)** | Exibe card `progressbar` específico do estágio (`Verificando condições antes do envio...`, `Preparando solicitação com segurança...`, `Registrando envio seguro...`, `Processando operação no servidor...`, `Registrando resultado com segurança...`, `Finalizando reconhecimento seguro local...` ou `Descartando solicitação não enviada...`), bloqueia acionamentos conflitantes/duplo toque e pausa o polling operacional durante a execução local/servidor. |
 +| **6. Operação confirmada** | Exibe banner verde somente após confirmação HTTP válida e parser estrito aprovado, descrevendo a ação efetivamente confirmada pelo servidor. |
 +| **7. Operação recusada** | Exibe banner de alerta com orientação contextual derivada do código real de erro do backend (ou fallback seguro), orientando conferência/atualização do estado. |
 +| **8. Resultado desconhecido** | Preserva intenção `dispatching` + `Idempotency-Key`, bloqueia novas operações, permite leituras autorizadas e informa explicitamente para não repetir a ação e procurar o responsável caso persista. |
@@ -6708,15 +7984,15 @@ index 0000000..fd6bc2c
 +   - `staffEventsService`: classificação de `403`/`401`/`timeout`/`503`/malformada, recuperação via `refreshSilent()`, trava `accessLocked` (`STAFF04-AUD-02`) tratando `401`/`403` mesmo com outra geração ativa para a mesma identidade, bloqueando `200`/`503` atrasados ou subsequentes até nova revalidação manual `200`, e isolando troca de conta.
 +   - UI (`StaffEventsScreen` e `StaffEventDashboard`): indicadores de 60s e 5s, desmontagem imediata sob `403` (`STAFF04-AUD-02`), separação 5s vs `Eventos e fase` 60s e recuperação manual (`STAFF04-AUD-05`), e confirmação na Rodada 2 (`STAFF04-AUD-06`) de existência de exatamente um agendador de 60s (`:events:`) ativo entre Painel, Controle de Entrada e Estação.
 +4. **[app/tests/staffDashboard.test.cjs](../app/tests/staffDashboard.test.cjs):** classificação de `timeout` como `network` e recuperação automática em `pollQueue()` após `timeout`/`503`/malformada sem fabricar fila vazia, interrompendo em `403`.
-+5. **[app/tests/staffOperationsService.integration.test.cjs](../app/tests/staffOperationsService.integration.test.cjs):** validação da Rodada 1 (`STAFF04-AUD-03`) para `phase: 'precondition'` (`network`, `timeout`, `503`, malformada, `401`, `403`, `blocked` e ordem `onStage`), e testes da Rodada 2 (`STAFF04-AUD-04`) cobrindo `onAuthError` disparado antes de `recordTerminal()`/`clear()`, preservação de `.receipt` + limpeza primária, falhas locais, troca de conta em meio à persistência e travamento concorrente entre `reserve()`, `dispatch()` e `POST`.
-+6. **[app/tests/staffEntryControl.test.cjs](../app/tests/staffEntryControl.test.cjs):** recuperação em `poll()`, preservação de `knownOutcome` em `storage_error`, suíte da Rodada 1 (`STAFF04-AUD-04`) e testes da Rodada 2 cobrindo isolamento geracional de `busyKind` em troca de contexto (`STAFF04-AUD-03`), `GET 401`/`403` concorrente durante `reserve()` (cancelando apenas `reserved` sem `dispatch`/`POST`) e durante `dispatch()` (conservando `dispatching` sem `POST`, `STAFF04-AUD-04`).
++5. **[app/tests/staffOperationsService.integration.test.cjs](../app/tests/staffOperationsService.integration.test.cjs):** validação da Rodada 1 (`STAFF04-AUD-03`) para `phase: 'precondition'`, testes da Rodada 2 (`STAFF04-AUD-04`) para `onAuthError` antes de `recordTerminal()`/`clear()` e travamento entre `reserve()`/`dispatch()`/`POST`, e suítes da Rodada 3 (`STAFF04-AUD-08` + `STAFF04-AUD-10`) cobrindo os 8 cenários de leituras preliminares paralelas em `callNext` (`503`→`403`, `403` com consulta irmã pendente, `network`/`timeout`→`401`, duplo `403` sem duplicação, `503`+`503`, isolamento por conta/evento/estação e revalidação posterior) e a sequência completa de estágios `['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']` (suprimindo `'persisting'` em `401`/`403` e em resultado `uncertain`).
++6. **[app/tests/staffEntryControl.test.cjs](../app/tests/staffEntryControl.test.cjs):** recuperação em `poll()`, preservação de `knownOutcome` em `storage_error`, suítes das Rodadas 1 e 2 (`STAFF04-AUD-03` e `STAFF04-AUD-04`) e suíte da Rodada 3 (`STAFF04-AUD-10`) validando `busyKind: 'persisting'` durante `storage.finish()` em confirmação e recusa definitiva `409`, limpeza imediata de `busy`/`busyKind` em `403` antes da persistência e ausência de `'persisting'` em `uncertain`.
 +7. **[app/tests/staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs):**
 +   - Suíte unitária pura de `StaffSyncFeedback.js`.
-+   - Suíte de tela `StaffEntryControlRealScreen` reforçada na Rodada 2 (`STAFF04-AUD-03`) com `onSecureSet` controlada cobrindo todos os 8 cenários (reserva pendente, intenção `reserved` aguardando despacho sem mensagem de descarte, despacho/POST em servidor, reconhecimento local, descarte efetivo, falha de persistência, troca de contexto durante reconhecimento e operação subsequente), além de `401`/`403` bloqueando interface antes de `storage.finish()` resolver (`STAFF04-AUD-04`).
-+8. **[app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs):** recuperação após falha inicial, Caso C manual, `poll()` concorrente (`STAFF04-AUD-01`), pré-condição transitória (`STAFF04-AUD-03`), e suíte da Rodada 2 (`STAFF04-AUD-04` + `STAFF04-AUD-07`) validando trava síncrona/UI antes de `recordTerminal()` e `clear()` pendentes, falhas parciais locais, troca de conta em andamento, `GET 401`/`403` durante `reserve()` e `dispatch()`, além da validação corrigida das 3 chaves (`.receipt`, chave primária ausente pós-`clear` e ausência de `.ack`).
++   - Suíte de tela `StaffEntryControlRealScreen` reforçada na Rodada 2 (`STAFF04-AUD-03` + `STAFF04-AUD-04`) e ampliada na Rodada 3 (`STAFF04-AUD-10`) validando a exibição de `"Registrando resultado com segurança..."` durante `storage.finish()`, o encerramento imediato da faixa `busy` em `403` mesmo com persistência pendente e a ausência de texto de persistência/sucesso em `uncertain`.
++8. **[app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs):** recuperação após falha inicial, Caso C manual, `poll()` concorrente (`STAFF04-AUD-01`), pré-condição transitória (`STAFF04-AUD-03`), suíte da Rodada 2 (`STAFF04-AUD-04` + `STAFF04-AUD-07`) e suítes da Rodada 3 cobrindo `STAFF04-AUD-08` (`503` + `403` em `callNext` e `403` com consulta irmã pendente), `STAFF04-AUD-09` (descarte de feedback tardio após troca de `sessionId`, `revision`, `stationId`, saída/retorno da estação e `accessDenied`, não reabilitação em `503` e revalidação legítima `200` preservando `.receipt`) e `STAFF04-AUD-10` (`"Registrando resultado com segurança..."` em `recordTerminal()`/`clear()`, bloqueio imediato em `403` sem banner `busy` e ausência de `'persisting'` em `uncertain`).
 +9. **[app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs):**
 +   - Allowlist `control.realStaff` com `StaffSyncFeedback`.
-+   - Fluxos completos com `manualTimers: true`, incluindo atualização da Rodada 2 (`STAFF04-AUD-07` rastreando `deletedKeys` pós-`.receipt` com chave idempotente original e `STAFF04-AUD-06` + `STAFF04-AUD-04` ponta a ponta validando os 10 cenários do agendador único de 60s e bloqueio imediato antes de `.receipt` concluir).
++   - Fluxos completos com `manualTimers: true`, incluindo atualizações da Rodada 2 (`STAFF04-AUD-07`, `STAFF04-AUD-06` e `STAFF04-AUD-04`) e fluxo ponta a ponta da Rodada 3 (`STAFF04-AUD-08/09/10`) verificando `"Registrando resultado com segurança..."` no Controle de Entrada, revogação imediata da árvore em `callNext` sob `503` + `403` concorrentes, recuperação oficial via `Atualizar estações` no Painel e isolamento de feedback tardio entre sessões/visitas.
 +
 +---
 +
@@ -6724,9 +8000,9 @@ index 0000000..fd6bc2c
 +
 +### 14.1. Verificações estáticas executadas pelo agente implementador (permitidas por [AGENTS.md](../AGENTS.md))
 +
-+- Inspeção estática integral dos arquivos de produção, serviço, hook e testes modificados/criados na entrega inicial e na Rodada 1.
++- Inspeção estática integral dos arquivos de produção, serviço, hook e testes modificados/criados na entrega inicial e nas Rodadas 1, 2 e 3.
 +- Validação sintática via `node --check` em todos os arquivos `.cjs` alterados e `node --input-type=module --check` nos serviços ESM modificados.
-+- Análise sintática via `@babel/core` (`parseSync` com preset/plugin JSX) em todos os arquivos React Native/JSX modificados.
++- Análise sintática via `@babel/parser` (`parse` com `sourceType: 'module'` e plugin `jsx`) em todos os arquivos React Native/JSX modificados.
 +- Verificação de formatação e higiene via `git diff --check -- app backend docs`.
 +- Validação de aplicabilidade do patch acumulado da STAFF-04 desde `6c77c3b515ef4ed47607250081055868cc803a30` via `git apply --stat qa-evidence/STAFF-04-changes.diff` e `git apply --check --reverse qa-evidence/STAFF-04-changes.diff`.
 +- Conferência de integridade: ausência de auto-inclusão do patch (`SELF_PATCH_HEADER_COUNT=0`), ausência de URIs locais absolutas na documentação (`DOC_FILE_URI_COUNT=0`), preservação intacta de [qa-evidence/STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) e conferência de `git status --short --branch`.
@@ -6844,6 +8120,8 @@ index 0000000..fd6bc2c
 +- **26/11/2026 — Auditoria Independente — Rodada 1 (correções aplicadas e testes preparados):** implementadas todas as correções de código, componentes, serviços e suítes de testes para `STAFF04-AUD-01` a `STAFF04-AUD-05` (incluindo polling dedicado de 60s de Eventos/fase ativo também em `StaffEventDashboard`), validados syntax/Babel/diff estáticos e regerado [qa-evidence/STAFF-04-changes.diff](../qa-evidence/STAFF-04-changes.diff) desde `6c77c3b515ef4ed47607250081055868cc803a30`.
 +- **26/11/2026 — Auditoria Independente — Rodada 2 (aberta pré-código):** registrados os achados remanescentes e novos identificados sobre `409b6abb18a259b8d1d984441d6ac853d6342aaa` (`STAFF04-AUD-03`, `STAFF04-AUD-04`, `STAFF04-AUD-06` e `STAFF04-AUD-07`), causas técnicas confirmadas e plano de correção antes da alteração de código.
 +- **26/11/2026 — Auditoria Independente — Rodada 2 (correções aplicadas e testes preparados):** concluídas as correções para `STAFF04-AUD-03`, `STAFF04-AUD-04`, `STAFF04-AUD-06` e `STAFF04-AUD-07`, atualizadas as suítes e fixtures persistentes de teste, executadas as checagens estáticas (`node --check`, `--input-type=module --check`, `@babel/parser`, `git diff --check`) e regerado [qa-evidence/STAFF-04-changes.diff](../qa-evidence/STAFF-04-changes.diff) desde `6c77c3b515ef4ed47607250081055868cc803a30`.
++- **27/11/2026 — Auditoria Independente — Rodada 3 (aberta pré-código):** registrados os três achados adicionais identificados sobre `35e7c4e584db50a8bc86af5e84d46906e770a351` (`STAFF04-AUD-08`, `STAFF04-AUD-09` e `STAFF04-AUD-10`), causas técnicas confirmadas e plano de correção antes da alteração de código.
++- **27/11/2026 — Auditoria Independente — Rodada 3 (correções aplicadas e testes preparados):** implementadas as correções para `STAFF04-AUD-08` (guarda individual `createPreconditionAuthGuard` em leituras preliminares paralelas), `STAFF04-AUD-09` (isolamento completo de contexto/visita/operação e revalidação GET direta em `refresh()`) e `STAFF04-AUD-10` (estágio `'persisting'` explícito pós-resposta definitiva não-auth), preparadas as suítes correspondentes nos 5 arquivos de teste afetados, executadas as checagens estáticas permitidas e regerado [qa-evidence/STAFF-04-changes.diff](../qa-evidence/STAFF-04-changes.diff) desde `6c77c3b515ef4ed47607250081055868cc803a30`.
 +
 +---
 +
@@ -6964,3 +8242,54 @@ index 0000000..fd6bc2c
 +- **Arquivos alterados:** [app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs), [app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs).
 +- **Verificações realizadas:** `node --check`, `git diff --check`.
 +- **Limitações:** execução das suítes pendente para **GPT-6 Luna — Medium**.
++
++---
++
++## Auditoria Independente — Rodada 3
++
++Auditoria estática independente realizada sobre o commit `35e7c4e584db50a8bc86af5e84d46906e770a351` (branch `feature/staff-operacional-v2`, base original da STAFF-04: `6c77c3b515ef4ed47607250081055868cc803a30`). Os achados `STAFF04-AUD-01` a `STAFF04-AUD-07` foram considerados corrigidos nos respectivos cenários de referência por inspeção estática; abaixo estão documentadas as correções aplicadas exclusivamente para `STAFF04-AUD-08`, `STAFF04-AUD-09` e `STAFF04-AUD-10` (com campanha automatizada ainda pendente de execução em **GPT-6 Luna — Medium**).
++
++### Resumo dos achados tratados (Rodada 3)
++
++| ID | Prioridade | Status da preparação |
++|---|---|---|
++| `STAFF04-AUD-08` | P1 | Guarda individual em leituras preliminares paralelas aplicada e 8 cenários preparados (pendente execução por Luna Medium) |
++| `STAFF04-AUD-09` | P2 | Isolamento integral de contexto/visita/operação e revalidação GET local corrigidos com testes preparados (pendente execução por Luna Medium) |
++| `STAFF04-AUD-10` | P2 | Estágio `'persisting'` explícito pós-resposta definitiva aplicado em Entrada e Estações com testes preparados (pendente execução por Luna Medium) |
++
++### Detalhamento completo por achado (Rodada 3)
++
++#### `STAFF04-AUD-08` (P1) — Negativa de autorização não ocultada por falha concorrente em pré-condições paralelas
++
++- **Causa técnica:** em [staffOperationsService.js](../app/services/staffOperationsService.js), `callNext()` executava `Promise.all([fetchStaffQueue(...), fetchStaffStations(...)])` e entregava apenas a primeira rejeição ao bloco `catch` de `execute()`. Se uma das leituras falhasse primeiro com erro transitório (`503`, queda de rede ou `timeout`) e a leitura irmã rejeitasse em seguida com `401` ou `403`, a segunda rejeição era descartada pelo `Promise.all`, deixando de acionar `onAuthError`, de limpar os dados operacionais protegidos e de propagar `onAccessDenied` ao Painel.
++- **Solução adotada:** introduzida `createPreconditionAuthGuard(context, desired)` em [staffOperationsService.js](../app/services/staffOperationsService.js), envolvendo individualmente cada leitura preliminar (`observe(fetchStaffQueue(...))` e `observe(fetchStaffStations(...))` em `callNext`, além das leituras preliminares das demais operações). Assim que qualquer leitura preliminar rejeita com `401`/`403` enquanto `isCurrent(context, desired)` permanece verdadeiro para o contexto/visita original, `onAuthError` é disparado imediatamente (sem aguardar consulta irmã pendente, mesmo após rejeição `503`/rede/`timeout` anterior da outra leitura e com trava `notified` contra duplicação). Em `execute()`, quando `preconditionGuard.wasNotified()` já ocorreu na chamada corrente, preserva-se o retorno estruturado `{ kind: 'rejected', phase: 'precondition', status: 401|403 }` em vez de sobrescrevê-lo como `stale`, mantendo zero reservas/mutações iniciadas e total isolamento caso conta, sessão, evento, estação ou visita já tenham mudado.
++- **Arquivos modificados:** [app/services/staffOperationsService.js](../app/services/staffOperationsService.js), [app/screens/staff/StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js).
++- **Testes preparados:** [app/tests/staffOperationsService.integration.test.cjs](../app/tests/staffOperationsService.integration.test.cjs) (8 cenários: `503` em `/queue` + `403` em `/stations`; `403` em `/queue` com `/stations` pendente; `network`/`timeout` + `401`; duplo `403` sem duplicação de `onAuthError`; `503` + `503` mantendo erro transitório sem bloqueio indevido; isolamento após troca de conta/evento/estação; e revalidação autorizada subsequente), [app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) (tela de Estação limpando dados nominais, invalidando `poll()` concorrente e propagando `onAccessDenied` sob `503`→`403` e sob `403` com consulta irmã pendente) e [app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) (fluxo ponta a ponta desmontando Estação e bloqueando Painel).
++- **Verificações estáticas realizadas:** `node --input-type=module --check`, `@babel/parser` JSX, `node --check`, `git diff --check`.
++- **Riscos e limitações:** a validação em execução real dos cenários temporizados de concorrência aguarda a campanha automatizada conjunta com **GPT-6 Luna — Medium**.
++
++#### `STAFF04-AUD-09` (P2) — Isolamento completo do contexto em feedback tardio e coerência da revalidação GET
++
++- **Causa técnica:** dois pontos complementares em [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js):
++  1. Ao concluir `storage.recordTerminal()`/`storage.clear()` de uma operação que havia sofrido `401`/`403`, o ramo `preservedFeedback` comparava apenas `scope.eventId === String(event.id)` e `scope.userId === String(auth.user.id)`, ignorando `sessionId`, `stationId`, `epoch`, `revision`, permanência na mesma visita (`visitId`) e ausência de `accessDenied` externo — permitindo que um retorno tardio do armazenamento publicasse feedback visual em nova sessão, nova revisão do token, outra estação ou nova entrada na tela.
++  2. Em `refresh()`, a leitura manual chamava `coordinator.readStationState(scope)` antes de limpar `revokedKindRef.current`; como `isCurrent` do coordenador verifica `!revokedKindRef.current`, `alive()` lançava `'Sessão alterada durante a leitura.'` mesmo diante de um `GET 200` legítimo quando a tela permanecia montada com `accessDenied={false}` e exibia o botão `"Atualizar atendimento"`.
++- **Solução adotada:**
++  1. Removido integralmente o fallback parcial por `userId + eventId` em [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js). Adicionados `visitIdRef` (incrementado a cada montagem/troca de escopo e invalidado no `unmount`), `opSeqRef`, `activeOpIdRef` e `revokedByOpRef`: qualquer publicação tardia de `feedback` ou `onStage` exige simultaneamente `mounted`, `!accessDenied`, `originVisitId === visitIdRef.current`, `opSeqRef.current === opId` (ou `activeOpIdRef.current === opId` para estágios) e igualdade integral dos 6 campos de `same(scope, getContext())` (`userId`, `sessionId`, `eventId`, `stationId`, `epoch`, `revision`), enquanto a gravação durável de `.receipt` e os bloqueios de autorização permanecem independentes da camada visual.
++  2. Em `refresh()`, substituída a leitura indireta via `coordinator.readStationState` pela chamada direta a `fetchStaffStationState` (alinhada a `poll()`), limpando `revokedKindRef.current = null` **exclusivamente** após confirmação de `GET 200` válido na geração e visita vigentes (`current()`) e **antes** de consultar `coordinator.pending(scope)`, revalidando `!current() || revokedKindRef.current` em seguida; falhas `503`/rede/timeout mantêm `revokedKindRef.current` intacto e mutações continuam bloqueadas por `!revokedKindRef.current` enquanto não houver revalidação `200`.
++  3. **Caminhos oficiais de recuperação documentados:** na navegação integrada (`StaffEventsNavigator` / `StaffEventDashboard`), `onAccessDenied` ativa `accessLocked` no painel e desmonta imediatamente a `StaffStationOperationalScreen` (`resolvedStation = null`), de modo que a recuperação oficial ocorre retornando ao Painel Operacional e acionando **`"Atualizar estações"`** (`store.refreshPanel()`). Quando `StaffStationOperationalScreen` recebe `accessDenied={true}` por prop, renderiza apenas o card de bloqueio sem oferecer botão local inoperante; quando permanece montada de forma autônoma com `accessDenied={false}`, o botão **`"Atualizar atendimento"`** executa a revalidação GET real e só restaura a tela após `200` autorizado, preservando intactas as intenções/recibos pendentes no `SecureStore`.
++- **Arquivos modificados:** [app/screens/staff/StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js).
++- **Testes preparados:** [app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) (5 transições com `recordTerminal` atrasado: troca de `sessionId`, troca de `revision`/`epoch`, troca de `stationId`, saída e retorno à mesma estação e `accessDenied={true}`, além de `503` manual não reabilitando `403` e `200` manual legítimo restaurando a estação sem perder `.receipt`) e [app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) (recuperação oficial pelo Painel e ausência de vazamento após troca de sessão).
++- **Verificações estáticas realizadas:** `@babel/parser` JSX, `node --check`, `git diff --check`.
++- **Riscos e limitações:** a separação entre recuperação via Painel (fluxo integrado padrão) e recuperação local na Estação (`accessDenied={false}`) é intencional para respeitar o bloqueio centralizado de `StaffEventDashboard` introduzido nas STAFF-02/STAFF-04.
++
++#### `STAFF04-AUD-10` (P2) — Distinção explícita entre processamento no servidor e persistência segura local do resultado
++
++- **Causa técnica:** após o servidor retornar e o parser validar um resultado definitivo (confirmado ou recusado não-auth como `409`/`404`/`400`), tanto [staffEntryService.js](../app/services/staffEntryService.js) (durante `await storage.finish(...)`) quanto [staffOperationsService.js](../app/services/staffOperationsService.js) (durante `await storage.recordTerminal(...)` e `await storage.clear(...)`) mantinham o estágio `'mutating'`, fazendo [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) e [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js) exibirem *"Processando operação no servidor..."* enquanto ocorria apenas gravação local no `SecureStore` (e, nas Estações, omitindo também `'preparing'` e `'dispatching'` em `onStage`).
++- **Solução adotada:**
++  1. Em [staffOperationsService.js](../app/services/staffOperationsService.js), ampliada a emissão de `onStage` para `'preparing'` (antes de `storage.reserve`), `'dispatching'` (antes de `storage.dispatch`), `'mutating'` (antes da requisição HTTP) e `'persisting'` (imediatamente antes de `storage.recordTerminal`, cobrindo também `storage.clear` subsequente) exclusivamente quando há resultado definitivo validado e `!revokedByCurrentAuth` (resultados `uncertain` retornam antes sem emitir `'persisting'`, e negativas `401`/`403` priorizam `onAuthError` imediato).
++  2. Em [staffEntryService.js](../app/services/staffEntryService.js), após resposta HTTP definitiva não-auth, `mutate()` publica `busyKind: 'persisting'` antes de `await storage.finish(...)` (sob guarda `sameOperationScope()`), enquanto negativas `401`/`403` publicam imediatamente `busy: false, busyKind: null, data: null` antes da persistência local; resultados `uncertain` não emitem `'persisting'` nem confirmação prematura.
++  3. Em [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) e [StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js), mapeado o estágio `'persisting'` para **`"Registrando resultado com segurança..."`** (além de `'preparing'` e `'dispatching'` na Estação), mantendo intacto o formato persistido em [staffIntentStorage.js](../app/services/staffIntentStorage.js) e [staffEntryIntentStorage.js](../app/services/staffEntryIntentStorage.js) e protegendo `onStage` contra gerações/visitas/operações antigas.
++- **Arquivos modificados:** [app/services/staffOperationsService.js](../app/services/staffOperationsService.js), [app/services/staffEntryService.js](../app/services/staffEntryService.js), [app/screens/staff/StaffStationOperationalScreen.js](../app/screens/staff/StaffStationOperationalScreen.js), [app/screens/staff/StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js).
++- **Testes preparados:** [app/tests/staffOperationsService.integration.test.cjs](../app/tests/staffOperationsService.integration.test.cjs), [app/tests/staffEntryControl.test.cjs](../app/tests/staffEntryControl.test.cjs), [app/tests/staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs), [app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) e [app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) cobrindo `recordTerminal()`, `clear()` e `finish()` controlados em sucesso e recusa definitiva (`409`), limpeza imediata sem banner `busy` em `401`/`403`, ausência de `'persisting'` em `uncertain` e descarte de `onStage` obsoleto em troca de contexto.
++- **Verificações estáticas realizadas:** `node --input-type=module --check`, `@babel/parser` JSX, `node --check`, `git diff --check`.
++- **Riscos e limitações:** em dispositivos com `SecureStore` rápido, a etapa `"Registrando resultado com segurança..."` dura poucos milissegundos em operação normal, tornando-se visualmente proeminente apenas sob latência de I/O local.

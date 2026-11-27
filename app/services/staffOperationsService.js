@@ -294,6 +294,34 @@ export function createStaffOperationsCoordinator({
     alive(context);
     return intent;
   }
+  function createPreconditionAuthGuard(context, desired) {
+    let notified = false;
+    function reportIfAuthError(error) {
+      const status = Number.isInteger(error?.status) ? error.status : null;
+      if ((status !== 401 && status !== 403) || notified) return;
+      if (!isCurrent(context, desired)) return;
+      notified = true;
+      if (typeof onAuthError === 'function') {
+        try {
+          onAuthError({
+            kind: status === 401 ? 'session' : 'denied',
+            status,
+            code: typeof error?.code === 'string' ? error.code : null,
+            phase: 'precondition',
+            context,
+            desired,
+          });
+        } catch { /* Não mascarar a recusa prévia nem interromper observadores irmãos. */ }
+      }
+    }
+    function observe(promise) {
+      return Promise.resolve(promise).catch((error) => {
+        reportIfAuthError(error);
+        throw error;
+      });
+    }
+    return { observe, reportIfAuthError, wasNotified: () => notified };
+  }
   async function execute(context, desired, check, operation) {
     contextValid(context);
     const existing = await getIntent(context);
@@ -305,30 +333,22 @@ export function createStaffOperationsCoordinator({
       ? { kind: 'terminal_pending', outcome: existing.outcome, receiptId: existing.key }
       : { kind: existing.phase === 'reserved' ? 'reserved' : 'pending_reconciliation' };
     if (!existing) {
+      const preconditionGuard = createPreconditionAuthGuard(context, desired);
       let possible;
       try {
         if (typeof onStage === 'function') onStage('precondition', context, desired);
-        possible = await check();
+        possible = await check(preconditionGuard.observe);
       }
       catch (error) {
-        alive(context, desired);
+        if (!preconditionGuard.wasNotified()) {
+          alive(context, desired);
+          preconditionGuard.reportIfAuthError(error);
+        }
         const status = Number.isInteger(error?.status) ? error.status : null;
         const timeout = Boolean(error?.isTimeout);
         const network = Boolean(error?.isNetworkError || timeout);
         const transient = network || status === null || status >= 500;
         const code = typeof error?.code === 'string' ? error.code : null;
-        if ((status === 401 || status === 403) && typeof onAuthError === 'function') {
-          try {
-            onAuthError({
-              kind: status === 401 ? 'session' : 'denied',
-              status,
-              code,
-              phase: 'precondition',
-              context,
-              desired,
-            });
-          } catch { /* Não mascarar a recusa prévia classificada. */ }
-        }
         return {
           kind: 'rejected',
           phase: 'precondition',
@@ -345,6 +365,7 @@ export function createStaffOperationsCoordinator({
     const intent = { ...desired, key: createKey(), phase: 'reserved' };
     requireIds(intent.key);
     alive(context, desired);
+    if (typeof onStage === 'function') onStage('preparing', context, desired);
     const reservation = await storage.reserve(intent);
     if (!isCurrent(context, desired)) {
       if (reservation?.created) { try { await storage.cancelReserved(context.userId, intent.key); } catch { /* ainda bloqueada ou removida */ } }
@@ -352,7 +373,10 @@ export function createStaffOperationsCoordinator({
     }
     if (!reservation?.created) return { kind: 'pending_reconciliation' };
     let dispatched;
-    try { dispatched = await storage.dispatch(context.userId, intent.key); }
+    try {
+      if (typeof onStage === 'function') onStage('dispatching', context, desired);
+      dispatched = await storage.dispatch(context.userId, intent.key);
+    }
     catch { return isCurrent(context, desired) ? { kind: 'storage_error' } : { kind: 'stale' }; }
     if (!isCurrent(context, desired)) return { kind: 'stale' };
     if (!dispatched) return { kind: 'pending_reconciliation' };
@@ -382,6 +406,9 @@ export function createStaffOperationsCoordinator({
           } catch { /* Não interromper persistência do resultado histórico. */ }
         }
       }
+    }
+    if (!revokedByCurrentAuth && typeof onStage === 'function' && isCurrent(context, desired)) {
+      onStage('persisting', context, desired);
     }
     // A resposta histórica pertence à intenção original mesmo após logout ou bloqueio imediato de autorização.
     try { await storage.recordTerminal(context.userId, intent.key, outcome); }
@@ -430,10 +457,10 @@ export function createStaffOperationsCoordinator({
         contextValid(context); requireIds(experienceId, stationId);
         const desired = { kind: 'call', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
           experienceId, stationId, serviceSessionId: null };
-        return execute(context, desired, async () => {
+        return execute(context, desired, async (observe) => {
           const [queue, { stations }] = await Promise.all([
-            fetchStaffQueue(client, context.eventId, experienceId),
-            fetchStaffStations(client, context.eventId),
+            observe(fetchStaffQueue(client, context.eventId, experienceId)),
+            observe(fetchStaffStations(client, context.eventId)),
           ]);
           const station = stations.find((s) => s.id === stationId && s.experienceId === experienceId);
           return Boolean(queue.waitingCount > 0 && queue.canCallWaitingEntries && station
@@ -447,8 +474,8 @@ export function createStaffOperationsCoordinator({
         contextValid(context); requireIds(serviceSessionId, stationId);
         const desired = { kind: 'complete', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
           experienceId: null, stationId, serviceSessionId };
-        return execute(context, desired, async () => {
-          const { stations } = await fetchStaffStations(client, context.eventId);
+        return execute(context, desired, async (observe) => {
+          const { stations } = await observe(fetchStaffStations(client, context.eventId));
           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
         }, (key) => completeStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
       }, context, { ...context, kind: 'complete', experienceId: null, stationId, serviceSessionId });
@@ -459,8 +486,8 @@ export function createStaffOperationsCoordinator({
         contextValid(context); requireIds(serviceSessionId, stationId);
         const desired = { kind: 'absent', userId: context.userId, eventId: context.eventId, sessionId: context.sessionId,
           experienceId: null, stationId, serviceSessionId };
-        return execute(context, desired, async () => {
-          const { stations } = await fetchStaffStations(client, context.eventId);
+        return execute(context, desired, async (observe) => {
+          const { stations } = await observe(fetchStaffStations(client, context.eventId));
           return stations.some((s) => s.id === stationId && s.pendingServiceSessionId === serviceSessionId);
         }, (key) => absentStaffService(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
       }, context, { ...context, kind: 'absent', experienceId: null, stationId, serviceSessionId });
@@ -471,8 +498,8 @@ export function createStaffOperationsCoordinator({
         contextValid(context); requireIds(experienceId, stationId, serviceSessionId);
         const desired = { kind: 'remove_called', userId: context.userId, eventId: context.eventId,
           sessionId: context.sessionId, experienceId, stationId, serviceSessionId };
-        return execute(context, desired, async () => {
-          const { stations } = await fetchStaffStations(client, context.eventId);
+        return execute(context, desired, async (observe) => {
+          const { stations } = await observe(fetchStaffStations(client, context.eventId));
           return stations.some(s => s.id === stationId && s.experienceId === experienceId &&
             s.pendingServiceSessionId === serviceSessionId);
         }, key => removeCalledStaff(client, { eventId: context.eventId, serviceSessionId, idempotencyKey: key }));
@@ -484,8 +511,8 @@ export function createStaffOperationsCoordinator({
         contextValid(context); requireIds(experienceId, stationId, queueEntryId);
         const desired = { kind: 'remove', userId: context.userId, eventId: context.eventId,
           sessionId: context.sessionId, experienceId, stationId, serviceSessionId: null, queueEntryId };
-        return execute(context, desired, async () => {
-          const state = await fetchStaffStationState(client, context.eventId, experienceId, stationId);
+        return execute(context, desired, async (observe) => {
+          const state = await observe(fetchStaffStationState(client, context.eventId, experienceId, stationId));
           return state.waiting.some(row => row.queueEntryId === queueEntryId);
         }, key => removeWaitingStaff(client, { eventId: context.eventId, experienceId, queueEntryId,
           idempotencyKey: key }));

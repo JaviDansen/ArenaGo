@@ -119,15 +119,28 @@ export default function StaffStationOperationalScreen({
       },
       storage: defaultStaffIntentStorage,
       createKey: randomUUID,
-      isCurrent: (context, scope) => !revokedKindRef.current
-        && same(context, getContext())
-        && (!scope || (scope.stationId === context.stationId && scope.eventId === context.eventId)),
+      isCurrent: (ctx, scope) => !revokedKindRef.current
+        && (ctx?.visitId === undefined || ctx.visitId === visitIdRef.current)
+        && same(ctx, getContext())
+        && (!scope || (scope.stationId === ctx.stationId && scope.eventId === ctx.eventId)),
       onStage: (stage, originScope) => {
-        if (!mounted.current || revokedKindRef.current || !same(originScope, getContext())) return;
+        if (
+          !mounted.current
+          || revokedKindRef.current
+          || !originScope
+          || originScope.visitId !== visitIdRef.current
+          || originScope.opId !== activeOpIdRef.current
+          || !same(originScope, getContext())
+        ) return;
         setView((previous) => (previous.busy ? { ...previous, busyKind: stage } : previous));
       },
       onAuthError: (info) => {
-        if (!info?.context || !same(info.context, getContext())) return;
+        const originScope = info?.context;
+        if (
+          !originScope
+          || (originScope.visitId !== undefined && originScope.visitId !== visitIdRef.current)
+          || !same(originScope, getContext())
+        ) return;
         const feedback = info.phase === 'precondition'
           ? {
               kind: 'rejected',
@@ -139,7 +152,9 @@ export default function StaffStationOperationalScreen({
               transient: false,
             }
           : null;
-        revokeStationAccess(info.kind, info.context, feedback);
+        if (revokeStationAccess(info.kind, originScope, feedback) && originScope.opId) {
+          revokedByOpRef.current = originScope.opId;
+        }
       },
     });
   }
@@ -168,6 +183,10 @@ export default function StaffStationOperationalScreen({
   const pollingFlight = useRef(0);
   const pollSeq = useRef(0);
   const revokedKindRef = useRef(null);
+  const visitIdRef = useRef(0);
+  const opSeqRef = useRef(0);
+  const activeOpIdRef = useRef(0);
+  const revokedByOpRef = useRef(0);
   const epoch = auth.getSessionEpoch();
   const revision = auth.getIdentityRevision();
   const context = getContext();
@@ -270,20 +289,22 @@ export default function StaffStationOperationalScreen({
       autoRecoverable: false,
       feedback: preserveFeedback ? previous.feedback : null,
     }));
-    const current = () => request === generation.current && same(initial, getContext());
+    const visitAtStart = visitIdRef.current;
+    const current = () => visitAtStart === visitIdRef.current
+      && request === generation.current
+      && same(initial, getContext());
     let stage = 'read';
     try {
-      const data = coordinator
-        ? await coordinator.readStationState(initial, experience.id, station.id)
-        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
+      const data = await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
       if (!current()) return false;
+      revokedKindRef.current = null;
+      revokedByOpRef.current = 0;
       let pending = null;
       if (coordinator) {
         stage = 'pending';
-        pending = await coordinator.pending(initial);
+        pending = await coordinator.pending({ ...initial, visitId: visitAtStart });
       }
-      if (!current()) return false;
-      revokedKindRef.current = null;
+      if (!current() || revokedKindRef.current) return false;
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
       return true;
     } catch (error) {
@@ -336,13 +357,12 @@ export default function StaffStationOperationalScreen({
       || acknowledging.current
     ) return;
     const wasReady = currentView.status === 'ready';
+    const visitAtStart = visitIdRef.current;
     const seq = ++pollSeq.current;
     pollingFlight.current = request;
     try {
-      const data = coordinator
-        ? await coordinator.readStationState(scope, experience.id, station.id)
-        : await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
-      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
+      const data = await fetchStaffStationState(liveRef.current.auth.httpClient, event.id, experience.id, station.id);
+      if (visitAtStart !== visitIdRef.current || request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
       if (wasReady) {
         setView((previous) => ({ ...previous, data, error: null, autoRecoverable: false }));
         return;
@@ -350,15 +370,15 @@ export default function StaffStationOperationalScreen({
       let pending = null;
       if (coordinator) {
         try {
-          pending = await coordinator.pending(scope);
+          pending = await coordinator.pending({ ...scope, visitId: visitAtStart });
         } catch {
           pending = { kind: 'storage_error' };
         }
       }
-      if (request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
+      if (visitAtStart !== visitIdRef.current || request !== generation.current || seq !== pollSeq.current || !same(scope, getContext()) || revokedKindRef.current) return;
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
     } catch (error) {
-      if (!same(scope, getContext())) return;
+      if (visitAtStart !== visitIdRef.current || !same(scope, getContext())) return;
       if (error?.status === 401 || error?.status === 403) {
         revokeStationAccess(error.status === 401 ? 'session' : 'denied', scope, null);
         return;
@@ -413,11 +433,21 @@ export default function StaffStationOperationalScreen({
 
   useEffect(() => {
     mounted.current = true;
+    visitIdRef.current += 1;
+    activeOpIdRef.current = 0;
+    revokedByOpRef.current = 0;
+    dispatching.current = false;
+    acknowledging.current = false;
     autoAttempt.current = null;
     revokedKindRef.current = null;
     if (!liveRef.current.accessDenied) void refresh();
     return () => {
       mounted.current = false;
+      visitIdRef.current += 1;
+      activeOpIdRef.current = 0;
+      revokedByOpRef.current = 0;
+      dispatching.current = false;
+      acknowledging.current = false;
       generation.current += 1;
       pollSeq.current += 1;
       pollingFlight.current = 0;
@@ -429,6 +459,8 @@ export default function StaffStationOperationalScreen({
     if (!accessDenied) return;
     const denyKind = accessDeniedKind === 'session' ? 'session' : 'denied';
     revokedKindRef.current = denyKind;
+    activeOpIdRef.current = 0;
+    revokedByOpRef.current = 0;
     generation.current += 1;
     pollSeq.current += 1;
     pollingFlight.current = 0;
@@ -463,27 +495,30 @@ export default function StaffStationOperationalScreen({
       || autoAttempt.current === pending.receiptId
       || acknowledging.current
     ) return;
+    const ackVisitId = visitIdRef.current;
     autoAttempt.current = pending.receiptId;
     acknowledging.current = true;
     setView((previous) => ({ ...previous, busy: true, busyKind: 'acknowledging' }));
     void (async () => {
-      const target = { ...scope, serviceSessionId: pending.serviceSessionId ?? null };
+      const target = { ...scope, visitId: ackVisitId, serviceSessionId: pending.serviceSessionId ?? null };
       let verified = false;
       try {
         const cleanup = await coordinator.cleanupTerminal(target, pending.receiptId);
-        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && same(scope, getContext())) {
+        if (['terminal_pending', 'cleanup_pending'].includes(cleanup.kind) && ackVisitId === visitIdRef.current && same(scope, getContext())) {
           await coordinator.acknowledgeTerminal(target, pending.receiptId);
           // O marcador concluído e a ausência do recibo precisam ser confirmados por nova leitura.
-          const remaining = await coordinator.pending(scope);
+          const remaining = await coordinator.pending({ ...scope, visitId: ackVisitId });
           verified = remaining.kind === 'none';
         }
       } catch { /* A releitura manterá o bloqueio se o armazenamento falhar. */ }
-      acknowledging.current = false;
-      if (same(scope, getContext())) {
+      if (ackVisitId === visitIdRef.current) acknowledging.current = false;
+      if (ackVisitId === visitIdRef.current && !revokedKindRef.current && same(scope, getContext())) {
         if (verified) setView((previous) => ({ ...previous, feedback: pending.outcome }));
         setView((previous) => ({ ...previous, busy: false, busyKind: null }));
         await refresh(true);
-      } else if (getContext()) void refresh();
+      } else if (ackVisitId === visitIdRef.current && !revokedKindRef.current && getContext()) {
+        void refresh();
+      }
     })();
   }, [accessDenied, view.pending, view.scope, coordinator]);
 
@@ -534,22 +569,30 @@ export default function StaffStationOperationalScreen({
     dialogRef.current = null;
     setDialog(null);
     const scope = expected.context;
+    const originVisitId = visitIdRef.current;
+    const opId = ++opSeqRef.current;
+    activeOpIdRef.current = opId;
+    const opScope = { ...scope, visitId: originVisitId, opId };
     setView((previous) => ({ ...previous, busy: true, busyKind: 'precondition', feedback: null }));
     try {
       let result;
       try {
         const action = expected.action;
         result = action.kind === 'call'
-          ? await coordinator.callNext(scope, experience.id, station.id)
+          ? await coordinator.callNext(opScope, experience.id, station.id)
           : action.kind === 'complete'
-            ? await coordinator.complete(scope, action.serviceSessionId, station.id)
+            ? await coordinator.complete(opScope, action.serviceSessionId, station.id)
             : action.kind === 'absent'
-              ? await coordinator.absent(scope, action.serviceSessionId, station.id)
-              : await coordinator.removeCalled(scope, experience.id, station.id, action.serviceSessionId);
+              ? await coordinator.absent(opScope, action.serviceSessionId, station.id)
+              : await coordinator.removeCalled(opScope, experience.id, station.id, action.serviceSessionId);
       } catch {
         result = { kind: 'storage_error' };
       }
-      const alreadyRevokedBeforeReturn = Boolean(revokedKindRef.current);
+      const isExactOriginContext = mounted.current
+        && !liveRef.current.accessDenied
+        && originVisitId === visitIdRef.current
+        && opSeqRef.current === opId
+        && same(scope, getContext());
       if (
         (result?.kind === 'rejected' || result?.kind === 'rejected_cleanup_pending')
         && (result.status === 401 || result.status === 403)
@@ -557,29 +600,26 @@ export default function StaffStationOperationalScreen({
         const preservedFeedback = (result.phase === 'precondition' || result.kind === 'rejected_cleanup_pending')
           ? result
           : null;
-        if (!same(scope, getContext())) {
-          if (
-            alreadyRevokedBeforeReturn
-            && preservedFeedback
-            && mounted.current
-            && liveRef.current.event?.id === scope.eventId
-            && liveRef.current.auth?.user?.id === scope.userId
-          ) {
-            setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: preservedFeedback }));
-          }
+        if (!isExactOriginContext) {
           return;
         }
-        revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback);
+        if (revokedKindRef.current && revokedByOpRef.current !== opId) {
+          return;
+        }
+        if (revokeStationAccess(result.status === 401 ? 'session' : 'denied', scope, preservedFeedback)) {
+          revokedByOpRef.current = opId;
+        }
         return;
       }
-      if (!same(scope, getContext()) || revokedKindRef.current) return;
+      if (!isExactOriginContext || revokedKindRef.current) return;
       setView((previous) => ({ ...previous, busy: false, busyKind: null, feedback: result }));
       const refreshedOk = await refresh(true);
-      if (refreshedOk && !revokedKindRef.current && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
+      if (refreshedOk && !revokedKindRef.current && originVisitId === visitIdRef.current && same(scope, getContext()) && (result?.kind === 'confirmed' || result?.kind === 'confirmed_cleanup_pending')) {
         liveRef.current.onChanged?.();
       }
     } finally {
-      dispatching.current = false;
+      if (activeOpIdRef.current === opId) activeOpIdRef.current = 0;
+      if (originVisitId === visitIdRef.current) dispatching.current = false;
     }
   }
 
@@ -688,7 +728,13 @@ export default function StaffStationOperationalScreen({
                 ? 'Descartando solicitação não enviada...'
                 : view.busyKind === 'precondition'
                   ? 'Verificando condições antes do envio...'
-                  : 'Processando operação no servidor...'}
+                  : view.busyKind === 'preparing'
+                    ? 'Preparando solicitação com segurança...'
+                    : view.busyKind === 'dispatching'
+                      ? 'Registrando envio seguro...'
+                      : view.busyKind === 'persisting'
+                        ? 'Registrando resultado com segurança...'
+                        : 'Processando operação no servidor...'}
           </Text>
         </View>
       )}

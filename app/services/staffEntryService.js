@@ -212,8 +212,10 @@ export function createStaffEntryStore({ client, storage, createKey, getContext }
             revokedKind = authFailure;
             readGeneration += 1;
             silentFlight = false;
-            publish({ status: 'error', data: null, error: revokedKind });
+            publish({ status: 'error', data: null, error: revokedKind, busy: false, busyKind: null });
           }
+        } else if (sameOperationScope()) {
+          publish({ busyKind: 'persisting' });
         }
         await storage.finish(intent, outcome);
         if (!sameOperationScope()) return { kind: 'stale' };

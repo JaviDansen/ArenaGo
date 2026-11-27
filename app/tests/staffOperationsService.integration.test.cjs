@@ -1038,7 +1038,7 @@ test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase preco
     assert.equal(posts, 0);
   }
 
-  // Fluxo confirmado emite ['precondition', 'mutating'] em ordem exata
+  // Fluxo confirmado emite estágios ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting'] em ordem exata
   {
     const { storage } = secureStaffRig();
     const stages = [];
@@ -1046,7 +1046,7 @@ test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase preco
     const client = {
       async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
       async post() {
-        assert.deepEqual(stages, ['precondition', 'mutating'], 'onStage mutating ocorre antes do POST');
+        assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating'], 'onStage mutating ocorre antes do POST');
         posts += 1;
         return called();
       },
@@ -1059,7 +1059,7 @@ test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase preco
       onStage: (stage) => stages.push(stage),
     });
     assert.equal((await manager.callNext(context, experienceId, stationId)).kind, 'confirmed');
-    assert.deepEqual(stages, ['precondition', 'mutating']);
+    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
     assert.equal(posts, 1);
   }
 });
@@ -1258,5 +1258,289 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
     assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, 403);
     assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${otherUser}.receipt`)).outcome.kind, 'confirmed');
     assert.equal(postCount, 2);
+  }
+});
+
+test('STAFF04-AUD-08 (coordenador): leituras preliminares paralelas propagam 401/403 mesmo após 503 irmão ou com irmã pendente, sem duplicar nem vazar identidade', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
+
+  // 1 e 2: /queue 503 depois /stations 403, e inverso (/stations 503 depois /queue 401)
+  for (const [firstRoute, authStatus, authCode, expectedKind] of [
+    ['queue', 403, 'STAFF_EVENT_FORBIDDEN', 'denied'],
+    ['stations', 401, 'SESSION_REVOKED', 'session'],
+  ]) {
+    const rig = secureStaffRig();
+    const qGate = defer();
+    const sGate = defer();
+    const events = [];
+    let locked = false;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        get(url) { return url.endsWith('/stations') ? sGate.promise : qGate.promise; },
+        async post() { posts += 1; return called(); },
+      },
+      storage: rig.storage,
+      isCurrent: () => !locked,
+      createKey: () => key,
+      onAuthError: (info) => {
+        locked = true;
+        events.push(`auth:${info.kind}:${info.status}:${info.phase}`);
+      },
+    });
+
+    const pCall = manager.callNext(context, experienceId, stationId);
+    const firstGate = firstRoute === 'queue' ? qGate : sGate;
+    const secondGate = firstRoute === 'queue' ? sGate : qGate;
+
+    firstGate.reject(Object.assign(new Error('503'), { status: 503, code: 'SERVICE_UNAVAILABLE' }));
+    const res = await pCall;
+    events.push(`callNext:${res.kind}:${res.status}:${res.transient}`);
+    assert.equal(res.kind, 'rejected');
+    assert.equal(res.phase, 'precondition');
+    assert.equal(res.status, 503);
+    assert.equal(res.transient, true);
+    assert.equal(locked, false, 'ainda sem bloqueio de auth enquanto apenas 503 ocorreu');
+    assert.equal(posts, 0);
+
+    // A segunda leitura preliminar rejeita posteriormente com 401/403 -> onAuthError dispara imediatamente
+    secondGate.reject(Object.assign(new Error('auth-denied'), { status: authStatus, code: authCode }));
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(locked, true);
+    assert.deepEqual(events, [
+      'callNext:rejected:503:true',
+      `auth:${expectedKind}:${authStatus}:precondition`,
+    ]);
+    assert.equal(posts, 0);
+    assert.equal(rig.values.size, 0);
+  }
+
+  // 3 e 4: uma leitura recebe 403 ou 401 enquanto a consulta irmã permanece pendente (bloqueio imediato sem aguardar irmã e sem duplicar)
+  for (const [fastRoute, authStatus, expectedKind] of [
+    ['queue', 403, 'denied'],
+    ['stations', 401, 'session'],
+  ]) {
+    const rig = secureStaffRig();
+    const qGate = defer();
+    const sGate = defer();
+    let authNotifications = 0;
+    let locked = false;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        get(url) { return url.endsWith('/stations') ? sGate.promise : qGate.promise; },
+        async post() { posts += 1; return called(); },
+      },
+      storage: rig.storage,
+      isCurrent: () => !locked,
+      createKey: () => key,
+      onAuthError: (info) => {
+        authNotifications += 1;
+        locked = true;
+        assert.equal(info.kind, expectedKind);
+        assert.equal(info.phase, 'precondition');
+      },
+    });
+
+    const pCall = manager.callNext(context, experienceId, stationId);
+    const fastGate = fastRoute === 'queue' ? qGate : sGate;
+    const pendingSibling = fastRoute === 'queue' ? sGate : qGate;
+
+    fastGate.reject(Object.assign(new Error('auth'), { status: authStatus }));
+    const out = await pCall;
+
+    // Asserção ANTES de resolver a consulta irmã pendente
+    assert.equal(locked, true);
+    assert.equal(authNotifications, 1);
+    assert.equal(out.kind, 'rejected');
+    assert.equal(out.phase, 'precondition');
+    assert.equal(out.status, authStatus);
+    assert.equal(out.transient, false);
+    assert.equal(posts, 0);
+    assert.equal(rig.values.size, 0);
+
+    // Irmã rejeitando depois com 403/401 ou resolvendo 200 não duplica onAuthError nem inicia POST
+    if (fastRoute === 'queue') {
+      pendingSibling.reject(Object.assign(new Error('dup-auth'), { status: authStatus }));
+    } else {
+      pendingSibling.resolve(queue());
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(authNotifications, 1);
+    assert.equal(posts, 0);
+  }
+
+  // 5 e 6: erro transitório + 200 retorna falha prévia sem authError; 200 + 200 permite mutação legítima
+  {
+    const rig = secureStaffRig();
+    let failQueue = true;
+    let authCalls = 0;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) {
+          if (url.endsWith('/stations')) return stations();
+          if (failQueue) throw Object.assign(new Error('503'), { status: 503 });
+          return queue();
+        },
+        async post() { posts += 1; return called(); },
+      },
+      storage: rig.storage,
+      isCurrent: () => true,
+      createKey: () => key,
+      onAuthError: () => { authCalls += 1; },
+    });
+    const rTransient = await manager.callNext(context, experienceId, stationId);
+    assert.equal(rTransient.kind, 'rejected');
+    assert.equal(rTransient.transient, true);
+    assert.equal(authCalls, 0);
+    assert.equal(posts, 0);
+
+    failQueue = false;
+    const rOk = await manager.callNext(context, experienceId, stationId);
+    assert.equal(rOk.kind, 'confirmed');
+    assert.equal(authCalls, 0);
+    assert.equal(posts, 1);
+  }
+
+  // 7 e 8: negativa tardia após troca de identidade/sessão é ignorada; revalidação legítima permite nova operação
+  {
+    const rig = secureStaffRig();
+    const qGate = defer();
+    const sGate = defer();
+    let activeSession = context.sessionId;
+    let locked = false;
+    const authEvents = [];
+    let useGates = true;
+    let posts = 0;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        get(url) {
+          if (!useGates) return Promise.resolve(url.endsWith('/stations') ? stations() : queue());
+          return url.endsWith('/stations') ? sGate.promise : qGate.promise;
+        },
+        async post() { posts += 1; return called(); },
+      },
+      storage: rig.storage,
+      isCurrent: (ctx) => !locked && ctx.sessionId === activeSession,
+      createKey: () => key,
+      onAuthError: (info) => {
+        locked = true;
+        authEvents.push(info.context.sessionId);
+      },
+    });
+
+    const pOld = manager.callNext(context, experienceId, stationId);
+    qGate.reject(Object.assign(new Error('503'), { status: 503 }));
+    await pOld;
+
+    // Troca de sessão antes da resposta tardia 403 de /stations
+    activeSession = '10000000-0000-4000-8000-000000000099';
+    sGate.reject(Object.assign(new Error('stale-403'), { status: 403 }));
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(locked, false, 'negativa tardia de sessão antiga não bloqueia sessão nova');
+    assert.deepEqual(authEvents, []);
+
+    useGates = false;
+    const nextRes = await manager.callNext({ ...context, sessionId: activeSession }, experienceId, stationId);
+    assert.equal(nextRes.kind, 'confirmed');
+    assert.equal(posts, 1);
+  }
+});
+
+test('STAFF04-AUD-10 (coordenador): emite persisting durante recordTerminal e clear em confirmação ou recusa não-auth, mas nunca em 401/403 ou uncertain', async () => {
+  const { createStaffOperationsCoordinator } = await service;
+  const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
+
+  // 1, 2 e 4: POST pendente (mutating) -> resposta confirmada com recordTerminal pendente (persisting) -> clear pendente (persisting)
+  {
+    const rig = secureStaffRig();
+    const postGate = defer();
+    const recordGate = defer();
+    const clearGate = defer();
+    const stages = [];
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        post: () => postGate.promise,
+      },
+      storage: {
+        ...rig.storage,
+        async recordTerminal(u, k, o) {
+          assert.equal(stages[stages.length - 1], 'persisting', 'persisting já ativo ao iniciar recordTerminal');
+          await recordGate.promise;
+          return rig.storage.recordTerminal(u, k, o);
+        },
+        async clear(u, k) {
+          assert.equal(stages[stages.length - 1], 'persisting', 'persisting permanece ativo durante clear');
+          await clearGate.promise;
+          return rig.storage.clear(u, k);
+        },
+      },
+      isCurrent: () => true,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+    });
+
+    const pCall = manager.callNext(context, experienceId, stationId);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating']);
+
+    postGate.resolve(called());
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
+
+    recordGate.resolve();
+    await new Promise((r) => setTimeout(r, 10));
+    clearGate.resolve();
+    assert.equal((await pCall).kind, 'confirmed');
+    const scope = { ...context, stationId, serviceSessionId: sessionId };
+    assert.equal((await manager.acknowledgeTerminal(scope, key)).kind, 'acknowledged');
+  }
+
+  // 3 e 5: recusa definitiva não-auth (409) emite persisting e trata falha de recordTerminal sem indicar sucesso
+  {
+    const rig = secureStaffRig();
+    const stages = [];
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { throw Object.assign(new Error('empty'), { status: 409, code: 'QUEUE_EMPTY' }); },
+      },
+      storage: {
+        ...rig.storage,
+        async recordTerminal() { throw new Error('disk-error'); },
+      },
+      isCurrent: () => true,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+    });
+    const out = await manager.callNext(context, experienceId, stationId);
+    assert.equal(out.kind, 'rejected_cleanup_pending');
+    assert.deepEqual(stages, ['precondition', 'preparing', 'dispatching', 'mutating', 'persisting']);
+  }
+
+  // 7 e 8: resultado desconhecido (timeout) e negativa 403 NUNCA emitem persisting
+  for (const err of [
+    Object.assign(new Error('timeout'), { isTimeout: true }),
+    Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }),
+  ]) {
+    const rig = secureStaffRig();
+    const stages = [];
+    let locked = false;
+    const manager = createStaffOperationsCoordinator({
+      client: {
+        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+        async post() { throw err; },
+      },
+      storage: rig.storage,
+      isCurrent: () => !locked,
+      createKey: () => key,
+      onStage: (stage) => stages.push(stage),
+      onAuthError: () => { locked = true; },
+    });
+    await manager.callNext(context, experienceId, stationId);
+    assert.equal(stages.includes('persisting'), false);
   }
 });

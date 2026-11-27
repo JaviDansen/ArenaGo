@@ -746,3 +746,64 @@ test('STAFF04-AUD-04 e AUD-03 (store): GET 401/403 concorrente durante reserve/d
     assert.equal(store.getSnapshot().error, 'denied');
   }
 });
+
+test('STAFF04-AUD-10 (store Entrada): busyKind transita para persisting em storage.finish de confirmação ou 409, mas limpa imediatamente em 401/403 e nunca aparece em uncertain', async () => {
+  for (const scenario of ['confirmed', 'rejected_409', 'auth_403', 'uncertain']) {
+    const finishGate = defer();
+    const seenBusyKinds = [];
+    const saved = new Map();
+    const customStorage = {
+      isPersistent: true,
+      async get(user) { return saved.get(user) ?? null; },
+      async reserve(intent) { saved.set(intent.userId, intent); return { created: true, intent }; },
+      async dispatch(intent) { saved.set(intent.userId, { ...intent, phase: 'dispatching' }); return true; },
+      async finish(intent, outcome) {
+        await finishGate.promise;
+        saved.set(intent.userId, { ...intent, phase: 'terminal', outcome });
+        return true;
+      },
+      async acknowledge() { return true; },
+      async cancelReserved() { return true; },
+    };
+    const store = api.createStaffEntryStore({
+      client: {
+        get: async () => body(),
+        post: async () => {
+          if (scenario === 'confirmed') return callResult();
+          if (scenario === 'rejected_409') throw Object.assign(new Error('409'), { status: 409, code: 'ENTRY_NOT_FIRST' });
+          if (scenario === 'auth_403') throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+          throw Object.assign(new Error('timeout'), { isTimeout: true });
+        },
+        patch: async () => ({}),
+      },
+      storage: customStorage,
+      getContext: () => context,
+      createKey: () => id(70),
+    });
+    store.subscribe((snap) => {
+      if (snap.busy && snap.busyKind && seenBusyKinds[seenBusyKinds.length - 1] !== snap.busyKind) {
+        seenBusyKinds.push(snap.busyKind);
+      }
+    });
+    store.setContext(context);
+    await store.refresh();
+
+    const pMutate = store.mutate({ kind: 'call' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    if (scenario === 'confirmed' || scenario === 'rejected_409') {
+      assert.equal(store.getSnapshot().busy, true);
+      assert.equal(store.getSnapshot().busyKind, 'persisting');
+      assert.deepEqual(seenBusyKinds, ['preparing', 'dispatching', 'mutating', 'persisting']);
+    } else if (scenario === 'auth_403') {
+      assert.equal(store.getSnapshot().busy, false, '403 prioriza bloqueio imediato sem manter busy visível');
+      assert.equal(store.getSnapshot().busyKind, null);
+      assert.equal(store.getSnapshot().data, null);
+      assert.equal(seenBusyKinds.includes('persisting'), false);
+    } else {
+      assert.equal(seenBusyKinds.includes('persisting'), false);
+    }
+    finishGate.resolve();
+    await pMutate;
+  }
+});

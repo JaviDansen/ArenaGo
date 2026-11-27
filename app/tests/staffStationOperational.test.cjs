@@ -1693,3 +1693,410 @@ test('STAFF04-AUD-04 e AUD-07 (Estação): trava de UI/polling ANTES de recordTe
     }
   }
 });
+
+test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela revoga imediatamente mesmo após 503 irmão ou com irmã pendente e descarta GET 200 atrasado', { skip }, async () => {
+  const baseState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+
+  // Caso 1: /queue falha primeiro com 503, GET /operational-state fica em voo e /stations falha depois com 403
+  {
+    const qGate = deferred();
+    const sGate = deferred();
+    let opDeferred = null;
+    let deniedKind = null;
+    let postCalls = 0;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => { deniedKind = kind; },
+      onGet: (url) => {
+        if (url.endsWith('/queue')) return qGate.promise;
+        if (url.endsWith('/stations')) return sGate.promise;
+        if (opDeferred) {
+          const d = opDeferred;
+          opDeferred = null;
+          return d.promise;
+        }
+        return Promise.resolve(baseState);
+      },
+      onPost: async () => { postCalls += 1; return {}; },
+    });
+    try {
+      await h.mount();
+      assert.ok(h.hasQueueRow(1, 'Ana Clara'));
+
+      // Inicia Chamar próximo; /queue rejeita 503 primeiro, e o refresh(true) pós-503 fica em voo (opDeferred)
+      const slowOpRead = deferred();
+      let pCall;
+      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+      opDeferred = slowOpRead;
+      await h.act(async () => {
+        qGate.reject(Object.assign(new Error('503'), { status: 503 }));
+        await pCall;
+      });
+      assert.equal(deniedKind, null);
+      assert.equal(postCalls, 0);
+
+      // /stations rejeita posteriormente com 403 -> revoga imediatamente e invalida slowOpRead 200 atrasado
+      await h.act(async () => {
+        sGate.reject(Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' }));
+      });
+      assert.equal(deniedKind, 'denied');
+      assert.equal(h.hasText('Ana Clara'), false);
+      assert.ok(h.hasText('Acesso à estação indisponível.'));
+
+      await h.act(async () => {
+        slowOpRead.resolve(baseState);
+      });
+      assert.equal(h.hasText('Ana Clara'), false, 'resposta 200 atrasada não restaura dados protegidos');
+    } finally {
+      qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 0, canCallWaitingEntries: false, firstWaitingQueueEntryId: null });
+      sGate.resolve({ eventId: EV_A, stations: [] });
+      h.dispose();
+    }
+  }
+
+  // Caso 2: /stations rejeita com 401 enquanto /queue permanece pendente -> bloqueia ANTES da resolução de /queue
+  {
+    const qGate = deferred();
+    const sGate = deferred();
+    let deniedKind = null;
+    let postCalls = 0;
+    const h = createStationHarness({
+      onAccessDenied: (kind) => {
+        deniedKind = kind;
+        void h.rerender({ accessDenied: true, accessDeniedKind: kind });
+      },
+      onGet: (url) => {
+        if (url.endsWith('/queue')) return qGate.promise;
+        if (url.endsWith('/stations')) return sGate.promise;
+        return Promise.resolve(baseState);
+      },
+      onPost: async () => { postCalls += 1; return {}; },
+    });
+    try {
+      await h.mount();
+      let pCall;
+      await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+      await h.act(async () => {
+        sGate.reject(Object.assign(new Error('401'), { status: 401, code: 'SESSION_REVOKED' }));
+        await pCall;
+      });
+      // Antes de resolver qGate:
+      assert.equal(deniedKind, 'session');
+      assert.equal(postCalls, 0);
+      assert.equal(h.hasText('Ana Clara'), false);
+      assert.ok(h.hasText('Sessão inválida. Entre novamente.'));
+    } finally {
+      qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 });
+      h.dispose();
+    }
+  }
+});
+
+test('STAFF04-AUD-09 (tela Estação): isola feedback tardio entre contas, sessões, estações, visitas e contextos bloqueados, e preserva revalidação GET 200 legítima', { skip }, async () => {
+  const USER_2 = 'abcdef00-0000-4000-8000-000000000002';
+  const SESSION_2 = '10000000-0000-4000-8000-000000000002';
+  const makeState = (stId, name) => ({
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: stId,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: name, position: 1 }],
+    pending: null,
+  });
+
+  // Cenários 1 a 6: POST 403 + falha tardia em recordTerminal (rejected_cleanup_pending) nunca vaza feedback visual para outro contexto/visita, mas preserva intenção persistida
+  for (const transition of ['other_account', 'new_session_same_account', 'other_station_same_event', 'exit_and_return_same_station', 'other_blocked_context']) {
+    const recordGate = deferred();
+    let currentStationId = ST_1;
+    let participantName = 'Ana Clara';
+    const h = createStationHarness({
+      onSecureSet: async (key) => {
+        if (key.endsWith('.receipt')) {
+          await recordGate.promise;
+          throw new Error('receipt-write-failed');
+        }
+      },
+      onGet: async (url) => {
+        if (url.endsWith('/stations')) {
+          return { eventId: EV_A, stations: [{ id: currentStationId, experienceId: EXP_1, label: 'Cabine', availability: 'available', pendingServiceSessionId: null }] };
+        }
+        if (url.endsWith('/queue')) {
+          return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+        }
+        return makeState(currentStationId, participantName);
+      },
+      onPost: async () => {
+        throw Object.assign(new Error('403'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+      },
+    });
+
+    try {
+      await h.mount();
+      let inflight;
+      await h.act(async () => { inflight = h.handler('Chamar próximo')(); });
+
+      if (transition === 'other_account') {
+        participantName = 'Fila Conta 2';
+        await h.rerender({
+          auth: {
+            isAuthenticated: true,
+            user: { id: USER_2, roles: ['staff'] },
+            sessionId: SESSION_2,
+            isIdentityVerified: () => true,
+            getSessionEpoch: () => 2,
+            getIdentityRevision: () => 2,
+          },
+        });
+      } else if (transition === 'new_session_same_account') {
+        participantName = 'Fila Nova Sessão';
+        await h.rerender({
+          auth: {
+            isAuthenticated: true,
+            user: { id: USER_1, roles: ['staff'] },
+            sessionId: SESSION_2,
+            isIdentityVerified: () => true,
+            getSessionEpoch: () => 2,
+            getIdentityRevision: () => 1,
+          },
+        });
+      } else if (transition === 'other_station_same_event') {
+        currentStationId = ST_2;
+        participantName = 'Fila Estação 2';
+        await h.rerender({
+          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
+        });
+      } else if (transition === 'exit_and_return_same_station') {
+        currentStationId = ST_2;
+        await h.rerender({
+          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
+        });
+        currentStationId = ST_1;
+        participantName = 'Retorno Estação 1';
+        await h.rerender({
+          station: { id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null },
+        });
+      } else {
+        await h.rerender({
+          station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null },
+          accessDenied: true,
+          accessDeniedKind: 'session',
+        });
+      }
+
+      await h.act(async () => {
+        recordGate.resolve();
+        await inflight;
+      });
+
+      assert.equal(
+        h.hasText('Recusa registrada pelo servidor, mas a limpeza local falhou'),
+        false,
+        `${transition}: não publica feedback tardio fora do escopo/visita original`,
+      );
+      // Persistência histórica da intenção original permanece intacta em dispatching (pois .receipt falhou)
+      assert.equal(JSON.parse(h.secureValues.get(`arenago.staff.operation.${USER_1}`)).phase, 'dispatching');
+    } finally {
+      recordGate.resolve();
+      h.dispose();
+    }
+  }
+
+  // Cenários 7 e 8: após negativa 403, erro transitório 503 em Atualizar atendimento NÃO reabilita, mas GET 200 legítimo revalida
+  {
+    let opMode = 'ok';
+    const h = createStationHarness({
+      onGet: async (url) => {
+        if (opMode === '403') throw Object.assign(new Error('403'), { status: 403 });
+        if (opMode === '503') throw Object.assign(new Error('503'), { status: 503 });
+        if (url.endsWith('/operational-state')) return makeState(ST_1, 'Ana Revalidada');
+        return {};
+      },
+      onPost: async () => ({}),
+    });
+    try {
+      await h.mount();
+      opMode = '403';
+      await h.press('Atualizar atendimento');
+      assert.ok(h.hasText('Acesso à estação indisponível.'));
+      assert.equal(h.getPolling().enabled, false);
+
+      // Erro transitório 503 mantém trava 'denied' e polling desligado
+      opMode = '503';
+      await h.press('Atualizar atendimento');
+      assert.ok(h.hasText('Acesso à estação indisponível.'));
+      assert.equal(h.getPolling().enabled, false);
+
+      // Revalidação GET 200 legítima recupera o acesso sem falhar em coordinator.readStationState
+      opMode = 'ok';
+      await h.press('Atualizar atendimento');
+      assert.ok(h.hasQueueRow(1, 'Ana Revalidada'));
+      assert.equal(h.getPolling().enabled, true);
+    } finally {
+      h.dispose();
+    }
+  }
+});
+
+test('STAFF04-AUD-10 (tela Estação): exibe "Registrando resultado com segurança..." em recordTerminal/clear sem indicar sucesso prematuro nem expor 403', { skip }, async () => {
+  const flush = (h) => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const primaryKey = `arenago.staff.operation.${USER_1}`;
+  const receiptKey = `${primaryKey}.receipt`;
+  const ackKey = `${primaryKey}.ack`;
+  const waitingState = {
+    eventId: EV_A,
+    experienceId: EXP_1,
+    stationId: ST_1,
+    availability: 'available',
+    canCall: true,
+    waitingCount: 1,
+    waiting: [{ queueEntryId: ENTRY_1, displayName: 'Ana Clara', position: 1 }],
+    pending: null,
+  };
+  const calledState = {
+    ...waitingState,
+    canCall: false,
+    waitingCount: 0,
+    waiting: [],
+    pending: {
+      serviceSessionId: SESS_1,
+      queueEntryId: ENTRY_1,
+      displayName: 'Ana Clara',
+      calledAt: '2026-11-19T15:00:00.000Z',
+    },
+  };
+  let activeState = waitingState;
+  let postGate = null;
+  let receiptGate = null;
+  let clearGate = null;
+  let ackGate = null;
+
+  const h = createStationHarness({
+    onSecureSet: async (key) => {
+      if (receiptGate && key === receiptKey) {
+        const g = receiptGate;
+        receiptGate = null;
+        await g.deferred.promise;
+        if (g.fail) throw g.fail;
+      }
+      if (ackGate && key === ackKey) {
+        const g = ackGate;
+        ackGate = null;
+        await g.promise;
+      }
+    },
+    onSecureDelete: async (key) => {
+      if (clearGate && key === primaryKey) {
+        const g = clearGate;
+        clearGate = null;
+        await g.promise;
+      }
+    },
+    onGet: async (url) => {
+      if (url.endsWith('/stations')) {
+        return {
+          eventId: EV_A,
+          stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: activeState.pending?.serviceSessionId ?? null }],
+        };
+      }
+      if (url.endsWith('/queue')) {
+        return { eventId: EV_A, experienceId: EXP_1, waitingCount: activeState.waitingCount, canCallWaitingEntries: activeState.canCall, firstWaitingQueueEntryId: activeState.waiting[0]?.queueEntryId ?? null };
+      }
+      return activeState;
+    },
+    onPost: () => postGate.promise,
+  });
+
+  try {
+    await h.mount();
+
+    // 1, 2, 4 e 6: servidor pendente -> recordTerminal pendente -> clear pendente -> reconhecimento posterior
+    postGate = deferred();
+    receiptGate = { deferred: deferred(), fail: null };
+    clearGate = deferred();
+    ackGate = deferred();
+    const rGate1 = receiptGate.deferred;
+    const cGate1 = clearGate;
+    const aGate1 = ackGate;
+
+    let pOp;
+    await h.act(async () => { pOp = h.handler('Chamar próximo')(); });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+
+    activeState = calledState;
+    await h.act(async () => {
+      postGate.resolve({
+        serviceSession: {
+          id: SESS_1,
+          queueEntryId: ENTRY_1,
+          experienceId: EXP_1,
+          station: { id: ST_1, label: 'Cabine 01' },
+          status: 'pending',
+          calledAt: '2026-11-19T15:00:00.000Z',
+        },
+      });
+    });
+    assert.ok(h.hasExactText('Registrando resultado com segurança...'));
+    assert.equal(h.hasText('Participante chamado. Operação confirmada pelo servidor.'), false, 'sem confirmação visual antes da persistência');
+
+    await h.act(async () => { rGate1.resolve(); });
+    assert.ok(h.hasExactText('Registrando resultado com segurança...'), 'permanece registrando durante clear primário');
+
+    await h.act(async () => {
+      cGate1.resolve();
+      await pOp;
+    });
+    // Dispara ciclo de reconhecimento em próxima leitura/efeito ou verifica confirmação
+    aGate1.resolve();
+    await flush(h);
+    assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
+
+    // 3: recusa definitiva não-auth (409) com persistência pendente também usa 'Registrando resultado com segurança...'
+    h.secureValues.clear();
+    await h.press('Atualizar atendimento');
+    postGate = deferred();
+    receiptGate = { deferred: deferred(), fail: null };
+    const rGate409 = receiptGate.deferred;
+    await h.press('Concluir experiência');
+    let pReject;
+    await h.act(async () => { pReject = h.handler('CONFIRMAR OPERAÇÃO')(); });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+
+    await h.act(async () => {
+      postGate.reject(Object.assign(new Error('not-pending'), { status: 409, code: 'SERVICE_NOT_PENDING' }));
+    });
+    assert.ok(h.hasExactText('Registrando resultado com segurança...'));
+    await h.act(async () => {
+      rGate409.resolve();
+      await pReject;
+    });
+    await flush(h);
+    assert.ok(h.hasText('A chamada já não está pendente.'));
+
+    // 8: resultado desconhecido (timeout) nunca mostra 'Registrando resultado com segurança...' nem sucesso
+    h.secureValues.clear();
+    await h.press('Atualizar atendimento');
+    postGate = deferred();
+    await h.press('Concluir experiência');
+    let pUncertain;
+    await h.act(async () => { pUncertain = h.handler('CONFIRMAR OPERAÇÃO')(); });
+    await h.act(async () => {
+      postGate.reject(Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true }));
+      await pUncertain;
+    });
+    await flush(h);
+    assert.equal(h.hasText('Registrando resultado com segurança...'), false);
+    assert.ok(h.hasText('O resultado exige verificação ou reconciliação.'));
+  } finally {
+    h.dispose();
+  }
+});

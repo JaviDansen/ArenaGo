@@ -4685,3 +4685,180 @@ test('STAFF04-AUD-06 + AUD-04 (integrado): agendador único de 60s em todas as s
     app.dispose();
   }
 });
+
+test('STAFF04-AUD-08/09/10 integração ponta a ponta: 403 tardio após 503 em pré-condição paralela, recuperação oficial no Painel e estágio "Registrando resultado com segurança..."', { skip }, async () => {
+  const at = '2026-11-10T15:00:00.000Z';
+  const expId = '33333333-3333-4333-8333-333333333388';
+  const stationId = '44444444-4444-4444-8444-444444444488';
+  const queueEntryId = '77777777-7777-4777-8777-777777777788';
+  const serviceSessId = '88888888-8888-4888-8888-888888888888';
+  const staffUser = { ...participant, id: 'abcdef00-0000-4000-8000-000000000088', roles: ['staff'] };
+  const secureValues = new Map();
+  const origSetTimeout = globalThis.setTimeout;
+
+  let preconditionMode = 'ok';
+  let slowStationsReject = null;
+  let receiptGate = null;
+  let postCount = 0;
+  let stationPending = null;
+  let stationWaiting = [{ queueEntryId, displayName: 'Diego Costa', position: 1 }];
+
+  const app = createIntegration({
+    initialUser: staffUser,
+    control: {
+      realStaff: true,
+      manualTimers: true,
+      platformOS: 'android',
+      events: [staffEvent],
+      secureStore: {
+        isAvailableAsync: async () => true,
+        getItemAsync: async (key) => secureValues.get(key) ?? null,
+        setItemAsync: async (key, value) => {
+          if (receiptGate && key.endsWith('.receipt')) {
+            const g = receiptGate;
+            receiptGate = null;
+            await g.promise;
+          }
+          secureValues.set(key, value);
+        },
+        deleteItemAsync: async (key) => { secureValues.delete(key); },
+      },
+      http: async (route, options) => {
+        if (route === '/staff/events') return { events: [staffEvent] };
+        if (route === `/staff/events/${staffEvent.id}/experiences`) {
+          return { eventId: staffEvent.id, experiences: [{ id: expId, name: 'Arena VR' }] };
+        }
+        if (route === `/staff/events/${staffEvent.id}/stations`) {
+          if (preconditionMode === 'split_503_then_403') {
+            return new Promise((done) => {
+              slowStationsReject = () => done({ statusCode: 403, body: { code: 'STAFF_EVENT_FORBIDDEN' } });
+            });
+          }
+          return {
+            eventId: staffEvent.id,
+            stations: [{
+              id: stationId,
+              experienceId: expId,
+              label: 'Cabine A',
+              availability: 'available',
+              pendingServiceSessionId: stationPending?.serviceSessionId ?? null,
+              pendingCalledAt: stationPending?.calledAt ?? null,
+            }],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/queue`) {
+          if (preconditionMode === 'split_503_then_403') {
+            return { statusCode: 503, body: { code: 'SERVICE_UNAVAILABLE' } };
+          }
+          return {
+            eventId: staffEvent.id,
+            experienceId: expId,
+            waitingCount: stationWaiting.length,
+            canCallWaitingEntries: stationWaiting.length > 0 && !stationPending,
+            firstWaitingQueueEntryId: stationWaiting[0]?.queueEntryId ?? null,
+            acceptingNewEntries: true,
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/entry-control`) {
+          return {
+            eventId: staffEvent.id,
+            externalQueueEnabled: true,
+            canManage: true,
+            observedAt: at,
+            pendingCall: null,
+            canCall: false,
+            canConfirm: false,
+            canMarkAbsent: false,
+            canRemove: false,
+            waitingCount: 0,
+            waiting: [],
+          };
+        }
+        if (route === `/staff/events/${staffEvent.id}/experiences/${expId}/stations/${stationId}/operational-state`) {
+          return {
+            eventId: staffEvent.id,
+            experienceId: expId,
+            stationId,
+            availability: 'available',
+            canCall: stationWaiting.length > 0 && !stationPending,
+            waitingCount: stationWaiting.length,
+            waiting: stationWaiting,
+            pending: stationPending,
+          };
+        }
+        if (route.endsWith('/call-next') && options.method === 'POST') {
+          postCount += 1;
+          const next = stationWaiting.shift();
+          stationPending = {
+            serviceSessionId: serviceSessId,
+            queueEntryId: next.queueEntryId,
+            displayName: next.displayName,
+            calledAt: at,
+          };
+          return {
+            serviceSession: {
+              id: serviceSessId,
+              queueEntryId: next.queueEntryId,
+              experienceId: expId,
+              station: { id: stationId, label: 'Cabine A' },
+              status: 'pending',
+              calledAt: at,
+            },
+          };
+        }
+        return undefined;
+      },
+    },
+  });
+
+  try {
+    await app.mount();
+    await app.act(() => app.manager.login({ email: staffUser.email, password: 'ficticia' }));
+    await app.press('Selecionar evento Evento autorizado');
+    await app.press('Selecionar estação Cabine A da experiência Arena VR');
+    assert.ok(app.hasQueueRow(1, 'Diego Costa'));
+
+    // 1. AUD-08: /queue retorna 503 primeiro, depois /stations retorna 403 -> bloqueia imediatamente sem POST
+    preconditionMode = 'split_503_then_403';
+    await app.press('Chamar próximo');
+    assert.equal(postCount, 0);
+    assert.ok(app.hasText('Nenhuma alteração foi enviada.'));
+
+    await app.act(async () => {
+      slowStationsReject();
+      await new Promise((resolve) => origSetTimeout(resolve, 0));
+    });
+    assert.ok(!app.hasText('Diego Costa'));
+    assert.ok(app.hasText('Acesso ao evento ou à experiência indisponível.'));
+    assert.equal(postCount, 0);
+
+    // 2. AUD-09: recuperação oficial via retorno ao Painel + Atualizar estações (200) restaura acesso
+    preconditionMode = 'ok';
+    await app.press('Voltar ao painel');
+    assert.ok(app.hasText('SEM ACESSO'));
+    await app.press('Atualizar estações');
+    assert.ok(app.hasText('Cabine A'));
+    await app.press('Selecionar estação Cabine A da experiência Arena VR');
+    assert.ok(app.hasQueueRow(1, 'Diego Costa'));
+
+    // 3. AUD-10: durante escrita local de .receipt após confirmação 200, exibe 'Registrando resultado com segurança...'
+    let resolveReceipt;
+    receiptGate = { promise: new Promise((yes) => { resolveReceipt = yes; }) };
+    let pCall;
+    await app.act(async () => {
+      pCall = app.handler('Chamar próximo')();
+    });
+    assert.ok(app.hasExactText('Registrando resultado com segurança...'));
+    assert.equal(app.hasText('Participante chamado. Operação confirmada pelo servidor.'), false);
+
+    await app.act(async () => {
+      resolveReceipt();
+      await pCall;
+      await new Promise((resolve) => origSetTimeout(resolve, 0));
+    });
+    assert.ok(app.hasText('Participante chamado. Operação confirmada pelo servidor.'));
+    assert.equal(postCount, 1);
+  } finally {
+    app.dispose();
+  }
+});

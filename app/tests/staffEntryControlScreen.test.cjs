@@ -1461,3 +1461,143 @@ test('STAFF04-AUD-04: 401/403 em mutação na tela Controle de Entrada revoga an
   assert.ok(h404.hasText('A chamada ou recurso informado não foi encontrado no servidor. Confira o estado atualizado.'));
   h404.unmount();
 });
+
+test('STAFF04-AUD-10 (tela Entrada): exibe "Registrando resultado com segurança..." durante storage.finish sem indicar sucesso prematuro nem atrasar bloqueio 403', { skip }, async () => {
+  const EV_B = '22222222-2222-4222-8222-222222222222';
+  const entrySlot = `arenago.staff.entry.${USER_1}`;
+  let terminalGate = null;
+  let ackGate = null;
+  let postGate = null;
+  let activeEventId = EV_A;
+  const makeState = (evId, withCall = true) => ({
+    eventId: evId,
+    externalQueueEnabled: true,
+    canManage: true,
+    observedAt: AT,
+    pendingCall: withCall ? { id: CALL_1, participationId: PART_1, displayName: 'Ana Clara', calledAt: AT } : null,
+    waitingCount: 1,
+    waiting: [{ participationId: PART_2, displayName: 'Lucas Ferreira', position: 1 }],
+    canCall: !withCall,
+    canConfirm: withCall,
+    canMarkAbsent: withCall,
+    canRemove: withCall,
+  });
+  let currentState = makeState(EV_A, true);
+
+  const h = createEntryScreenHarness({
+    onSecureSet: async (_, raw) => {
+      const parsed = JSON.parse(raw);
+      if (terminalGate && parsed.phase === 'terminal') {
+        const g = terminalGate;
+        terminalGate = null;
+        await g.deferred.promise;
+        if (g.fail) throw g.fail;
+      }
+      if (ackGate && parsed.phase === 'acknowledged') {
+        const g = ackGate;
+        ackGate = null;
+        await g.promise;
+      }
+    },
+    onGet: async () => ({ ...currentState, eventId: activeEventId }),
+    onPost: () => postGate.promise,
+  });
+
+  const flush = () => h.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  await h.mount();
+
+  // 1, 2 e 6: servidor pendente -> confirmado com finish pendente -> reconhecimento local posterior
+  postGate = deferred();
+  terminalGate = { deferred: deferred(), fail: null };
+  ackGate = deferred();
+  const tGate1 = terminalGate.deferred;
+  const aGate1 = ackGate;
+
+  await h.press('Confirmar entrada');
+  let pConfirm;
+  await h.act(async () => { pConfirm = h.handler('CONFIRMAR ALTERAÇÃO')(); });
+  assert.ok(h.hasExactText('Processando operação no servidor...'));
+
+  currentState = makeState(EV_A, false);
+  await h.act(async () => {
+    postGate.resolve({
+      eventId: EV_A,
+      call: { id: CALL_1, participationId: PART_1, status: 'confirmed', calledAt: AT, resolvedAt: AT },
+      participation: { id: PART_1, status: 'active', arenaEnteredAt: AT, finishReason: null, externalQueueOrder: '1' },
+      requeued: false,
+    });
+  });
+  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
+  assert.equal(h.hasText('Entrada confirmada pelo servidor.'), false, 'não antecipa sucesso antes de persistir');
+
+  await h.act(async () => {
+    tGate1.resolve();
+    await pConfirm;
+  });
+  assert.ok(h.hasExactText('Finalizando reconhecimento seguro local...'));
+
+  await h.act(async () => { aGate1.resolve(); });
+  await flush();
+  assert.ok(h.hasText('Entrada confirmada pelo servidor.'));
+
+  // 3 e 5: recusa definitiva não-auth (409) mostra 'Registrando resultado com segurança...', e falha em finish informa erro de armazenamento
+  currentState = makeState(EV_A, true);
+  await h.press('Atualizar fila de entrada');
+  postGate = deferred();
+  terminalGate = { deferred: deferred(), fail: new Error('finish-write-error') };
+  const tGateFail = terminalGate.deferred;
+  await h.press('Confirmar entrada');
+  let pRejectFail;
+  await h.act(async () => { pRejectFail = h.handler('CONFIRMAR ALTERAÇÃO')(); });
+  await h.act(async () => {
+    postGate.reject(Object.assign(new Error('not-pending'), { status: 409, code: 'ENTRY_CALL_NOT_PENDING' }));
+  });
+  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
+  await h.act(async () => {
+    tGateFail.resolve();
+    await pRejectFail;
+  });
+  await flush();
+  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
+  assert.ok(h.hasText('O servidor recusou a alteração, mas o registro local não foi confirmado.'));
+
+  // 7 e 8: troca de contexto durante finish pendente e resultado desconhecido (timeout)
+  h.secureValues.delete(entrySlot);
+  currentState = makeState(EV_A, true);
+  await h.press('Atualizar fila de entrada');
+  postGate = deferred();
+  await h.press('Confirmar entrada');
+  let pUncertain;
+  await h.act(async () => { pUncertain = h.handler('CONFIRMAR ALTERAÇÃO')(); });
+  await h.act(async () => {
+    postGate.reject(Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true }));
+    await pUncertain;
+  });
+  await flush();
+  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
+  assert.ok(h.hasText('O resultado de uma solicitação ainda não foi confirmado.'));
+
+  h.secureValues.delete(entrySlot);
+  activeEventId = EV_B;
+  currentState = makeState(EV_B, true);
+  await h.rerender({ event: { id: EV_B, name: 'Arena Evento B' } });
+  postGate = deferred();
+  terminalGate = { deferred: deferred(), fail: null };
+  const tGateCtx = terminalGate.deferred;
+  await h.press('Confirmar entrada');
+  let pCtx;
+  await h.act(async () => { pCtx = h.handler('CONFIRMAR ALTERAÇÃO')(); });
+  await h.act(async () => {
+    postGate.reject(Object.assign(new Error('409'), { status: 409, code: 'ENTRY_CALL_NOT_PENDING' }));
+  });
+  assert.ok(h.hasExactText('Registrando resultado com segurança...'));
+  activeEventId = EV_A;
+  currentState = makeState(EV_A, true);
+  await h.rerender({ event: { id: EV_A, name: 'Arena Oficial UNDB' } });
+  assert.equal(h.hasText('Registrando resultado com segurança...'), false);
+  await h.act(async () => {
+    tGateCtx.resolve();
+    await pCtx;
+  });
+  h.unmount();
+});
