@@ -1,0 +1,729 @@
+diff --git a/app/screens/admin/AdminEventManagementInfoScreen.js b/app/screens/admin/AdminEventManagementInfoScreen.js
+index 1b7dda7..4c80c48 100644
+--- a/app/screens/admin/AdminEventManagementInfoScreen.js
++++ b/app/screens/admin/AdminEventManagementInfoScreen.js
+@@ -9,9 +9,11 @@ import AdminEventSettingsScreen from './AdminEventSettingsScreen';
+ import AdminRealEventStaffScreen from './AdminRealEventStaffScreen';
+ import AdminEventOperationScreen from './AdminEventOperationScreen';
+ import AdminStructureScreen from './AdminStructureScreen';
++import AdminEventBiScreen from './AdminRealEventBiScreen';
+ 
+ export default function AdminEventManagementInfoScreen({ navigation, route }) {
+   const { eventId, area, returnToSetup } = route.params ?? {};
++  if (area === 'analytics') return <AdminEventBiScreen key={eventId} eventId={eventId} navigation={navigation} />;
+   if (area === 'staff') return <AdminRealEventStaffScreen key={eventId} eventId={eventId} navigation={navigation} />;
+   if (area === 'operation') return <AdminEventOperationScreen key={eventId} eventId={eventId} navigation={navigation} />;
+   if (area === 'experiences') return <AdminStructureScreen navigation={navigation} eventId={eventId}
+diff --git a/app/tests/adminRealEvents.test.cjs b/app/tests/adminRealEvents.test.cjs
+index a40842f..f0e35bb 100644
+--- a/app/tests/adminRealEvents.test.cjs
++++ b/app/tests/adminRealEvents.test.cjs
+@@ -309,24 +309,36 @@ test('recuperar foco consulta novamente e uma resposta anterior não sobrescreve
+   h.unmount();
+ });
+ 
+-test('destino informativo valida área e confirma evento com leitura autenticada', async () => {
++test('destino BI valida área e confirma evento com leitura autenticada', async () => {
+   const calls = [];
+   const h = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
+     props: { route: { params: { eventId: id(2), area: 'analytics', name: 'Nome não confiável' } } },
+     authContext: verifiedAdminAuth({ httpClient: { get: async (url, options) => {
+       calls.push([url, options.auth]);
+-      return { event: event(2) };
++      return { event: event(2), observedAt: '2026-11-26T12:00:00Z', overview: {participations:0,arenaEntries:0,completed:0,absent:0}, ranking: [],
++        ratings: {count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},
++        durationA:{population:0,meanSeconds:null},durationB:{population:0,meanSeconds:null},audience:{available:false} };
+     } } }),
+   });
+-  await waitForText(h, 'Arena Norte');
+-  assert.deepEqual(calls, [[eventPath(2), true]]);
+-  assert.ok(hasText(h, 'BI do evento'));
+-  assert.ok(!hasText(h, 'Nome não confiável'));
+-  h.press('Voltar ao painel');
+-  assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
+-  h.setProps({ route: { params: { eventId: id(2), area: 'AdminDemo' } } });
+-  await waitForText(h, 'Área indisponível');
+-  assert.equal(calls.length, 1);
+-  assert.ok(!hasText(h, 'Arena Norte'));
+-  h.unmount();
++  try {
++    await waitForText(h, 'Arena Norte');
++    assert.deepEqual(calls, [[eventPath(2) + '/bi', true]]);
++    assert.ok(hasText(h, 'BI do Evento'));
++    assert.ok(!hasText(h, 'Nome não confiável'));
++    h.press('Voltar ao evento');
++    assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
++  } finally { h.unmount(); }
++  // The harness has one hook cursor; a different component tree needs a fresh mount.
++  const invalid = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
++    props: { route: { params: { eventId: id(2), area: 'AdminDemo' } } },
++    authContext: verifiedAdminAuth({ httpClient: { get: async () => {
++      calls.push(['unexpected read']);
++      throw new Error('Área inválida não deve consultar dados');
++    } } }),
++  });
++  try {
++    await waitForText(invalid, 'Área indisponível');
++    assert.equal(calls.length, 1);
++    assert.ok(!hasText(invalid, 'Arena Norte'));
++  } finally { invalid.unmount(); }
+ });
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 46fcaf2..c1c46ac 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -315,6 +315,10 @@ function createHarness(relativePath, options = {}) {
+   const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView',
+     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
+   native.Platform = { OS: options.platform || 'ios' };
++  const appStateListeners = new Set();
++  native.AppState = { currentState: 'active', addEventListener(_event, listener) {
++    appStateListeners.add(listener); return { remove: () => appStateListeners.delete(listener) };
++  } };
+   native.Clipboard = { setString: value => options.copyToClipboard?.(value) };
+   native.Keyboard = { dismiss() {} };
+   native.StyleSheet = {
+@@ -494,6 +498,7 @@ function createHarness(relativePath, options = {}) {
+       for (const listener of navigationListeners.get(value ? 'focus' : 'blur') || []) listener();
+       flush();
+     },
++    setAppState(value) { native.AppState.currentState = value; for (const listener of appStateListeners) listener(value); flush(); },
+     inputBirthDate(value) {
+       const input = renderedNodes.find((node) => node.type === 'BirthDateInput');
+       assert.ok(input);
+diff --git a/backend/src/events/admin-configuration-query.service.ts b/backend/src/events/admin-configuration-query.service.ts
+index 49740bc..ac7e7d6 100644
+--- a/backend/src/events/admin-configuration-query.service.ts
++++ b/backend/src/events/admin-configuration-query.service.ts
+@@ -7,6 +7,7 @@ import type * as schema from "../database/schema";
+ import { configurationEventViewSchema,configurationExperienceViewSchema,configurationOperationViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
+ import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
+ import { failConfiguration } from "./admin-configuration.problem";
++import { eventBiQuery, eventBiSchema } from './admin-bi';
+ 
+ export interface ConfigurationActor {userId:string;sessionId:string}
+ export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,actor:ConfigurationActor){
+@@ -22,6 +23,16 @@ export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,
+ @Injectable()
+ export class AdminConfigurationQueryService {
+   constructor(@Inject(DRIZZLE_DATABASE) private readonly database:NodePgDatabase<typeof schema>){}
++  bi(actor: ConfigurationActor, eventId: string) {
++    return this.snapshot(actor, async tx => {
++      const row = (await tx.execute<ConfigurationRow>(configurationProjection(sql`e.id=${eventId}::uuid`))).rows[0];
++      if (!row) failConfiguration('resource_not_found');
++      const metrics = (await tx.execute<{ metrics: Record<string, unknown> }>(eventBiQuery(eventId))).rows[0].metrics;
++      return eventBiSchema.parse({ ...metrics,
++        event: { id: row.id, name: row.name, timezone: row.timezone, effectivePhase: row.effectivePhase },
++        observedAt: row.observedAt, audience: { available: false, reason: 'PRIVACY_POLICY_PENDING' } });
++    });
++  }
+   private snapshot<T>(actor:ConfigurationActor,read:(tx:DatabaseTransactionExecutor)=>Promise<T>,requireVerifiedEmail=false){return this.database.transaction(async tx=>{
+     const account=await authorizeConfigurationRead(tx,actor);
+     if(requireVerifiedEmail && !account.emailVerified)failConfiguration('actor_email_unverified');
+diff --git a/backend/src/events/admin-configuration.controller.ts b/backend/src/events/admin-configuration.controller.ts
+index ff61581..d1b28cd 100644
+--- a/backend/src/events/admin-configuration.controller.ts
++++ b/backend/src/events/admin-configuration.controller.ts
+@@ -42,6 +42,12 @@ export class AdminConfigurationController {
+     const { eventId } = validateOperationParams(configurationEventParams, params);
+     return executeConfiguration(() => this.queries.operation({ userId, sessionId }, eventId));
+   }
++  @Get(':eventId/bi')
++  @Header('Cache-Control', 'no-store')
++  bi(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
++    const { eventId } = validateOperationParams(configurationEventParams, params);
++    return executeConfiguration(() => this.queries.bi({ userId, sessionId }, eventId));
++  }
+   @Get(':eventId')
+   @HttpCode(200)
+   event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}
+diff --git a/backend/test/unit/admin-configuration-http.test.ts b/backend/test/unit/admin-configuration-http.test.ts
+index 0538497..055a9d8 100644
+--- a/backend/test/unit/admin-configuration-http.test.ts
++++ b/backend/test/unit/admin-configuration-http.test.ts
+@@ -57,6 +57,7 @@ const routes: Route[] = [
+   { name: "update experience", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}`, body: { name: "Experiência" }, operation: "update_experience", response: { experience }, status: 200 },
+   { name: "create station", method: "post", path: `/admin/events/${eventId}/experiences/${experienceId}/stations`, body: { label: "Estação" }, operation: "create_station", response: { station }, status: 201 },
+   { name: "update station", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}/stations/${stationId}`, body: { label: "Estação" }, operation: "update_station", response: { station }, status: 200 },
++  { name: "event BI", method: "get", path: `/admin/events/${eventId}/bi`, response: { eventId, aggregate: true }, status: 200 },
+ ];
+ function record(method: string, actor: Actor, input?: unknown) {
+   calls.push({ method, actor, input });
+@@ -76,6 +77,7 @@ function record(method: string, actor: Actor, input?: unknown) {
+   } } },
+   { provide: AdminConfigurationService, useValue: { async mutate(input: MutationInput) { record("mutate", { userId: input.userId, sessionId: input.sessionId }, input); return result; } } },
+   { provide: AdminConfigurationQueryService, useValue: {
++    bi: async (actor: Actor, target: string) => { record("bi", actor, target); return readResult; },
+     events: async (actor: Actor, query: unknown) => { record("events", actor, query); return readResult; },
+     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
+     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
+diff --git a/backend/test/unit/admin-configuration.test.ts b/backend/test/unit/admin-configuration.test.ts
+index 4a5c9be..c97e9c0 100644
+--- a/backend/test/unit/admin-configuration.test.ts
++++ b/backend/test/unit/admin-configuration.test.ts
+@@ -143,11 +143,27 @@ test("E08.13 DTO administrativo omite campos internos e dados pessoais da proje
+ });
+ 
+ const actor={userId,sessionId};
++test('ADMIN-09 BI revalida Admin, sessão e TOTP antes dos agregados',async()=>{
++  for(const [options,kind] of [[{admin:false},'admin_required'],[{valid:false},'invalid_session'],[{secondFactor:false},'admin_2fa_required'],[{revoked:true},'session_revoked']] as const){
++    const f=readFixture(options);await assert.rejects(f.service.bi(actor,eventId),{kind});
++    assert.equal(f.queries.some(q=>q.text.includes('WITH people AS')),false);
++    assert.equal(f.queries.at(-1)?.text,'rollback');
++  }
++});
++test('ADMIN-09 BI inclui evento vazio, fase oficial e snapshot de leitura consistente',async()=>{
++  const bi={overview:{participations:0,arenaEntries:0,completed:0,absent:0},ranking:[],
++    ratings:{count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},durationA:{meanSeconds:null,population:0},durationB:{meanSeconds:null,population:0}};
++  const f=readFixture({bi});const result=await f.service.bi(actor,eventId);
++  assert.equal(result.event.id,eventId);assert.equal(result.event.effectivePhase,'open');assert.equal(result.audience.available,false);
++  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
++  assert.equal(f.queries.at(-1)?.text,'commit');assert.equal(f.queries.length,5);
++  await assert.rejects(readFixture({absent:true}).service.bi(actor,eventId),{kind:'resource_not_found'});
++});
+ const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntries:true,lastQueueOrder:"9007199254740993",createdAt:at,updatedAt:at};
+ const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
+ type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
+   absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[];
+-  operation?:object; failOperation?:boolean};
++  operation?:object; failOperation?:boolean; bi?:object};
+ function readFixture(options:ReadOptions={}){
+   const queries:Array<{text:string;params:unknown[]}>=[];
+   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
+@@ -164,6 +180,7 @@ function readFixture(options:ReadOptions={}){
+     if(text.startsWith('SELECT id,event_id'))return {rows:options.experiences??[experience]};
+     if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
+     if(text.includes('FROM user_roles r JOIN users u'))return {rows:options.staff??[]};
++    if(text.startsWith('WITH people AS'))return {rows:[{metrics:options.bi}]};
+     throw Error('SQL unitário inesperado: '+text);
+   }}as unknown as Client,{schema});
+   return {service:new AdminConfigurationQueryService(database),queries};
+diff --git a/app/screens/admin/AdminRealEventBiScreen.js b/app/screens/admin/AdminRealEventBiScreen.js
+new file mode 100644
+index 0000000..acd96f1
+--- /dev/null
++++ b/app/screens/admin/AdminRealEventBiScreen.js
+@@ -0,0 +1,53 @@
++import { RefreshControl, StyleSheet, Text, View } from 'react-native';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++import AdminButton from './components/AdminButton';
++import { AdminIcon, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import { adminEventPhases, formatAdminDate } from '../../services/adminEventsService';
++import useAdminBi from './useAdminBi';
++export function formatBiDuration(seconds) {
++  if(seconds===null)return 'Sem população elegível';
++  const minutes=Math.floor(seconds/60);
++  return minutes>=60?`${Math.floor(minutes/60)}h ${minutes%60}min`:`${minutes}min`;
++}
++function Bar({label,percent,detail}) {
++  return <View style={styles.barRow}><Text style={s.body}>{label}</Text><View style={styles.track}>
++    <View style={[styles.fill,{width:`${percent}%`}]} /></View><Text style={s.body}>{detail}</Text></View>;
++}
++export default function AdminEventBiScreen({navigation,route,eventId:selected}) {
++  const eventId=selected??route?.params?.eventId;
++  const {data,pending,refreshing,error,stale,refresh}=useAdminBi(navigation,eventId);
++  return <AdminLiveScreen title="BI do Evento" eyebrow="PAINEL DO EVENTO" subtitle="Acompanhe os resultados e indicadores do evento."
++    navigation={navigation} backLabel="Voltar ao evento" onBack={()=>navigation.popTo('AdminRealEvent',{eventId})} showTabs
++    refreshControl={<RefreshControl refreshing={Boolean(refreshing)} onRefresh={refresh} tintColor={c.accent} />}>
++    {pending&&<AdminNotice title="Carregando indicadores..." />}
++    {error&&<AdminNotice tone="error" title={stale?'Dados desatualizados':'BI indisponível'} message={error} />}
++    <AdminButton label={refreshing?'Atualizando indicadores...':'Atualizar indicadores'} onPress={refresh} disabled={Boolean(refreshing)} variant="secondary" />
++    {data&&<>
++      <View style={[s.card,s.row]}><AdminIcon name="calendar" /><View style={s.grow}><Text style={s.title}>{data.event.name}</Text>
++        <Text style={s.body}>{adminEventPhases[data.event.effectivePhase]}</Text><Text style={s.body}>
++          {data.event.effectivePhase==='closed'?'Resultados de evento encerrado':'Resultados parciais · atualização periódica'}</Text></View></View>
++      <Text style={styles.heading}>VISÃO GERAL</Text><View style={styles.grid}>
++        {[['Participações registradas','participations'],['Entradas na Arena','arenaEntries'],['Atendimentos concluídos','completed'],['Ausências registradas','absent']].map(([label,key])=>
++          <View key={key} style={[s.card,styles.metric]}><Text style={styles.number}>{data.overview[key]}</Text><Text style={s.body}>{label}</Text></View>)}
++      </View>
++      {data.overview.participations===0&&<AdminNotice title="Evento sem participações" />}
++      <View style={s.card}><Text style={s.title}>Experiências mais utilizadas</Text><Text style={s.body}>Ranking por atendimentos concluídos</Text>
++        {!data.ranking.length?<Text style={s.body}>Sem atendimentos concluídos.</Text>:data.ranking.map(r=><Bar key={r.id} label={r.name} percent={r.percent} detail={`${r.completed} · ${r.percent.toFixed(1)}%`} />)}</View>
++      <View style={s.card}><Text style={s.title}>☆ Avaliações</Text><Text style={styles.number}>{data.ratings.mean===null?'Sem avaliações':`${data.ratings.mean.toFixed(1)} / 5`}</Text>
++        <Text style={s.body}>{data.ratings.count} avaliações</Text>{data.ratings.distribution.slice().reverse().map(r=><Bar key={r.stars} label={`${r.stars} estrelas`} percent={r.percent} detail={`${r.count} · ${r.percent.toFixed(1)}%`} />)}</View>
++      <View style={s.card}><Text style={s.title}>Tempo de participação</Text><View style={styles.grid}>
++        {[[data.durationA,'Até a última experiência concluída'],[data.durationB,'Até a saída voluntária']].map(([metric,label])=><View key={label} style={styles.duration}>
++          <Text style={s.body}>{label}</Text><Text style={styles.durationValue}>{formatBiDuration(metric.meanSeconds)}</Text><Text style={s.body}>{metric.population} participações elegíveis</Text></View>)}
++      </View></View>
++      <AdminNotice title="Perfil do público indisponível" message="Divulgação de dados demográficos aguardando autorização e política de privacidade." />
++      <Text style={s.body}>Última consulta: {formatAdminDate(data.observedAt,data.event.timezone)}</Text>
++    </>}
++  </AdminLiveScreen>;
++}
++const styles=StyleSheet.create({
++  heading:{color:c.muted,fontWeight:'700',letterSpacing:2,marginTop:20},grid:{flexDirection:'row',flexWrap:'wrap',gap:10},
++  metric:{flexGrow:1,flexBasis:'45%',minWidth:130},number:{color:c.text,fontSize:32,fontWeight:'700',marginVertical:6},
++  duration:{flexGrow:1,flexBasis:'45%',minWidth:180,marginTop:12},durationValue:{color:c.text,fontSize:23,fontWeight:'700',marginVertical:8},
++  barRow:{gap:6,marginTop:14},track:{backgroundColor:'#31233e',height:10,borderRadius:8,overflow:'hidden'},fill:{backgroundColor:'#a337df',height:'100%',borderRadius:8},
++});
+diff --git a/app/screens/admin/useAdminBi.js b/app/screens/admin/useAdminBi.js
+new file mode 100644
+index 0000000..29bd4e9
+--- /dev/null
++++ b/app/screens/admin/useAdminBi.js
+@@ -0,0 +1,39 @@
++import { useEffect, useMemo, useRef, useState } from 'react';
++import { AppState } from 'react-native';
++import { useAuth } from '../../context/AuthContext';
++import { adminReadOwner } from './useAdminEvents';
++import { getAdminBi } from '../../services/adminBiService';
++import { adminReadError } from '../../services/adminEventsService';
++export default function useAdminBi(navigation,eventId) {
++  const auth=useAuth(),owner=adminReadOwner(auth),client=auth.httpClient;
++  const scope=useMemo(()=>({}),[owner,client,eventId]);
++  const live=useRef(null);live.current={scope,auth};
++  const control=useRef(null),[snapshot,setSnapshot]=useState(null);
++  useEffect(()=>{
++    if(!owner)return undefined;
++    let alive=true,generation=0,busy=false,timer=null,data=null;
++    let active=AppState.currentState==='active'||AppState.currentState==null;
++    const current=()=>alive&&live.current.scope===scope&&adminReadOwner(live.current.auth)===owner&&navigation.isFocused()&&active;
++    async function refresh(){
++      if(!current()||busy)return;
++      busy=true;const ticket=generation;
++      setSnapshot(previous=>({scope,data,pending:!data,refreshing:true,updatedAt:previous?.updatedAt}));
++      try{
++        const next=await getAdminBi(client,eventId);
++        if(!current()||ticket!==generation)return;
++        data=next;setSnapshot({scope,data,updatedAt:next.observedAt});
++      }catch(error){
++        if(!current()||ticket!==generation)return;
++        if([401,403,404].includes(error?.status))data=null;
++        setSnapshot(previous=>({scope,data,updatedAt:data?previous?.updatedAt:null,stale:Boolean(data),error:adminReadError(error)}));
++      }finally{busy=false;if(current()&&ticket!==generation)void refresh();}
++    }
++    function stop(){generation++;if(timer)clearInterval(timer);timer=null;}
++    function start(){stop();if(current()){void refresh();timer=setInterval(refresh,30000);}}
++    const offFocus=navigation.addListener('focus',start),offBlur=navigation.addListener('blur',stop);
++    const subscription=AppState.addEventListener('change',state=>{active=state==='active';if(active)start();else stop();});
++    control.current={scope,refresh};start();
++    return()=>{alive=false;stop();offFocus();offBlur();subscription.remove();};
++  },[scope,owner,client,eventId,navigation]);
++  return{...(owner&&snapshot?.scope===scope?snapshot:{pending:true}),refresh:()=>control.current?.scope===scope&&control.current.refresh()};
++}
+diff --git a/app/services/adminBiService.js b/app/services/adminBiService.js
+new file mode 100644
+index 0000000..1c35667
+--- /dev/null
++++ b/app/services/adminBiService.js
+@@ -0,0 +1,18 @@
++import { adminEventPath, adminEventPhases } from './adminEventsService';
++const count = n => Number.isSafeInteger(n) && n >= 0;
++const nullable = n => n === null || (Number.isFinite(n) && n >= 0);
++export function parseAdminBi(v, eventId) {
++  if (v?.event?.id !== eventId || typeof v.event.name !== 'string' || !Object.hasOwn(adminEventPhases,v.event.effectivePhase) ||
++      typeof v.event.timezone !== 'string' || !Number.isFinite(Date.parse(v.observedAt)) ||
++      !['participations','arenaEntries','completed','absent'].every(k => count(v.overview?.[k])) ||
++      !Array.isArray(v.ranking) || v.ranking.some(r => typeof r.id !== 'string' || typeof r.name !== 'string' || !count(r.completed) || !Number.isFinite(r.percent) || r.percent<0 || r.percent>100) ||
++      !count(v.ratings?.count) || !nullable(v.ratings.mean) || (v.ratings.mean!==null && (v.ratings.mean<1 || v.ratings.mean>5)) || !Array.isArray(v.ratings.distribution) || v.ratings.distribution.length!==5 ||
++      v.ratings.distribution.some((r,i) => r.stars!==i+1 || !count(r.count) || !Number.isFinite(r.percent) || r.percent<0 || r.percent>100) ||
++      ![v.durationA,v.durationB].every(d => d && count(d.population) && nullable(d.meanSeconds) && ((d.population===0)===(d.meanSeconds===null))) ||
++      v.audience?.available!==false) throw new Error('Resposta de BI inválida.');
++  if (v.ratings.distribution.reduce((n,r)=>n+r.count,0)!==v.ratings.count || ((v.ratings.count===0)!==(v.ratings.mean===null))) throw new Error('Distribuição inválida.');
++  return v;
++}
++export async function getAdminBi(client,eventId) {
++  return parseAdminBi(await client.get(`${adminEventPath(eventId)}/bi`,{auth:true}),eventId);
++}
+diff --git a/app/tests/adminBi.test.cjs b/app/tests/adminBi.test.cjs
+new file mode 100644
+index 0000000..f5babee
+--- /dev/null
++++ b/app/tests/adminBi.test.cjs
+@@ -0,0 +1,79 @@
++const assert=require('node:assert/strict');
++const test=require('node:test');
++const path=require('node:path').posix;
++const {loadModule,createHarness,textOf}=require('./helpers/questionnaireHarness.cjs');
++const {verifiedAdminAuth}=require('./helpers/adminAuthFixture.cjs');
++const modules=new Map();
++function load(file){if(!modules.has(file))modules.set(file,loadModule(file,name=>name.startsWith('.')?load(path.join(path.dirname(file),name+'.js')):require(name)).exports);return modules.get(file);}
++const {getAdminBi,parseAdminBi}=load('services/adminBiService.js');
++const id='abcdef00-0000-4000-8000-000000000001';
++const view=()=>({event:{id,name:'Arena teste',timezone:'UTC',effectivePhase:'open'},observedAt:'2026-11-26T12:00:00.000Z',
++  overview:{participations:0,arenaEntries:0,completed:0,absent:0},ranking:[],ratings:{count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},
++  durationA:{population:0,meanSeconds:null},durationB:{population:0,meanSeconds:null},audience:{available:false}});
++test('ADMIN-09 consulta UUID autenticado e rejeita dados divergentes ou ausentes',async()=>{
++  await getAdminBi({get:async(url,options)=>{assert.equal(url,`/admin/events/${id}/bi`);assert.equal(options.auth,true);return view();}},id);
++  assert.throws(()=>parseAdminBi({...view(),event:{...view().event,id:'outro'}},id));
++  assert.throws(()=>parseAdminBi({...view(),overview:{}},id));
++  assert.throws(()=>parseAdminBi({...view(),durationA:{population:0,meanSeconds:0}},id));
++});
++test('ADMIN-09 tela real apresenta zeros, médias ausentes, perfil bloqueado e retorno ao UUID',async()=>{
++  const h=createHarness('screens/admin/AdminRealEventBiScreen.js',{props:{route:{params:{eventId:id}}},
++    authContext:verifiedAdminAuth({httpClient:{get:async()=>view()}})});
++  try{
++    for(let n=0;n<20&&!h.nodes.some(node=>textOf(node).includes('Evento sem participações'));n++)await h.actAsync(()=>new Promise(resolve=>setImmediate(resolve)));
++    for(const text of ['Evento sem participações','Sem atendimentos concluídos.','Sem avaliações','Sem população elegível','Perfil do público indisponível'])
++      assert.ok(h.nodes.some(node=>textOf(node).includes(text)),text);
++    assert.ok(!h.nodes.some(node=>textOf(node).includes('Exportar')));
++    h.press('Voltar ao evento');
++    assert.equal(h.navigationCalls.at(-1).name,'AdminRealEvent');
++    assert.equal(h.navigationCalls.at(-1).params.eventId,id);
++  }finally{h.unmount();}
++});
++test('ADMIN-09 foco e foreground invalidam resposta antiga e leitura não sobrepõe',async()=>{
++  let resolve, calls=0;
++  const waiting=new Promise(done=>{resolve=done;});
++  const h=createHarness('screens/admin/AdminRealEventBiScreen.js',{props:{route:{params:{eventId:id}}},authContext:verifiedAdminAuth({httpClient:{get:()=>{calls++;return calls===1?waiting:Promise.resolve(view());}}})});
++  const settle=()=>h.actAsync(()=>new Promise(done=>setImmediate(done)));
++  try{
++    h.setFocused(false);h.setFocused(true);assert.equal(calls,1);
++    resolve({...view(),event:{...view().event,name:'Resposta antiga'}});
++    for(let n=0;n<10;n++)await settle();
++    assert.equal(calls,2);assert.ok(!h.nodes.some(node=>textOf(node).includes('Resposta antiga')));
++    h.setAppState('background');h.setAppState('active');
++    for(let n=0;n<10;n++)await settle();assert.equal(calls,3);
++  }finally{h.unmount();}
++});
++test('ADMIN-09 atualiza a cada 30 segundos somente com foco e encerra timer ao desmontar',async t=>{
++  t.mock.timers.enable({apis:['setInterval']});let calls=0;
++  const h=createHarness('screens/admin/AdminRealEventBiScreen.js',{props:{route:{params:{eventId:id}}},authContext:verifiedAdminAuth({httpClient:{get:async()=>{calls++;return view();}}})});
++  const settle=()=>h.actAsync(()=>new Promise(done=>setImmediate(done)));
++  try{
++    for(let n=0;n<10;n++)await settle();assert.equal(calls,1);
++    t.mock.timers.tick(30000);for(let n=0;n<10;n++)await settle();assert.equal(calls,2);
++    h.setFocused(false);t.mock.timers.tick(60000);assert.equal(calls,2);
++  }finally{h.unmount();t.mock.timers.reset();}
++});
++test('ADMIN-09 atualização manual conserva dados em falha de rede e apaga em negação',async()=>{
++  let failure=null;
++  const h=createHarness('screens/admin/AdminRealEventBiScreen.js',{props:{route:{params:{eventId:id}}},authContext:verifiedAdminAuth({httpClient:{get:async()=>{if(failure)throw failure;return view();}}})});
++  const settle=async()=>{for(let n=0;n<12;n++)await h.actAsync(()=>new Promise(done=>setImmediate(done)));};
++  try{
++    await settle();failure=new Error('rede indisponível');h.press('Atualizar indicadores');await settle();
++    assert.ok(h.nodes.some(node=>textOf(node).includes('Dados desatualizados')));
++    assert.ok(h.nodes.some(node=>textOf(node).includes('Arena teste')));
++    failure={status:403};h.press('Atualizar indicadores');await settle();
++    assert.ok(!h.nodes.some(node=>textOf(node).includes('Arena teste')));
++  }finally{h.unmount();}
++});
++for(const change of ['event','account','unmount'])test(`ADMIN-09 resposta pendente não vaza após ${change}`,async()=>{
++  let resolve;const pending=new Promise(done=>{resolve=done;});
++  let calls=0;const client={get:()=>++calls===1?pending:new Promise(()=>{})};
++  const h=createHarness('screens/admin/AdminRealEventBiScreen.js',{props:{route:{params:{eventId:id}}},authContext:verifiedAdminAuth({httpClient:client})});
++  try{
++    if(change==='event')h.setProps({route:{params:{eventId:'abcdef00-0000-4000-8000-000000000002'}}});
++    if(change==='account')h.setAuthContext(verifiedAdminAuth({httpClient:client,user:{id:'abcdef00-0000-4000-8000-000000000099',sessionId:'another'}}));
++    if(change==='unmount')h.unmount();
++    resolve(view());for(let n=0;n<12;n++)await h.actAsync(()=>new Promise(done=>setImmediate(done)));
++    assert.ok(!h.nodes.some(node=>textOf(node).includes('Arena teste')));
++  }finally{h.unmount();}
++});
+diff --git a/backend/src/events/admin-bi.ts b/backend/src/events/admin-bi.ts
+new file mode 100644
+index 0000000..f3a8a78
+--- /dev/null
++++ b/backend/src/events/admin-bi.ts
+@@ -0,0 +1,80 @@
++import { sql } from 'drizzle-orm';
++import { z } from 'zod';
++
++const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
++const duration = z.object({ meanSeconds: z.number().nonnegative().finite().nullable(), population: count });
++export const eventBiSchema = z.object({
++  event: z.object({ id: z.string().uuid(), name: z.string(), timezone: z.string(), effectivePhase: z.enum(['scheduled','not_ready','open','closing','closed']) }),
++  observedAt: z.string().datetime(),
++  overview: z.object({ participations: count, arenaEntries: count, completed: count, absent: count }),
++  ranking: z.array(z.object({ id: z.string().uuid(), name: z.string(), completed: count, percent: z.number().min(0).max(100) })),
++  ratings: z.object({ count, mean: z.number().min(1).max(5).nullable(), distribution: z.array(z.object({ stars: z.number().int().min(1).max(5), count, percent: z.number().min(0).max(100) })).length(5) }),
++  durationA: duration, durationB: duration,
++  audience: z.object({ available: z.literal(false), reason: z.literal('PRIVACY_POLICY_PENDING') }),
++});
++
++/** Independent aggregates prevent fan-out across participations, sessions and evaluations. */
++export function eventBiQuery(eventId: string) {
++  return sql`WITH people AS (
++    SELECT id,arena_entered_at,finished_at,status,finish_reason FROM participations WHERE event_id=${eventId}::uuid
++  ), services AS (
++    SELECT s.* FROM service_sessions s JOIN experiences x ON x.id=s.experience_id WHERE x.event_id=${eventId}::uuid
++  ), ranked AS (
++    SELECT x.id,x.name,count(*)::int AS completed FROM services s JOIN experiences x ON x.id=s.experience_id
++    WHERE s.status='completed' GROUP BY x.id,x.name
++  ), notes AS (
++    SELECT v.rating FROM evaluations v JOIN people p ON p.id=v.participation_id
++  ), a AS (
++    SELECT extract(epoch FROM (max(s.resolved_at)-p.arena_entered_at)) AS seconds
++    FROM people p JOIN queue_entries q ON q.participation_id=p.id JOIN services s ON s.queue_entry_id=q.id
++    WHERE p.arena_entered_at IS NOT NULL AND s.status='completed' AND s.resolved_at IS NOT NULL
++    GROUP BY p.id,p.arena_entered_at HAVING max(s.resolved_at)>=p.arena_entered_at
++  ), b AS (
++    SELECT extract(epoch FROM (finished_at-arena_entered_at)) AS seconds FROM people
++    WHERE status='finished' AND finish_reason='voluntary' AND arena_entered_at IS NOT NULL AND finished_at>=arena_entered_at
++  ) SELECT jsonb_build_object(
++    'overview',jsonb_build_object('participations',(SELECT count(*) FROM people),'arenaEntries',(SELECT count(*) FROM people WHERE arena_entered_at IS NOT NULL),
++      'completed',(SELECT count(*) FROM services WHERE status='completed'),'absent',(SELECT count(*) FROM services WHERE status='absent')),
++    'ranking',coalesce((SELECT jsonb_agg(jsonb_build_object('id',id,'name',name,'completed',completed,
++      'percent',100.0*completed/nullif((SELECT sum(completed) FROM ranked),0)) ORDER BY completed DESC,id ASC) FROM ranked),'[]'::jsonb),
++    'ratings',jsonb_build_object('count',(SELECT count(*) FROM notes),'mean',(SELECT avg(rating) FROM notes),
++      'distribution',(SELECT jsonb_agg(jsonb_build_object('stars',stars,'count',(SELECT count(*) FROM notes WHERE rating=stars),
++        'percent',coalesce(100.0*(SELECT count(*) FROM notes WHERE rating=stars)/nullif((SELECT count(*) FROM notes),0),0)) ORDER BY stars) FROM generate_series(1,5) stars)),
++    'durationA',jsonb_build_object('meanSeconds',(SELECT avg(seconds) FROM a),'population',(SELECT count(*) FROM a)),
++    'durationB',jsonb_build_object('meanSeconds',(SELECT avg(seconds) FROM b),'population',(SELECT count(*) FROM b))
++  ) AS metrics`;
++}
++
++/** Synthetic preparation only. Suppress the entire dimension if any cell/complement is small.
++ * No denominator, suppressed category or partial breakdown leaves this boundary. */
++export function suppressAudienceDimension(counts: ReadonlyMap<string, number>, denominator: number) {
++  if (!Number.isSafeInteger(denominator) || denominator < 20 || !counts.size
++      || [...counts.values()].some(n => !Number.isSafeInteger(n) || n < 10 || denominator - n < 10)) return null;
++  return [...counts].map(([category, n]) => ({ category, percent: n * 100 / denominator }));
++}
++
++type AudienceSnapshot = { userId: string; participationId: string; enteredAt: string | null;
++  questionnaireVersionId: string; answers: unknown; gamesSnapshot: unknown };
++/** Synthetic-only preparation. The public endpoint never calls this or exposes these inputs. */
++export function prepareAudience(snapshots: readonly AudienceSnapshot[]) {
++  const first = new Map<string, AudienceSnapshot>();
++  for (const row of snapshots.filter(r => r.enteredAt && Number.isFinite(Date.parse(r.enteredAt)))
++    .slice().sort((a,b) => Date.parse(a.enteredAt!) - Date.parse(b.enteredAt!) || a.participationId.localeCompare(b.participationId))) {
++    if (!first.has(row.userId)) first.set(row.userId,row);
++  }
++  const rows = [...first.values()];
++  if (new Set(rows.map(r=>r.questionnaireVersionId)).size !== 1) return { age: null, gender: null, games: null };
++  const genders = new Map<string,number>(), games = new Map<string,number>();
++  let genderPopulation=0, gamePopulation=0;
++  for (const row of rows) {
++    const parsed=z.object({schemaVersion:z.literal(1),gender:z.enum(['Feminino','Masculino','Outro','Prefiro não informar'])}).safeParse(row.answers);
++    if (parsed.success) { genderPopulation++; genders.set(parsed.data.gender,(genders.get(parsed.data.gender)??0)+1); }
++    // Curated game IDs only: free text names are never disclosed.
++    const selected=z.array(z.object({gameId:z.string().uuid(),isCurated:z.boolean()})).safeParse(row.gamesSnapshot);
++    if (selected.success && selected.data.length) {
++      gamePopulation++;
++      for(const id of new Set(selected.data.filter(g=>g.isCurated).map(g=>g.gameId))) games.set(id,(games.get(id)??0)+1);
++    }
++  }
++  return { age: null, gender: suppressAudienceDimension(genders,genderPopulation), games: suppressAudienceDimension(games,gamePopulation) };
++}
+diff --git a/backend/test/integration/admin-bi.integration.test.ts b/backend/test/integration/admin-bi.integration.test.ts
+new file mode 100644
+index 0000000..276b3c0
+--- /dev/null
++++ b/backend/test/integration/admin-bi.integration.test.ts
+@@ -0,0 +1,69 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { randomUUID } from 'node:crypto';
++import { Pool } from 'pg';
++import { PgDialect } from 'drizzle-orm/pg-core';
++import { readMigrationFiles } from 'drizzle-orm/migrator';
++import { resolve } from 'node:path';
++import { eventBiQuery } from '../../src/events/admin-bi';
++import { assertAdminRoleManagementTestDatabaseUrls, startAdminRoleManagementAfterPreflight } from './admin-role-management-db-guard';
++
++// Legacy dedicated local target only. Never the inconclusive INFRA-01 events database.
++test('ADMIN-09 PostgreSQL agrega sem multiplicar, isola evento, reentradas, notas atuais e populações A/B',async()=>{
++  const connectionString=assertAdminRoleManagementTestDatabaseUrls(process.env);
++  const pool=new Pool({connectionString,ssl:false,max:1,connectionTimeoutMillis:2000,statement_timeout:10000});
++  try {
++    const migrations=readMigrationFiles({migrationsFolder:resolve(__dirname,'../../drizzle')}).map(m=>String(m.folderMillis));
++    await startAdminRoleManagementAfterPreflight(pool,migrations,async()=>{
++      const client=await pool.connect();
++      try{
++        await client.query('BEGIN');
++        // PostgreSQL aggregates execute over real column types, in session-local fixtures.
++        // No mutation of public tables, no global cleanup, automatic rollback on assertion failure.
++        for(const table of ['participations','experiences','service_sessions','queue_entries','evaluations'])
++          await client.query(`CREATE TEMP TABLE ${table} ON COMMIT DROP AS SELECT * FROM public.${table} WITH NO DATA`);
++        const event=randomUUID(),other=randomUUID(),user=randomUUID(),x=randomUUID(),y=randomUUID();
++        const query=new PgDialect().sqlToQuery(eventBiQuery(event));
++        const get=async()=> (await client.query(query.sql,query.params)).rows[0].metrics;
++        const empty=await get();assert.equal(empty.overview.participations,0);assert.equal(empty.ratings.mean,null);assert.equal(empty.durationA.meanSeconds,null);
++        await client.query('INSERT INTO experiences(id,event_id,name) VALUES($1,$2,\'A\'),($3,$2,\'B\')',[x,event,y]);
++        const p=[randomUUID(),randomUUID(),randomUUID(),randomUUID()];
++        for(let i=0;i<4;i++)await client.query(`INSERT INTO participations(id,event_id,user_id,status,arena_entered_at,finished_at,finish_reason)
++          VALUES($1,$2,$3,$4,$5,$6,$7)`,[p[i],i===3?other:event,user,i===0?'active':'finished',i===2?null:'2026-01-01T10:00:00Z',
++            i===0?null:'2026-01-01T10:30:00Z',i===0?null:i===1?'voluntary':'operational_deadline']);
++        for(const [index,status,experience,minutes] of [[0,'completed',x,10],[0,'completed',x,20],[0,'absent',y,25],[1,'canceled',y,30]] as const){
++          const q=randomUUID();await client.query('INSERT INTO queue_entries(id,participation_id) VALUES($1,$2)',[q,p[index]]);
++          await client.query('INSERT INTO service_sessions(id,queue_entry_id,experience_id,status,resolved_at) VALUES($1,$2,$3,$4,$5)',[randomUUID(),q,experience,status,`2026-01-01T10:${minutes}:00Z`]);
++        }
++        const note=randomUUID();await client.query('INSERT INTO evaluations(id,participation_id,rating) VALUES($1,$2,2)',[note,p[1]]);
++        await client.query('UPDATE evaluations SET rating=5 WHERE id=$1',[note]);
++        const result=await get();
++        assert.deepEqual(result.overview,{participations:3,arenaEntries:2,completed:2,absent:1});
++        assert.equal(result.ranking.length,1);assert.equal(result.ranking[0].percent,100);
++        assert.deepEqual(result.durationA,{population:1,meanSeconds:1200});
++        assert.deepEqual(result.durationB,{population:1,meanSeconds:1800});
++        assert.equal(result.ratings.count,1);assert.equal(result.ratings.mean,5);
++        assert.equal(result.ratings.distribution[4].count,1);
++        // Tied ranking remains deterministic; absent/canceled never enter the denominator.
++        for(let n=0;n<2;n++){
++          const q=randomUUID();await client.query('INSERT INTO queue_entries(id,participation_id) VALUES($1,$2)',[q,p[0]]);
++          await client.query("INSERT INTO service_sessions(id,queue_entry_id,experience_id,status,resolved_at) VALUES($1,$2,$3,'completed','2026-01-01T10:25:00Z')",[randomUUID(),q,y]);
++        }
++        const tied=await get();assert.deepEqual(tied.ranking.map((r:{id:string})=>r.id),[x,y].sort());
++        assert.ok(tied.ranking.every((r:{percent:number})=>r.percent===50));
++        assert.equal(tied.durationA.meanSeconds,1500);
++        const invalidA=randomUUID(), invalidQueue=randomUUID();
++        await client.query("INSERT INTO participations(id,event_id,user_id,status,arena_entered_at) VALUES($1,$2,$3,'active','2026-01-01T11:00:00Z')",[invalidA,event,randomUUID()]);
++        await client.query('INSERT INTO queue_entries(id,participation_id) VALUES($1,$2)',[invalidQueue,invalidA]);
++        await client.query("INSERT INTO service_sessions(id,queue_entry_id,experience_id,status,resolved_at) VALUES($1,$2,$3,'completed','2026-01-01T10:00:00Z')",[randomUUID(),invalidQueue,x]);
++        const negativeA=await get();
++        assert.equal(negativeA.durationA.population,1);
++        assert.equal(negativeA.durationA.meanSeconds,1500);
++        assert.deepEqual(negativeA.durationB,tied.durationB);
++        await client.query(`INSERT INTO participations(id,event_id,user_id,status,arena_entered_at,finished_at,finish_reason)
++          VALUES($1,$2,$3,'finished','2026-01-01T11:00:00Z','2026-01-01T10:00:00Z','voluntary')`,[randomUUID(),event,user]);
++        const invalid=await get();assert.equal(invalid.durationB.population,1);assert.equal(invalid.durationB.meanSeconds,1800);
++      }finally{await client.query('ROLLBACK');client.release();}
++    });
++  }finally{await pool.end();}
++});
+diff --git a/backend/test/unit/admin-bi.test.ts b/backend/test/unit/admin-bi.test.ts
+new file mode 100644
+index 0000000..960ad73
+--- /dev/null
++++ b/backend/test/unit/admin-bi.test.ts
+@@ -0,0 +1,30 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { PgDialect } from 'drizzle-orm/pg-core';
++import { eventBiQuery, eventBiSchema, prepareAudience, suppressAudienceDimension } from '../../src/events/admin-bi';
++const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,'0')}`;
++test('ADMIN-09 query isola evento, agrega fontes independentes e usa última conclusão e saída voluntária',()=>{
++  const q=new PgDialect().sqlToQuery(eventBiQuery(id(1)));
++  assert.deepEqual(q.params,[id(1),id(1)]);
++  for(const part of ["event_id=", "s.status='completed'", "status='absent'", "max(s.resolved_at)-p.arena_entered_at", "finish_reason='voluntary'", "finished_at>=arena_entered_at", "ORDER BY completed DESC,id ASC", 'generate_series(1,5)'])assert.ok(q.sql.includes(part),part);
++  assert.doesNotMatch(q.sql,/INSERT|UPDATE|DELETE|comment|birth_date|email/);
++});
++test('ADMIN-09 contrato distingue médias nulas de zero e mantém cinco notas',()=>{
++  const value={event:{id:id(1),name:'Teste',timezone:'UTC',effectivePhase:'closed'},observedAt:'2026-11-26T12:00:00.000Z',
++    overview:{participations:0,arenaEntries:0,completed:0,absent:0},ranking:[],ratings:{count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},
++    durationA:{meanSeconds:null,population:0},durationB:{meanSeconds:null,population:0},audience:{available:false,reason:'PRIVACY_POLICY_PENDING'}};
++  assert.deepEqual(eventBiSchema.parse(value),value);
++  assert.equal(eventBiSchema.safeParse({...value,audience:{available:true}}).success,false);
++});
++test('ADMIN-09 supressão impede divulgar células pequenas e complementos',()=>{
++  assert.equal(suppressAudienceDimension(new Map([['a',9],['b',21]]),30),null);
++  assert.equal(suppressAudienceDimension(new Map([['a',21]]),30),null);
++  assert.deepEqual(suppressAudienceDimension(new Map([['a',10],['b',10]]),20),[{category:'a',percent:50},{category:'b',percent:50}]);
++});
++test('ADMIN-09 usa primeiro snapshot efetivamente entrado, deduplica usuário e jogos, não usa perfil atual',()=>{
++  const rows=Array.from({length:20},(_,i)=>({userId:id(i+1),participationId:id(i+101),enteredAt:'2026-11-01T10:00:00Z',questionnaireVersionId:id(1000),
++    answers:{schemaVersion:1,gender:i<10?'Feminino':'Masculino'},gamesSnapshot:[{gameId:id(i<10?500:501),isCurated:true}]}));
++  const result=prepareAudience([...rows,...rows.map(r=>({...r,participationId:id(2000),enteredAt:'2026-11-02T10:00:00Z',answers:{schemaVersion:1,gender:'Outro'}}))]);
++  assert.equal(result.age,null);assert.equal(result.gender?.length,2);assert.equal(result.games?.length,2);
++  assert.equal(prepareAudience([...rows,{...rows[0],userId:id(5000),questionnaireVersionId:id(9000)}]).gender,null);
++});
+diff --git a/docs/ADMIN_09_IMPLEMENTACAO.md b/docs/ADMIN_09_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..531702e
+--- /dev/null
++++ b/docs/ADMIN_09_IMPLEMENTACAO.md
+@@ -0,0 +1,113 @@
++# ADMIN-09 — BI individual do evento
++
++## Escopo e preparação
++
++Implementação de leitura agregada por evento, tela administrativa real, atualização periódica e testes preparados. Exportação e divulgação demográfica real permanecem fora da entrega. Não implementar ADMIN-08/10/11/12 nem retomar INFRA-01.
++
++Base: `de1275143a9d23c9fdbdd1ac171ed1a6acc05bd2`, develop confirmada por `git ls-remote origin`. Branch criada: `feature/admin-analytics`. Working tree inicialmente limpo. Nenhuma alteração da branch INFRA-01 incorporada. AGENTS.md lido; app/AGENTS.md ausente. Testes, typecheck e builds reservados à validação posterior.
++
++Diagnóstico: tela AdminEventBiScreen usa contexto demonstrativo e não está registrada na navegação real. Preservada como arquivo legado para as regressões demonstrativas; a nova AdminRealEventBiScreen é a única ligada à área analytics do painel real. Endpoint de configuração já dispõe de sessão, Admin global, TOTP e snapshot repeatable read.
++
++## Implementação e contrato
++
++`GET /api/v1/admin/events/:eventId/bi`, Cache-Control no-store. Controller usa RequireSessionAuth, UUID validado pelo contrato compartilhado, executeConfiguration e revalidação SQL de Admin global, conta ativa, sessão vinculada/vigente e TOTP. O serviço consulta em transação repeatable read/read only: autorização, projeção oficial do evento e agregados. Evento ausente gera erro do contrato existente; não há mutações. Permite fases abertas, futuras e encerradas. Resposta validada por Zod, sem comentários ou identificadores pessoais.
++
++Resposta: `event {id,name,timezone,effectivePhase}`, `observedAt`, `overview {participations,arenaEntries,completed,absent}`, `ranking [{id,name,completed,percent}]`, `ratings {count,mean,distribution:[{stars,count,percent}]}`, `durationA/durationB {meanSeconds,population}` e `audience {available:false,reason:PRIVACY_POLICY_PENDING}`.
++
++Fórmulas:
++
++- Participações: todas as linhas do evento; entradas: arena_entered_at não nulo. Reentradas são linhas distintas.
++- Conclusões e ausências: service_sessions do evento por experiences, filtradas por completed/absent. Agregações independentes evitam multiplicação entre avaliações, participações e atendimentos.
++- Ranking: conclusões por experiência / todas as conclusões × 100; somente experiências com conclusão, sem limite arbitrário, ordem quantidade DESC e UUID ASC.
++- Avaliações: uma linha atual por participação (unicidade persistida); média avg(rating), distribuição completa 1–5 e percentuais sobre avaliações enviadas. Média nula e contagem zero sem avaliações.
++- A: avg(epoch(max(resolved_at completed) − arena_entered_at)), por participação com entrada, resolução válida e intervalo não negativo, inclusive ativa. Não soma sessões.
++- B: avg(epoch(finished_at − arena_entered_at)), somente finished/voluntary com entrada e intervalo não negativo. Não exige conclusão; exclui encerramentos automáticos/administrativos e cancelamentos. Populações independentes, segundos sem arredondamento individual; média nula quando vazia.
++
++## Privacidade e snapshots
++
++Inspecionados participations.service.ts e schema persistido: answers.schemaVersion=1, gender, games_snapshot com gameId/name/isCurated; age_band_at_event é gravado nulo e nascimento não é congelado. Não usar perfil atual para reconstruir idade. A preparação sintética deduplica por usuário, primeira entrada efetiva, desempate por UUID; recusa mistura de versões, conta escolhas múltiplas e usa denominadores válidos por dimensão. Nomes de jogos livres não são divulgados. A supressão rejeita a dimensão inteira se qualquer célula ou complemento tiver menos de 10, sem publicar denominadores ou categorias suprimidas. Isso não equivale a anonimização ou aprovação D10.
++
++O endpoint real não executa a preparação demográfica, não consulta snapshots pessoais e sempre responde indisponibilidade. Não existe parâmetro de cliente ou flag de ambiente para contornar o bloqueio. Faixa etária permanece nula também na preparação sintética. Nova autorização e revisão de privacidade são necessárias antes de qualquer divulgação real.
++
++## Frontend e atualização
++
++AdminRealEventBiScreen reutiliza cabeçalho Admin, tema, cards e abas. Retorna ao UUID selecionado, mantém logout somente na Home. Quatro métricas, ranking e distribuição por barras acessíveis, médias e populações A/B, horário no fuso do evento e aviso parcial/encerrado. Sem exportação e sem expressão tempo real. Não foi adicionada biblioteca gráfica; barras usam Views nativas. Layout flexível permite empilhamento em telas pequenas. A distribuição mantém cinco categorias em vez do agrupamento opcional 1+2 do protótipo.
++
++useAdminBi consulta inicialmente, manualmente, a cada 30 segundos somente com foco/foreground, e ao recuperar foco/foreground. Bloqueia sobreposição no mesmo escopo, invalida resultados por geração/identidade/cliente/evento e encerra timers/listeners. Dados válidos são mantidos durante atualização e falha de rede, com aviso desatualizado e horário anterior. Negação 401/403/404 elimina dados. O transporte existente não é alterado: requests em andamento são invalidados logicamente, sem pressupor cancelamento físico. Nenhuma fixture serve como fallback.
++
++## Fontes e limites
++
++Consultados arquitetura backend, Panorama (seção 3.8 e D08/D10), consolidação do Panorama, relatórios administrativos, schemas e serviços reais. Planejamento separado não encontrado; suas decisões estão consolidadas no Panorama e documento histórico. Não há mudança em Staff/Participante, auth, migrations, INFRA-01 ou funcionalidades futuras. Homologação visual em aparelho, auditoria de segurança e execução automatizada permanecem pendentes.
++
++## Testes preparados e validação necessária
++
++- Unitários admin-bi: SQL parametrizado/escopo, fórmulas, contrato vazio, supressão, primeira entrada, deduplicação e snapshots.
++- admin-configuration: BI em snapshot somente leitura, Admin/sessão/TOTP/revogação, evento vazio/ausente e fase oficial.
++- HTTP simulado: rota incluída na matriz existente de contrato, UUID, autenticação, TOTP e recusa Staff. Índices históricos da matriz preservados.
++- Frontend adminBi: contrato/UUID, vazios, indisponibilidade, navegação, foco/foreground, leitura pendente sem sobreposição, intervalo, erros/negação e respostas tardias por conta/evento/unmount. Harness ganhou mock AppState removível. Regressão de destino analytics atualizada; telas demo legadas preservadas.
++- Integração admin-bi.integration: usa guarda legada de arenago_roles_test local 127.0.0.1:55432, três URLs idênticas/NODE_ENV=test, identidade/privilégios/migrations e ausência de Admins históricos. Executa o SQL sobre fixtures de sessão temporárias com tipos derivados das tabelas reais, sem gravar tabelas públicas. Rollback/finally fecha recursos. Cobre vazio, evento diferente, reentrada, entrada ausente, múltiplas sessões, ausência/cancelamento, edição de nota e populações A/B. Não valida constraints das fixtures (CREATE TABLE AS preserva tipos, não constraints) nem carga/planos de execução. Exige autorização separada e banco dedicado conferido; nunca usar arenago_events_test inconclusivo da INFRA-01.
++
++Comandos preparados, **não executados** nesta implementação:
++
++```powershell
++Set-Location C:\DoJob\ProgramacaoMobile\app
++$env:NODE_ENV='test'
++node --test --test-reporter=spec tests/adminBi.test.cjs tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++npm.cmd test
++Set-Location ..\backend
++npm.cmd run typecheck:test
++node node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.json
++node --import tsx --test test/unit/admin-bi.test.ts test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts
++# Somente em campanha PostgreSQL separadamente autorizada e URLs locais conferidas:
++node --import tsx --test --test-concurrency=1 test/integration/admin-bi.integration.test.ts
++```
++
++As regressões preparadas não são resultados aprovados. Medição de desempenho, concorrência real e cobertura adicional de datas anômalas/ranking empatado devem ser conferidas na revisão independente. Nenhum banco foi acessado nesta rodada.
++
++## Inventário da entrega
++
++Modificados: app/screens/admin/AdminEventManagementInfoScreen.js; app/tests/adminRealEvents.test.cjs; app/tests/helpers/questionnaireHarness.cjs; backend/src/events/admin-configuration-query.service.ts; backend/src/events/admin-configuration.controller.ts; backend/test/unit/admin-configuration-http.test.ts; backend/test/unit/admin-configuration.test.ts.
++
++Novos: app/screens/admin/AdminRealEventBiScreen.js; app/screens/admin/useAdminBi.js; app/services/adminBiService.js; app/tests/adminBi.test.cjs; backend/src/events/admin-bi.ts; backend/test/integration/admin-bi.integration.test.ts; backend/test/unit/admin-bi.test.ts; este relatório. Evidência: qa-evidence/ADMIN_09-changes.diff, excluindo a si própria.
++
++## Verificações efetivamente realizadas
++
++Inspeção sintática com TypeScript createSourceFile/parseDiagnostics e Babel parser JSX/CJS: zero erros nos arquivos de código alterados. Não é typecheck nem teste. git diff --check e validação de aplicação em índice/objetos isolados, reversão contra working tree e correspondência de blobs fazem parte da geração do patch. Índice real preservado, sem staging/commit/push. SHA-256 informado na entrega, sem autorreferência circular no patch. Aprovação final depende da validação independente e homologação do responsável.
++
++## Correções após validação independente
++
++Campanha anterior: frontend direcionado 119/120, uma falha; oito casos adminBi aprovados. Typechecks de aplicação e testes aprovados, exit 0. Backend direcionado não inicializou por ENOMEM; suíte completa frontend inconclusiva. Esses resultados antecedem esta correção.
++
++Causa confirmada por inspeção: questionnaireHarness mantém um único vetor/cursor de hooks para toda a árvore. A troca por setProps de analytics para o placeholder reutilizava posições de useAdminBi em useAdminEventPanel, incluindo estado congelado em posição de ref. O teste agora desmonta BI em finally e monta a área inválida em harness independente, também com finally, mantendo UUID, retorno, autenticação e ausência de consultas na área inválida. Nenhum código de produção foi alterado.
++
++A assertion reprovada interrompia o teste antes de unmount, deixando o intervalo de BI ativo. A limpeza agora ocorre mesmo em falha. Isso comprova uma retenção nesse caminho, sem atribuir toda a suíte completa inconclusiva a essa causa. Inspecionados timers, listeners AppState e promises dos demais testes novos: todos desmontam em finally; a limpeza do hook cancela intervalo e remove listeners. Promises deliberadamente pendentes simulam transporte sem resposta e não possuem recursos externos ou timers próprios.
++
++Integração preparada ampliada: participação ativa com entrada às 11h e última conclusão às 10h não altera população A (1) nem média (1500 segundos); B permanece igual. Preservados cenário negativo B, populações independentes, empate por UUID e avaliação editada. Fórmula de produção preservada.
++
++Verificações desta correção: inspeção sintática por Babel parser e TypeScript createSourceFile/parseDiagnostics; integridade do patch por aplicação em índice e objetos temporários, comparação de blobs e reversão contra working tree; git diff --check e índice real vazio. Testes, typecheck e builds não executados nesta rodada. Aprovação depende de nova campanha sem force-exit e homologação do responsável.
++
++## Correção pontual de UTF-8 na assertion
++
++O responsável informou nova campanha local com 119/120 e encerramento natural, sem recorrência do erro de hooks. A falha restante esperava literalmente `?rea indispon?vel`, enquanto o componente renderiza `Área indisponível`. Confirmados os pontos de interrogação ASCII nos bytes UTF-8 do teste, introduzidos pela passagem anterior de texto pelo pipeline do PowerShell. Corrigidas também a assertion de `Nome não confiável`, a mensagem de erro do mock e a seção histórica acima, atingidas pela mesma corrupção. Demais strings adicionadas no patch inspecionadas. Cenário de área inválida, montagens independentes e finally preservados; produção inalterada.
++
++Parser Babel sem erros; patch regenerado e validado por aplicação isolada, blobs e reversão, com índice real vazio e git diff --check aprovado. Testes e typecheck não executados; a aprovação do teste corrigido permanece pendente.
++
++## Encerramento aprovado pelo responsável
++
++O responsável aprovou a ADMIN-09 dentro do escopo estabelecido e informou os resultados finais abaixo, posteriores às campanhas históricas registradas acima:
++
++- Revisão estática independente favorável; correções do harness e das strings corrompidas validadas.
++- Validação automatizada local concluída com sucesso. Suíte completa frontend aprovada; quantidade final não informada. Ambos os typechecks backend aprovados.
++- Backend completo: 1.352/1.352, sem falhas, cancelamentos ou casos ignorados.
++- Integração PostgreSQL: 1/1, sem falhas, utilizando a role e o banco dedicado `arenago_roles_test`. Qualificação prévia somente leitura aprovada; não foram necessárias alterações de permissões ou migrations.
++- Homologação visual confirmada pelo responsável.
++
++Permanecem as seguintes limitações e registros para trabalho posterior:
++
++- Divulgação demográfica real bloqueada até aprovação da política de privacidade; faixa etária indisponível por ausência de snapshot histórico adequado.
++- Exportação adiada conforme o escopo aprovado.
++- A integração PostgreSQL valida agregações SQL; não cobre o fluxo HTTP completo com banco real.
++- Durante a homologação foi observada ocorrência de ingresso pendente na conta de participante, sem vínculo comprovado com a ADMIN-09; investigar posteriormente, fora desta task.
++- A formatação de datas ISO na confirmação de ingresso também foi identificada para revisão posterior.
++
++Os resultados acima foram informados pelo responsável; esta atualização de encerramento não repetiu campanhas nem acessou bancos.

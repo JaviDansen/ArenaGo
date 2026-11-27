@@ -309,24 +309,36 @@ test('recuperar foco consulta novamente e uma resposta anterior não sobrescreve
   h.unmount();
 });
 
-test('destino informativo valida área e confirma evento com leitura autenticada', async () => {
+test('destino BI valida área e confirma evento com leitura autenticada', async () => {
   const calls = [];
   const h = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
     props: { route: { params: { eventId: id(2), area: 'analytics', name: 'Nome não confiável' } } },
     authContext: verifiedAdminAuth({ httpClient: { get: async (url, options) => {
       calls.push([url, options.auth]);
-      return { event: event(2) };
+      return { event: event(2), observedAt: '2026-11-26T12:00:00Z', overview: {participations:0,arenaEntries:0,completed:0,absent:0}, ranking: [],
+        ratings: {count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},
+        durationA:{population:0,meanSeconds:null},durationB:{population:0,meanSeconds:null},audience:{available:false} };
     } } }),
   });
-  await waitForText(h, 'Arena Norte');
-  assert.deepEqual(calls, [[eventPath(2), true]]);
-  assert.ok(hasText(h, 'BI do evento'));
-  assert.ok(!hasText(h, 'Nome não confiável'));
-  h.press('Voltar ao painel');
-  assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
-  h.setProps({ route: { params: { eventId: id(2), area: 'AdminDemo' } } });
-  await waitForText(h, 'Área indisponível');
-  assert.equal(calls.length, 1);
-  assert.ok(!hasText(h, 'Arena Norte'));
-  h.unmount();
+  try {
+    await waitForText(h, 'Arena Norte');
+    assert.deepEqual(calls, [[eventPath(2) + '/bi', true]]);
+    assert.ok(hasText(h, 'BI do Evento'));
+    assert.ok(!hasText(h, 'Nome não confiável'));
+    h.press('Voltar ao evento');
+    assert.deepEqual(plain(h.navigationCalls.at(-1)), { type: 'popTo', name: 'AdminRealEvent', params: { eventId: id(2) } });
+  } finally { h.unmount(); }
+  // The harness has one hook cursor; a different component tree needs a fresh mount.
+  const invalid = createHarness('screens/admin/AdminEventManagementInfoScreen.js', {
+    props: { route: { params: { eventId: id(2), area: 'AdminDemo' } } },
+    authContext: verifiedAdminAuth({ httpClient: { get: async () => {
+      calls.push(['unexpected read']);
+      throw new Error('Área inválida não deve consultar dados');
+    } } }),
+  });
+  try {
+    await waitForText(invalid, 'Área indisponível');
+    assert.equal(calls.length, 1);
+    assert.ok(!hasText(invalid, 'Arena Norte'));
+  } finally { invalid.unmount(); }
 });

@@ -7,6 +7,7 @@ import type * as schema from "../database/schema";
 import { configurationEventViewSchema,configurationExperienceViewSchema,configurationOperationViewSchema,configurationStationViewSchema,configurationStaffMember,encodeConfigurationCursor,type ConfigurationPage } from "./admin-configuration.dto";
 import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
 import { failConfiguration } from "./admin-configuration.problem";
+import { eventBiQuery, eventBiSchema } from './admin-bi';
 
 export interface ConfigurationActor {userId:string;sessionId:string}
 export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,actor:ConfigurationActor){
@@ -22,6 +23,16 @@ export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,
 @Injectable()
 export class AdminConfigurationQueryService {
   constructor(@Inject(DRIZZLE_DATABASE) private readonly database:NodePgDatabase<typeof schema>){}
+  bi(actor: ConfigurationActor, eventId: string) {
+    return this.snapshot(actor, async tx => {
+      const row = (await tx.execute<ConfigurationRow>(configurationProjection(sql`e.id=${eventId}::uuid`))).rows[0];
+      if (!row) failConfiguration('resource_not_found');
+      const metrics = (await tx.execute<{ metrics: Record<string, unknown> }>(eventBiQuery(eventId))).rows[0].metrics;
+      return eventBiSchema.parse({ ...metrics,
+        event: { id: row.id, name: row.name, timezone: row.timezone, effectivePhase: row.effectivePhase },
+        observedAt: row.observedAt, audience: { available: false, reason: 'PRIVACY_POLICY_PENDING' } });
+    });
+  }
   private snapshot<T>(actor:ConfigurationActor,read:(tx:DatabaseTransactionExecutor)=>Promise<T>,requireVerifiedEmail=false){return this.database.transaction(async tx=>{
     const account=await authorizeConfigurationRead(tx,actor);
     if(requireVerifiedEmail && !account.emailVerified)failConfiguration('actor_email_unverified');

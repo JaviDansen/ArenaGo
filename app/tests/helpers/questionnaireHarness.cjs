@@ -315,6 +315,10 @@ function createHarness(relativePath, options = {}) {
   const native = Object.fromEntries(['ActivityIndicator', 'Image', 'KeyboardAvoidingView', 'Modal', 'Pressable', 'RefreshControl', 'ScrollView',
     'Text', 'TextInput', 'View', 'SafeAreaView'].map((name) => [name, name]));
   native.Platform = { OS: options.platform || 'ios' };
+  const appStateListeners = new Set();
+  native.AppState = { currentState: 'active', addEventListener(_event, listener) {
+    appStateListeners.add(listener); return { remove: () => appStateListeners.delete(listener) };
+  } };
   native.Clipboard = { setString: value => options.copyToClipboard?.(value) };
   native.Keyboard = { dismiss() {} };
   native.StyleSheet = {
@@ -494,6 +498,7 @@ function createHarness(relativePath, options = {}) {
       for (const listener of navigationListeners.get(value ? 'focus' : 'blur') || []) listener();
       flush();
     },
+    setAppState(value) { native.AppState.currentState = value; for (const listener of appStateListeners) listener(value); flush(); },
     inputBirthDate(value) {
       const input = renderedNodes.find((node) => node.type === 'BirthDateInput');
       assert.ok(input);

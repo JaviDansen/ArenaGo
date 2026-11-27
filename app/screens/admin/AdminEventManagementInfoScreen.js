@@ -9,9 +9,11 @@ import AdminEventSettingsScreen from './AdminEventSettingsScreen';
 import AdminRealEventStaffScreen from './AdminRealEventStaffScreen';
 import AdminEventOperationScreen from './AdminEventOperationScreen';
 import AdminStructureScreen from './AdminStructureScreen';
+import AdminEventBiScreen from './AdminRealEventBiScreen';
 
 export default function AdminEventManagementInfoScreen({ navigation, route }) {
   const { eventId, area, returnToSetup } = route.params ?? {};
+  if (area === 'analytics') return <AdminEventBiScreen key={eventId} eventId={eventId} navigation={navigation} />;
   if (area === 'staff') return <AdminRealEventStaffScreen key={eventId} eventId={eventId} navigation={navigation} />;
   if (area === 'operation') return <AdminEventOperationScreen key={eventId} eventId={eventId} navigation={navigation} />;
   if (area === 'experiences') return <AdminStructureScreen navigation={navigation} eventId={eventId}

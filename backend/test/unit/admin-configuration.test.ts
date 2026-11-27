@@ -143,11 +143,27 @@ test("E08.13 DTO administrativo omite campos internos e dados pessoais da proje�
 });
 
 const actor={userId,sessionId};
+test('ADMIN-09 BI revalida Admin, sessão e TOTP antes dos agregados',async()=>{
+  for(const [options,kind] of [[{admin:false},'admin_required'],[{valid:false},'invalid_session'],[{secondFactor:false},'admin_2fa_required'],[{revoked:true},'session_revoked']] as const){
+    const f=readFixture(options);await assert.rejects(f.service.bi(actor,eventId),{kind});
+    assert.equal(f.queries.some(q=>q.text.includes('WITH people AS')),false);
+    assert.equal(f.queries.at(-1)?.text,'rollback');
+  }
+});
+test('ADMIN-09 BI inclui evento vazio, fase oficial e snapshot de leitura consistente',async()=>{
+  const bi={overview:{participations:0,arenaEntries:0,completed:0,absent:0},ranking:[],
+    ratings:{count:0,mean:null,distribution:[1,2,3,4,5].map(stars=>({stars,count:0,percent:0}))},durationA:{meanSeconds:null,population:0},durationB:{meanSeconds:null,population:0}};
+  const f=readFixture({bi});const result=await f.service.bi(actor,eventId);
+  assert.equal(result.event.id,eventId);assert.equal(result.event.effectivePhase,'open');assert.equal(result.audience.available,false);
+  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
+  assert.equal(f.queries.at(-1)?.text,'commit');assert.equal(f.queries.length,5);
+  await assert.rejects(readFixture({absent:true}).service.bi(actor,eventId),{kind:'resource_not_found'});
+});
 const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntries:true,lastQueueOrder:"9007199254740993",createdAt:at,updatedAt:at};
 const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
 type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
   absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[];
-  operation?:object; failOperation?:boolean};
+  operation?:object; failOperation?:boolean; bi?:object};
 function readFixture(options:ReadOptions={}){
   const queries:Array<{text:string;params:unknown[]}>=[];
   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
@@ -164,6 +180,7 @@ function readFixture(options:ReadOptions={}){
     if(text.startsWith('SELECT id,event_id'))return {rows:options.experiences??[experience]};
     if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
     if(text.includes('FROM user_roles r JOIN users u'))return {rows:options.staff??[]};
+    if(text.startsWith('WITH people AS'))return {rows:[{metrics:options.bi}]};
     throw Error('SQL unitário inesperado: '+text);
   }}as unknown as Client,{schema});
   return {service:new AdminConfigurationQueryService(database),queries};

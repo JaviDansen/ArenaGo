@@ -57,6 +57,7 @@ const routes: Route[] = [
   { name: "update experience", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}`, body: { name: "Experiência" }, operation: "update_experience", response: { experience }, status: 200 },
   { name: "create station", method: "post", path: `/admin/events/${eventId}/experiences/${experienceId}/stations`, body: { label: "Estação" }, operation: "create_station", response: { station }, status: 201 },
   { name: "update station", method: "patch", path: `/admin/events/${eventId}/experiences/${experienceId}/stations/${stationId}`, body: { label: "Estação" }, operation: "update_station", response: { station }, status: 200 },
+  { name: "event BI", method: "get", path: `/admin/events/${eventId}/bi`, response: { eventId, aggregate: true }, status: 200 },
 ];
 function record(method: string, actor: Actor, input?: unknown) {
   calls.push({ method, actor, input });
@@ -76,6 +77,7 @@ function record(method: string, actor: Actor, input?: unknown) {
   } } },
   { provide: AdminConfigurationService, useValue: { async mutate(input: MutationInput) { record("mutate", { userId: input.userId, sessionId: input.sessionId }, input); return result; } } },
   { provide: AdminConfigurationQueryService, useValue: {
+    bi: async (actor: Actor, target: string) => { record("bi", actor, target); return readResult; },
     events: async (actor: Actor, query: unknown) => { record("events", actor, query); return readResult; },
     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
