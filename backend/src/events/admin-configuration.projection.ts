@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { effectiveEventDeadline } from "./event-closure.projection";
+import { eventIsEffectivelyClosed } from "./event-closure.projection";
 const trimCharacters="\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 
 /** Prontidão e fase em um único snapshot PostgreSQL; não materializa estado ou ocupação. */
@@ -19,7 +19,7 @@ export function configurationProjection(condition:SQL=sql`true`,clock:SQL=sql`cl
   ), readiness AS (SELECT c.*,("nameAndAccessCode" AND "validScheduleAndTimezone" AND "externalQueueConfigured"
     AND "hasExperienceWithAvailableStation" AND "hasVerifiedActiveStaff") AS ready FROM checks c),
   projected AS (SELECT e.*,
-    CASE WHEN e.status='closed' OR ${effectiveEventDeadline()}<=e.at THEN 'closed'
+    CASE WHEN ${eventIsEffectivelyClosed(sql`e.at`)} THEN 'closed'
       WHEN e.status='closing' OR e.closure_requested_at IS NOT NULL OR e.official_ends_at<=e.at THEN 'closing'
       WHEN e.at<e.starts_at THEN 'scheduled' WHEN NOT e.ready THEN 'not_ready' ELSE 'open' END AS phase,
     (e.ready AND e.status NOT IN ('closing','closed') AND e.closure_requested_at IS NULL AND e.starts_at<=e.at AND e.at<e.official_ends_at) AS accepting

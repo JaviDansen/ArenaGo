@@ -61,7 +61,7 @@ const routes: Route[] = [
 ];
 function record(method: string, actor: Actor, input?: unknown) {
   calls.push({ method, actor, input });
-  if (actor.userId === staffId) throw new AdminConfigurationError("admin_required");
+  if (actor.userId === staffId || actor.userId === id(95)) throw new AdminConfigurationError("admin_required");
   if (failure) throw failure;
 }
 @Module({ controllers: [AdminConfigurationController, AdminScheduleController, AdminExternalQueueController, AdminCloseController], providers: [
@@ -72,12 +72,15 @@ function record(method: string, actor: Actor, input?: unknown) {
     if (token === "staff-list-unverified" || token === "staff-list-no-totp") {
       return { userId: token === "staff-list-unverified" ? unverifiedId : withoutTotpId, sessionId, roles: ["admin"] };
     }
+    if (token === "participant") return { userId: id(95), sessionId, roles: ["participante"] };
     if (token !== "unit-admin" && token !== "staff") throw new ProblemException({ status: 401, code: "INVALID_ACCESS_TOKEN", typeSlug: "invalid-access-token", title: "Token inválido", detail: "Token inválido." });
     return { userId: token === "staff" ? staffId : userId, sessionId, roles: token === "staff" ? ["staff"] : ["admin"] };
   } } },
   { provide: AdminConfigurationService, useValue: { async mutate(input: MutationInput) { record("mutate", { userId: input.userId, sessionId: input.sessionId }, input); return result; } } },
   { provide: AdminConfigurationQueryService, useValue: {
     bi: async (actor: Actor, target: string) => { record("bi", actor, target); return readResult; },
+    history: async (actor: Actor, query: unknown) => { record("history", actor, query); return readResult; },
+    summary: async (actor: Actor, target: string) => { record("summary", actor, target); return readResult; },
     events: async (actor: Actor, query: unknown) => { record("events", actor, query); return readResult; },
     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
@@ -112,6 +115,30 @@ function request(route: Route, path = route.path, token = "unit-admin") {
 function problem(r: supertest.Response, status: number, code: string) {
   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code); assert.match(r.headers["content-type"], /application\/problem\+json/);
 }
+
+test("ADMIN-10 rotas exatas, validação, sessão, TOTP e papéis", async () => {
+  const history: Route = { name: "history", method: "get", path: "/admin/events/history",
+    status: 200, response: { items: [], nextCursor: null } };
+  const summary: Route = { name: "summary", method: "get", path: `/admin/events/${eventId}/summary`,
+    status: 200, response: { event: { id: eventId } } };
+  for (const route of [history, summary]) {
+    reset(route);
+    const ok = await request(route);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers["cache-control"], "no-store");
+    assert.deepEqual(calls[0], { method: route.name, actor: { userId, sessionId },
+      input: route === history ? { limit: 20, period: 'all' } : eventId });
+    for (const token of ["staff", "participant"]) problem(await request(route, route.path, token), 403, "ADMIN_REQUIRED");
+    problem(await request(route, route.path, "no-2fa"), 401, "ADMIN_2FA_REQUIRED");
+    problem(await request(route, route.path, "revoked"), 401, "SESSION_REVOKED");
+  }
+  reset(history);
+  problem(await request(history).query({ period: "14", cursor: "invalid" }), 400, "VALIDATION_ERROR");
+  problem(await request(summary, "/admin/events/invalid/summary"), 400, "VALIDATION_ERROR");
+  assert.equal(calls.length, 0);
+  failure = new AdminConfigurationError("resource_not_found");
+  problem(await request(summary), 404, "RESOURCE_NOT_FOUND");
+});
 
 routes.push({ name: "staff", method: "get", path: `/admin/events/${eventId}/staff`, response: { eventId, items: [] }, status: 200 });
 

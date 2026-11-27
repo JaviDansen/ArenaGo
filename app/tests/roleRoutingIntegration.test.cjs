@@ -40,7 +40,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
       }
       if (url === '/participations/current') return { participation: null };
       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
-      if (url === '/admin/events') return { items: [], nextCursor: null };
+      if (url === '/admin/events' || url === '/admin/events/history') return { items: [], nextCursor: null };
       if (url === '/staff/events') return { events: control.events ?? [] };
       const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
       if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,pendingCall:null,canCall:false,canConfirm:false,canMarkAbsent:false,canRemove:false,
@@ -91,7 +91,16 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
   native.Platform = { OS: control.platformOS ?? 'web' };
   function FocusedStack(props) {
     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
-    return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
+    const focused = state.routes[state.index];
+    if (!state.routeNames.includes('AdminHistorySummary')) {
+      return React.createElement(NavigationContent, null, descriptors[focused.key].render());
+    }
+    // Native stack keeps AdminTabs mounted under the summary. Keep its key
+    // across push/pop so the nested TabRouter and History retain their state.
+    const mountedRoutes = state.routes.filter(route => route.key === focused.key ||
+      (focused.name === 'AdminHistorySummary' && route.name === 'AdminTabs'));
+    return React.createElement(NavigationContent, null, mountedRoutes.map(route =>
+      React.createElement(React.Fragment, { key: route.key }, descriptors[route.key].render())));
   }
   function FocusedTabs(props) {
     const { state, descriptors, navigation, NavigationContent } = Navigation.useNavigationBuilder(TabRouter, props);
@@ -127,7 +136,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
         return { waitAdminDemoLatency: async () => {} };
       }
       if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
-        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService'].includes(target))) {
+        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService',
+          'services/adminHistoryService', 'services/adminBiService'].includes(target))) {
         return load(`${target}.js`);
       }
       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
@@ -1228,9 +1238,10 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
     await app.press('Gerenciar eventos');
     await app.press('Histórico');
     assert.equal(app.activeRoute(), 'Histórico');
-    assert.ok(app.hasText('Em implementação'));
+    assert.ok(app.hasText('Somente eventos encerrados'));
+    assert.ok(app.hasText('Nenhum evento encerrado'));
     assert.equal(app.hasButton('Sair da conta'), false);
-    await app.press('Voltar para Home');
+    await app.press('Home');
     assert.equal(app.activeRoute(), 'Home');
     await app.press('BI');
     assert.equal(app.activeRoute(), 'BI');
@@ -1312,6 +1323,45 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações 
     await app.press('BI');
     assert.equal(app.activeRoute(), 'BI');
     assert.ok(app.hasText('Em implementação'));
+  } finally { app.dispose(); }
+});
+
+test('ADMIN-10 a aba Histórico abre o resumo real na pilha Admin e retorna à aba', async () => {
+  const eventId = 'abcdef00-0000-4000-8000-000000000001';
+  const closedAt = '2026-11-26T12:00:00.000000Z';
+  const event = { id: eventId, name: 'Evento encerrado real', effectivePhase: 'closed', timezone: 'UTC',
+    startsAt: '2026-11-26T10:00:00.000000Z', officialEndsAt: closedAt, closedAt };
+  const summaryPath = `/admin/events/${eventId}/summary`;
+  const seen = [];
+  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
+    http: async (route, options) => {
+      if (route === '/admin/events/history') {
+        seen.push(route);
+        return { items: [{ ...event, participations: 1, evaluationCount: 0, evaluationMean: null }], nextCursor: null };
+      }
+      if (route === summaryPath) {
+        seen.push(route);
+        assert.equal(options.method, 'GET');
+        return { event: { ...event, scheduledDurationSeconds: 7200, closedEarly: false }, observedAt: closedAt,
+          overview: { participations: 1, completed: 0 }, ranking: [],
+          ratings: { count: 0, mean: null, distribution: [1, 2, 3, 4, 5].map(stars => ({ stars, count: 0, percent: 0 })) },
+          durationA: { meanSeconds: null, population: 0 } };
+      }
+      return undefined;
+    } } });
+  await app.mount();
+  try {
+    await app.press('Histórico');
+    assert.equal(app.activeRoute(), 'Histórico');
+    assert.ok(app.hasText(event.name));
+    await app.press('Ver resumo');
+    assert.equal(app.activeRoute(), 'AdminHistorySummary');
+    assert.ok(app.hasText('Visualização pendente de aprovação da política de privacidade.'));
+    await app.press('Voltar ao Histórico');
+    assert.equal(app.activeRoute(), 'Histórico');
+    assert.equal(app.buttonProps('Histórico').accessibilityState.selected, true);
+    assert.ok(app.hasText(event.name));
+    assert.deepEqual(seen, ['/admin/events/history', summaryPath, '/admin/events/history']);
   } finally { app.dispose(); }
 });
 

@@ -8,6 +8,7 @@ import { configurationEventViewSchema,configurationExperienceViewSchema,configur
 import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
 import { failConfiguration } from "./admin-configuration.problem";
 import { eventBiQuery, eventBiSchema } from './admin-bi';
+import { closedEventIdentificationQuery, closedEventsPageQuery, encodeHistoryCursor, historyCard, historySummary, type HistoryPage } from './admin-event-history';
 
 export interface ConfigurationActor {userId:string;sessionId:string}
 export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,actor:ConfigurationActor){
@@ -31,6 +32,22 @@ export class AdminConfigurationQueryService {
       return eventBiSchema.parse({ ...metrics,
         event: { id: row.id, name: row.name, timezone: row.timezone, effectivePhase: row.effectivePhase },
         observedAt: row.observedAt, audience: { available: false, reason: 'PRIVACY_POLICY_PENDING' } });
+    });
+  }
+  history(actor: ConfigurationActor, page: HistoryPage) {
+    return this.snapshot(actor, async tx => {
+      const { rows } = await tx.execute(closedEventsPageQuery(page));
+      const items = rows.slice(0, page.limit).map(row => historyCard.parse(row));
+      const last = items.at(-1);
+      return { items, nextCursor: rows.length > page.limit && last ? encodeHistoryCursor(last.closedAt, last.id) : null };
+    });
+  }
+  summary(actor: ConfigurationActor, eventId: string) {
+    return this.snapshot(actor, async tx => {
+      const { rows: [event] } = await tx.execute(closedEventIdentificationQuery(eventId));
+      if (!event) failConfiguration('resource_not_found');
+      const { rows: [{ metrics }] } = await tx.execute<{ metrics: Record<string, unknown> }>(eventBiQuery(eventId));
+      return historySummary.parse({ ...metrics, event, observedAt: event.observedAt });
     });
   }
   private snapshot<T>(actor:ConfigurationActor,read:(tx:DatabaseTransactionExecutor)=>Promise<T>,requireVerifiedEmail=false){return this.database.transaction(async tx=>{

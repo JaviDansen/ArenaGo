@@ -9,6 +9,7 @@ import { AdminConfigurationQueryService } from "./admin-configuration-query.serv
 import { AdminConfigurationService } from "./admin-configuration.service";
 import { executeConfiguration } from "./admin-configuration.problem";
 import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
+import { historyQuery } from './admin-event-history';
 
 @Controller('admin/events')
 @RequireSessionAuth()
@@ -47,6 +48,20 @@ export class AdminConfigurationController {
   bi(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
     const { eventId } = validateOperationParams(configurationEventParams, params);
     return executeConfiguration(() => this.queries.bi({ userId, sessionId }, eventId));
+  }
+  @Get('history')
+  @Header('Cache-Control', 'no-store')
+  history(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Query() query: unknown) {
+    const parsed = historyQuery.safeParse(query);
+    if (!parsed.success) throw new ProblemException({ status: 400, code: 'VALIDATION_ERROR', typeSlug: 'validation-error',
+      title: 'Requisição inválida', detail: 'Confira pesquisa, período, limite e cursor.' });
+    return executeConfiguration(() => this.queries.history({ userId, sessionId }, parsed.data));
+  }
+  @Get(':eventId/summary')
+  @Header('Cache-Control', 'no-store')
+  summary(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
+    const { eventId } = validateOperationParams(configurationEventParams, params);
+    return executeConfiguration(() => this.queries.summary({ userId, sessionId }, eventId));
   }
   @Get(':eventId')
   @HttpCode(200)

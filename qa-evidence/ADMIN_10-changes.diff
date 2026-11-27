@@ -1,0 +1,1638 @@
+diff --git a/app/screens/admin/AdminDemoNavigator.js b/app/screens/admin/AdminDemoNavigator.js
+index 2b823e2cff178b4ad473e6931807bb32197fb4eb..52dc8c3815f76ef52c5d839448e3c68e8f9c2f1b 100644
+--- a/app/screens/admin/AdminDemoNavigator.js
++++ b/app/screens/admin/AdminDemoNavigator.js
+@@ -12,6 +12,8 @@ import { bindStaffSession } from './adminStaffSession';
+ import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
+ import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
+ import AdminPendingScreen from './AdminPendingScreen';
++import AdminRealHistoryScreen from './AdminRealHistoryScreen';
++import AdminHistorySummaryScreen from './AdminHistorySummaryScreen';
+ import AdminBottomBar from './components/AdminBottomBar';
+ 
+ const Stack = createNativeStackNavigator(), Tabs = createBottomTabNavigator();
+@@ -23,7 +25,7 @@ function AdminTabs() {
+       if (!event.defaultPrevented) navigation.navigate(name);
+     }} onLongPress={name => navigation.emit({ type: 'tabLongPress', target: state.routes.find(item => item.name === name).key })} />}>
+     <Tabs.Screen name="Home" component={AdminHomeScreen} />
+-    <Tabs.Screen name="Histórico" component={AdminPendingScreen} />
++    <Tabs.Screen name="Histórico" component={AdminRealHistoryScreen} />
+     <Tabs.Screen name="BI" component={AdminPendingScreen} />
+   </Tabs.Navigator>;
+ }
+@@ -43,6 +45,7 @@ export default function AdminDemoNavigator() {
+         <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
+         <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
+         <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
++        <Stack.Screen name="AdminHistorySummary" component={AdminHistorySummaryScreen} />
+       </Stack.Navigator>
+     </AdminStaffSession.Provider>
+   </AdminSetupIntents.Provider>;
+diff --git a/app/screens/admin/AdminHistorySummaryScreen.js b/app/screens/admin/AdminHistorySummaryScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a98c508a3a6fe9086c8b0bbbc67500cf1fc206dd
+--- /dev/null
++++ b/app/screens/admin/AdminHistorySummaryScreen.js
+@@ -0,0 +1,111 @@
++import { useMemo } from 'react';
++import { RefreshControl, StyleSheet, Text, View } from 'react-native';
++import { formatAdminDate } from '../../services/adminEventsService';
++import { getAdminHistorySummary } from '../../services/adminHistoryService';
++import { AdminBiRanking, AdminBiRatings, formatBiRating } from './components/AdminBiResults';
++import AdminButton from './components/AdminButton';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++import { HistoryBadge, HistoryHeading, HistoryMetric, historyStyles as hs } from './components/AdminHistoryUI';
++import { AdminIcon, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import useAdminHistory from './useAdminHistory';
++
++const number = new Intl.NumberFormat('pt-BR');
++function duration(seconds) {
++  if (seconds === null) return 'Sem dados';
++  const total = Math.floor(seconds);
++  const hours = Math.floor(total / 3600), minutes = Math.floor(total % 3600 / 60);
++  return hours ? `${hours} h ${minutes} min` : minutes ? `${minutes} min` : `${total} s`;
++}
++
++export function scheduledDuration(seconds) {
++  const days = Math.floor(seconds / 86400);
++  if (!days) return duration(seconds);
++  const hours = Math.floor(seconds % 86400 / 3600);
++  const minutes = Math.floor(seconds % 3600 / 60);
++  const remainder = Math.floor(seconds % 60);
++  return [`${days} ${days === 1 ? 'dia' : 'dias'}`, hours ? `${hours} h` : '',
++    minutes ? `${minutes} min` : '', remainder ? `${remainder} s` : ''].filter(Boolean).join(' ');
++}
++
++export default function AdminHistorySummaryScreen({ navigation, route }) {
++  const eventId = route?.params?.eventId;
++  const read = useMemo(() => client => getAdminHistorySummary(client, eventId), [eventId]);
++  const state = useAdminHistory(navigation, read);
++  const data = state.data;
++  const event = data?.event;
++  const metrics = data && [
++    ['users', 'Participações registradas', number.format(data.overview.participations)],
++    ['star', 'Avaliações enviadas', number.format(data.ratings.count)],
++    ['star', 'Nota média', formatBiRating(data.ratings.mean)],
++    ['layers', 'Atendimentos concluídos', number.format(data.overview.completed)],
++  ];
++  return <AdminLiveScreen title={event?.name ?? 'Resumo do evento'} eyebrow={event ? 'EVENTO ENCERRADO' : 'HISTÓRICO'}
++    subtitle={event ? 'Resumo do evento' : undefined} titleAccessory={event ? <HistoryBadge /> : undefined}
++    navigation={navigation} backLabel="Voltar ao Histórico" onBack={() => navigation.goBack()} showTabs activeTab="Histórico" historyHeader
++    refreshControl={<RefreshControl refreshing={Boolean(state.refreshing)} onRefresh={state.refresh} tintColor={c.accent} />}>
++    {state.pending && <AdminNotice title="Carregando resumo..." />}
++    {state.error && <AdminNotice tone="error" title={state.stale ? 'Dados desatualizados' : 'Resumo indisponível'} message={state.error}>
++      <AdminButton label="Tentar novamente" onPress={state.retry} />
++    </AdminNotice>}
++    {data && <>
++      <View style={[hs.panel, styles.timing]}>
++        <View style={styles.timeItem}>
++          <AdminIcon name="calendar" size={20} />
++          <View style={s.grow}>
++            <Text style={hs.copy}>Início: {formatAdminDate(event.startsAt, event.timezone)}</Text>
++            <Text style={hs.copy}>Término oficial: {formatAdminDate(event.officialEndsAt, event.timezone)}</Text>
++            <Text style={hs.copy}>Encerramento {event.closedEarly ? 'antecipado' : 'efetivo'}: {formatAdminDate(event.closedAt, event.timezone)}</Text>
++          </View>
++        </View>
++        <View style={styles.scheduled}>
++          <AdminIcon name="history" size={20} />
++          <View style={s.grow}><Text style={hs.copy}>Duração programada</Text>
++            <Text style={hs.title}>{scheduledDuration(event.scheduledDurationSeconds)}</Text></View>
++        </View>
++      </View>
++      <View style={hs.panel}>
++        <HistoryHeading icon="chart">Resumo geral</HistoryHeading>
++        <View style={styles.grid}>{metrics.map(([icon, label, value, detail]) =>
++          <HistoryMetric key={label} icon={icon} label={label} value={value} detail={detail} centered style={styles.summaryMetric} />)}
++        </View>
++        <View style={[hs.tile, styles.indicator]} accessible
++          accessibilityLabel={`Tempo até a última experiência concluída: ${duration(data.durationA.meanSeconds)}. Indicador A, ${number.format(data.durationA.population)} participações elegíveis`}>
++          <HistoryHeading icon="history">Tempo até a última experiência concluída</HistoryHeading>
++          <Text style={styles.indicatorValue}>{duration(data.durationA.meanSeconds)}</Text>
++          <Text style={hs.copy}>Indicador A · {number.format(data.durationA.population)} participações elegíveis</Text>
++        </View>
++        {data.overview.participations === 0 && <Text style={[hs.copy, styles.empty]}>Evento sem participações</Text>}
++      </View>
++      <AdminBiRanking ranking={data.ranking} title="Experiências concluídas" compact />
++      <AdminBiRatings ratings={data.ratings} compact />
++      <View style={hs.panel}>
++        <HistoryHeading icon="comment">Comentários</HistoryHeading>
++        <Text style={hs.copy}>Visualização pendente de aprovação da política de privacidade.</Text>
++      </View>
++      <View style={hs.panel}>
++        <HistoryHeading icon="users">Perfil do público indisponível</HistoryHeading>
++        <View style={styles.grid}>
++          <View style={[hs.tile, styles.audience]}><Text style={hs.title}>Faixa etária</Text>
++            <Text style={hs.copy}>Indisponível por falta de histórico adequado.</Text></View>
++          <View style={[hs.tile, styles.audience]}><Text style={hs.title}>Gênero</Text>
++            <Text style={hs.copy}>Divulgação pendente de aprovação da política de privacidade.</Text></View>
++        </View>
++      </View>
++    </>}
++    <AdminButton label={state.refreshing ? 'Atualizando resumo...' : 'Atualizar resumo'}
++      variant="ghost" compact disabled={Boolean(state.pending || state.refreshing)} onPress={state.refresh} />
++  </AdminLiveScreen>;
++}
++
++const styles = StyleSheet.create({
++  timing: { gap: 12, marginTop: 0 },
++  timeItem: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
++  scheduled: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, borderTopWidth: 1, borderTopColor: '#503463', paddingTop: 10 },
++  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
++  summaryMetric: { flexBasis: '46%', minWidth: 130 },
++  indicator: { marginTop: 8, padding: 12, gap: 6 },
++  indicatorValue: { color: c.text, fontSize: 26, fontWeight: '700' },
++  audience: { flexGrow: 1, flexBasis: '46%', minWidth: 126, gap: 4 },
++  empty: { marginTop: 8 },
++});
+diff --git a/app/screens/admin/AdminRealEventBiScreen.js b/app/screens/admin/AdminRealEventBiScreen.js
+index acd96f12b070b146fe34922066f65ef0dc5cd076..9599237713c6c4e92d8a71bf2b91ceb9365d8ed5 100644
+--- a/app/screens/admin/AdminRealEventBiScreen.js
++++ b/app/screens/admin/AdminRealEventBiScreen.js
+@@ -3,6 +3,7 @@ import AdminLiveScreen from './components/AdminLiveScreen';
+ import AdminNotice from './components/AdminNotice';
+ import AdminButton from './components/AdminButton';
+ import { AdminIcon, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import { AdminBiRanking, AdminBiRatings } from './components/AdminBiResults';
+ import { adminEventPhases, formatAdminDate } from '../../services/adminEventsService';
+ import useAdminBi from './useAdminBi';
+ export function formatBiDuration(seconds) {
+@@ -10,10 +11,6 @@ export function formatBiDuration(seconds) {
+   const minutes=Math.floor(seconds/60);
+   return minutes>=60?`${Math.floor(minutes/60)}h ${minutes%60}min`:`${minutes}min`;
+ }
+-function Bar({label,percent,detail}) {
+-  return <View style={styles.barRow}><Text style={s.body}>{label}</Text><View style={styles.track}>
+-    <View style={[styles.fill,{width:`${percent}%`}]} /></View><Text style={s.body}>{detail}</Text></View>;
+-}
+ export default function AdminEventBiScreen({navigation,route,eventId:selected}) {
+   const eventId=selected??route?.params?.eventId;
+   const {data,pending,refreshing,error,stale,refresh}=useAdminBi(navigation,eventId);
+@@ -32,10 +29,8 @@ export default function AdminEventBiScreen({navigation,route,eventId:selected})
+           <View key={key} style={[s.card,styles.metric]}><Text style={styles.number}>{data.overview[key]}</Text><Text style={s.body}>{label}</Text></View>)}
+       </View>
+       {data.overview.participations===0&&<AdminNotice title="Evento sem participações" />}
+-      <View style={s.card}><Text style={s.title}>Experiências mais utilizadas</Text><Text style={s.body}>Ranking por atendimentos concluídos</Text>
+-        {!data.ranking.length?<Text style={s.body}>Sem atendimentos concluídos.</Text>:data.ranking.map(r=><Bar key={r.id} label={r.name} percent={r.percent} detail={`${r.completed} · ${r.percent.toFixed(1)}%`} />)}</View>
+-      <View style={s.card}><Text style={s.title}>☆ Avaliações</Text><Text style={styles.number}>{data.ratings.mean===null?'Sem avaliações':`${data.ratings.mean.toFixed(1)} / 5`}</Text>
+-        <Text style={s.body}>{data.ratings.count} avaliações</Text>{data.ratings.distribution.slice().reverse().map(r=><Bar key={r.stars} label={`${r.stars} estrelas`} percent={r.percent} detail={`${r.count} · ${r.percent.toFixed(1)}%`} />)}</View>
++      <AdminBiRanking ranking={data.ranking} />
++      <AdminBiRatings ratings={data.ratings} />
+       <View style={s.card}><Text style={s.title}>Tempo de participação</Text><View style={styles.grid}>
+         {[[data.durationA,'Até a última experiência concluída'],[data.durationB,'Até a saída voluntária']].map(([metric,label])=><View key={label} style={styles.duration}>
+           <Text style={s.body}>{label}</Text><Text style={styles.durationValue}>{formatBiDuration(metric.meanSeconds)}</Text><Text style={s.body}>{metric.population} participações elegíveis</Text></View>)}
+@@ -49,5 +44,4 @@ const styles=StyleSheet.create({
+   heading:{color:c.muted,fontWeight:'700',letterSpacing:2,marginTop:20},grid:{flexDirection:'row',flexWrap:'wrap',gap:10},
+   metric:{flexGrow:1,flexBasis:'45%',minWidth:130},number:{color:c.text,fontSize:32,fontWeight:'700',marginVertical:6},
+   duration:{flexGrow:1,flexBasis:'45%',minWidth:180,marginTop:12},durationValue:{color:c.text,fontSize:23,fontWeight:'700',marginVertical:8},
+-  barRow:{gap:6,marginTop:14},track:{backgroundColor:'#31233e',height:10,borderRadius:8,overflow:'hidden'},fill:{backgroundColor:'#a337df',height:'100%',borderRadius:8},
+ });
+diff --git a/app/screens/admin/AdminRealHistoryScreen.js b/app/screens/admin/AdminRealHistoryScreen.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..07e0b0fabe483170e882f0c3e29737fb950be161
+--- /dev/null
++++ b/app/screens/admin/AdminRealHistoryScreen.js
+@@ -0,0 +1,112 @@
++import { useEffect, useMemo, useState } from 'react';
++import { Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
++import { formatAdminDate } from '../../services/adminEventsService';
++import { listAdminHistory } from '../../services/adminHistoryService';
++import AdminButton from './components/AdminButton';
++import AdminLiveScreen from './components/AdminLiveScreen';
++import AdminNotice from './components/AdminNotice';
++import { HistoryBadge, HistoryMetric, historyStyles as hs } from './components/AdminHistoryUI';
++import { AdminIcon, AdminIconTile, liveColors as c, liveStyles as s } from './components/AdminLiveUI';
++import useAdminHistory from './useAdminHistory';
++
++const periods = [['all', 'Todo o período'], ['7', 'Últimos 7 dias'], ['30', 'Últimos 30 dias'], ['90', 'Últimos 90 dias']];
++const number = new Intl.NumberFormat('pt-BR');
++const rating = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
++
++export default function AdminRealHistoryScreen({ navigation }) {
++  const [search, setSearch] = useState('');
++  const [settled, setSettled] = useState('');
++  const [period, setPeriod] = useState('all');
++  const [filterWidth, setFilterWidth] = useState(0);
++  const term = search.trim();
++  const waiting = settled !== term;
++  useEffect(() => {
++    if (!waiting) return undefined;
++    const timer = setTimeout(() => setSettled(term), 300);
++    return () => clearTimeout(timer);
++  }, [term, waiting]);
++  const read = useMemo(() => waiting ? null :
++    (client, cursor) => listAdminHistory(client, { search: settled, period, cursor }), [settled, period, waiting]);
++  const state = useAdminHistory(navigation, read, true);
++  const items = waiting ? null : state.data;
++
++  return <AdminLiveScreen title="Histórico de eventos" subtitle="Consulte eventos encerrados e seus resultados agregados."
++    navigation={navigation} mode="tab" historyHeader
++    refreshControl={<RefreshControl refreshing={!waiting && Boolean(state.refreshing)} onRefresh={() => !waiting && state.refresh()} tintColor={c.accent} />}>
++    <View style={styles.notice}><AdminIcon name="info" size={20} />
++      <Text style={[hs.copy, s.grow]}>Somente eventos encerrados aparecem aqui.</Text>
++    </View>
++    <View style={styles.search}>
++      <AdminIcon name="search" color={c.muted} />
++      <TextInput accessibilityLabel="Pesquisar por nome ou código" placeholder="Nome ou código do evento"
++        placeholderTextColor={c.muted} value={search} onChangeText={setSearch} maxLength={180}
++        autoCapitalize="none" autoCorrect={false} returnKeyType="search" style={styles.input} />
++    </View>
++    <View style={styles.filters} onLayout={event => setFilterWidth(event.nativeEvent.layout.width)}>{periods.map(([value, label]) =>
++      <Pressable key={value} accessibilityRole="button" accessibilityState={{ selected: period === value }}
++        onPress={() => setPeriod(value)} style={[styles.filter, filterWidth >= 640 && styles.wideFilter, value === period && styles.selected]}>
++        <Text style={[styles.filterText, value === period && styles.selectedText]}>{label}</Text>
++      </Pressable>)}</View>
++    <AdminButton label={state.refreshing && !waiting ? 'Atualizando histórico...' : 'Atualizar histórico'}
++      variant="ghost" compact disabled={waiting || Boolean(state.pending || state.refreshing || state.loadingMore)} onPress={state.refresh} />
++    {(waiting || state.pending) && <AdminNotice title="Carregando histórico..." />}
++    {!waiting && state.error && <AdminNotice tone="error" title={state.stale ? 'Dados desatualizados' : 'Histórico indisponível'} message={state.error}>
++      <AdminButton label="Tentar novamente" onPress={state.retry} />
++    </AdminNotice>}
++    {items?.length === 0 && !state.error && !state.refreshing && <AdminNotice title={settled ? 'Nenhum resultado para a pesquisa' :
++      period === 'all' ? 'Nenhum evento encerrado' : 'Nenhum evento encerrado no período'} />}
++    {items?.map(event => <HistoryCard key={event.id} event={event}
++      onOpen={() => navigation.navigate('AdminHistorySummary', { eventId: event.id })} />)}
++    {!waiting && state.nextCursor && <AdminButton label="Carregar mais" loading={Boolean(state.loadingMore)}
++      disabled={Boolean(state.error || state.refreshing)} onPress={state.more} />}
++  </AdminLiveScreen>;
++}
++
++function HistoryCard({ event, onOpen }) {
++  const date = value => formatAdminDate(value, event.timezone);
++  return <View style={hs.panel}>
++    <View style={styles.cardHeader}>
++      <AdminIconTile name="calendar" />
++      <View style={s.grow}>
++        <View style={styles.cardTitle}>
++          <Text style={hs.title}>{event.name}</Text><HistoryBadge />
++        </View>
++        <Text style={hs.copy}>Início: {date(event.startsAt)}</Text>
++        <Text style={hs.copy}>Término oficial: {date(event.officialEndsAt)}</Text>
++        <Text style={hs.copy}>Encerrado em {date(event.closedAt)}</Text>
++      </View>
++    </View>
++    <View style={styles.metrics}>
++      <HistoryMetric centered icon="users" label="Participações" value={number.format(event.participations)} />
++      <HistoryMetric centered icon="star" label="Avaliações" value={number.format(event.evaluationCount)} />
++      <HistoryMetric centered icon="star" label="Nota média"
++        accessibilityLabel={event.evaluationMean === null ? 'Nota média indisponível: sem avaliações' : `Nota média: ${rating.format(event.evaluationMean)}`}
++        value={event.evaluationMean === null ? '—' : rating.format(event.evaluationMean)} />
++    </View>
++    <Pressable accessibilityRole="button" accessibilityLabel="Ver resumo" onPress={onOpen}
++      style={({ pressed }) => [hs.tile, styles.open, pressed && styles.pressed]}>
++      <Text style={styles.openText}>Ver resumo</Text><AdminIcon name="chevron" size={18} />
++    </Pressable>
++  </View>;
++}
++
++const styles = StyleSheet.create({
++  notice: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1c1030',
++    borderColor: c.border, borderWidth: 1, borderRadius: 14, padding: 11 },
++  search: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: c.border,
++    borderRadius: 16, backgroundColor: c.surface, paddingHorizontal: 14, marginVertical: 8 },
++  input: { flex: 1, minWidth: 0, minHeight: 52, color: c.text, fontSize: 15 },
++  filters: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
++  filter: { flexGrow: 1, flexBasis: '46%', minHeight: 44, justifyContent: 'center', alignItems: 'center', borderRadius: 14,
++    borderWidth: 1, paddingHorizontal: 9, paddingVertical: 6, borderColor: '#795395', backgroundColor: c.surface },
++  filterText: { color: c.muted, fontSize: 13, textAlign: 'center' },
++  wideFilter: { flexBasis: '22%' },
++  selected: { backgroundColor: c.accentStrong, borderColor: c.border },
++  selectedText: { color: c.text, fontWeight: '700' },
++  cardHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
++  cardTitle: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 7, marginBottom: 6 },
++  metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginVertical: 10 },
++  open: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12 },
++  openText: { color: c.text, fontSize: 15, fontWeight: '600' },
++  pressed: { opacity: 0.75 },
++});
+diff --git a/app/screens/admin/components/AdminBiResults.js b/app/screens/admin/components/AdminBiResults.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a559642f28775707ae22113f9184ee51d87c867f
+--- /dev/null
++++ b/app/screens/admin/components/AdminBiResults.js
+@@ -0,0 +1,60 @@
++import { StyleSheet, Text, View } from 'react-native';
++import { HistoryHeading, historyStyles as hs } from './AdminHistoryUI';
++import { liveColors as c, liveStyles as s } from './AdminLiveUI';
++
++const decimal = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
++export const formatBiRating = mean => mean === null ? 'Sem avaliações' : `${decimal.format(mean)} / 5`;
++
++function Bar({ label, percent, count, compact, showPercent = true }) {
++  return <View style={compact ? styles.compactRow : styles.barRow}>
++    <Text style={compact ? styles.compactLabel : s.body}>{label}</Text>
++    <View style={[styles.track, compact && styles.compactTrack]}>
++      <View style={[styles.fill, { width: `${percent}%` }]} />
++    </View>
++    <Text style={compact ? styles.compactValue : s.body}>
++      {showPercent ? `${count} · ${decimal.format(percent)}%` : count}
++    </Text>
++  </View>;
++}
++
++export function AdminBiRanking({ ranking, title = 'Experiências mais utilizadas', compact = false }) {
++  return <View style={compact ? hs.panel : s.card}>
++    {compact ? <HistoryHeading icon="layers">{title}</HistoryHeading> :
++      <><Text style={s.title}>{title}</Text><Text style={s.body}>Ranking por atendimentos concluídos</Text></>}
++    {ranking.length === 0 ? <Text style={compact ? hs.copy : s.body}>Sem atendimentos concluídos.</Text> :
++      ranking.map(row => <Bar key={row.id} label={row.name} percent={row.percent} count={row.completed}
++        compact={compact} showPercent={!compact} />)}
++  </View>;
++}
++
++export function AdminBiRatings({ ratings, compact = false }) {
++  const rows = ratings.distribution.slice().reverse().map(row => <Bar key={row.stars}
++    label={row.stars === 1 ? '1 estrela' : `${row.stars} estrelas`} percent={row.percent} count={row.count} compact={compact} />);
++  const mean = <Text style={compact ? styles.mean : s.title}>{formatBiRating(ratings.mean)}</Text>;
++  const count = <Text style={compact ? hs.copy : s.body}>{ratings.count} avaliações</Text>;
++  return compact ? <View style={hs.panel}>
++    <HistoryHeading icon="star">Avaliações</HistoryHeading>
++    <View style={styles.ratingLayout}>
++      <View style={styles.ratingTotal}>{mean}{count}</View>
++      <View style={styles.distribution}>{rows}</View>
++    </View>
++  </View> : <View style={s.card}>
++    <Text style={s.title}>☆ Avaliações</Text>{mean}{count}{rows}
++  </View>;
++}
++
++const styles = StyleSheet.create({
++  barRow: { gap: 6, marginTop: 14 },
++  track: { backgroundColor: '#31233e', height: 10, borderRadius: 8, overflow: 'hidden' },
++  fill: { backgroundColor: '#a337df', height: '100%', borderRadius: 8 },
++  compactRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 7,
++    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#503463' },
++  compactLabel: { color: c.text, fontSize: 13, flexBasis: '34%', flexShrink: 1, minWidth: 0 },
++  compactTrack: { flex: 1, minWidth: 18, height: 8 },
++  compactValue: { color: c.muted, fontSize: 13, fontVariant: ['tabular-nums'],
++    textAlign: 'right', maxWidth: '36%', flexShrink: 1 },
++  ratingLayout: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
++  ratingTotal: { flexGrow: 1, flexBasis: '23%', minWidth: 102, gap: 4 },
++  mean: { color: c.text, fontSize: 24, fontWeight: '700' },
++  distribution: { flexGrow: 3, flexBasis: '64%', minWidth: 205 },
++});
+diff --git a/app/screens/admin/components/AdminHistoryUI.js b/app/screens/admin/components/AdminHistoryUI.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..3beb044b1922eb8b1584bc3dcdb0f9762a5c1b51
+--- /dev/null
++++ b/app/screens/admin/components/AdminHistoryUI.js
+@@ -0,0 +1,43 @@
++import { StyleSheet, Text, View } from 'react-native';
++import { AdminIcon, liveColors as c } from './AdminLiveUI';
++
++export function HistoryBadge() {
++  return <Text style={historyStyles.badge}>Encerrado</Text>;
++}
++
++export function HistoryHeading({ icon, children }) {
++  return <View style={historyStyles.heading}>
++    <AdminIcon name={icon} size={22} />
++    <Text accessibilityRole="header" style={historyStyles.title}>{children}</Text>
++  </View>;
++}
++
++export function HistoryMetric({ icon, label, value, detail, centered = false, accessibilityLabel, style }) {
++  return <View accessible accessibilityLabel={accessibilityLabel ?? `${label}: ${value}${detail ? `, ${detail}` : ''}`}
++    style={[historyStyles.tile, centered ? styles.centered : styles.inline, style]}>
++    <AdminIcon name={icon} size={centered ? 23 : 19} />
++    <Text style={[historyStyles.copy, centered ? styles.centeredText : styles.inlineText]}>
++      <Text style={styles.value}>{value}</Text>{'\n'}{label}
++      {detail ? `\n${detail}` : ''}
++    </Text>
++  </View>;
++}
++
++export const historyStyles = StyleSheet.create({
++  panel: { backgroundColor: c.surface, borderColor: c.border, borderWidth: 1, borderRadius: 16, padding: 12, marginTop: 12 },
++  tile: { backgroundColor: '#241832', borderColor: '#795395', borderWidth: 1, borderRadius: 12, padding: 8 },
++  heading: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
++  title: { color: c.text, fontSize: 18, fontWeight: '700', flexShrink: 1 },
++  copy: { color: c.muted, fontSize: 13, lineHeight: 18 },
++  badge: { color: '#f1dbff', backgroundColor: '#36224c', borderWidth: 1, borderColor: '#a779bd',
++    borderRadius: 14, overflow: 'hidden', paddingHorizontal: 9, paddingVertical: 4,
++    alignSelf: 'flex-start', fontSize: 12, fontWeight: '600' },
++});
++
++const styles = StyleSheet.create({
++  centered: { alignItems: 'center', gap: 6, flexGrow: 1, flexBasis: '28%', minWidth: 110 },
++  inline: { flexDirection: 'row', alignItems: 'center', gap: 5, flexGrow: 1, flexBasis: '28%', minWidth: 86 },
++  centeredText: { textAlign: 'center' },
++  inlineText: { flex: 1 },
++  value: { color: c.text, fontSize: 20, lineHeight: 25, fontWeight: '700' },
++});
+diff --git a/app/screens/admin/components/AdminLiveScreen.js b/app/screens/admin/components/AdminLiveScreen.js
+index 59db4d07223823a8931232ae5f68657e8bbf429f..9d3646b8139991dc8824087983e285394aba5249 100644
+--- a/app/screens/admin/components/AdminLiveScreen.js
++++ b/app/screens/admin/components/AdminLiveScreen.js
+@@ -7,7 +7,7 @@ import { AdminIcon, liveColors as c } from './AdminLiveUI';
+ import AdminBottomBar from './AdminBottomBar';
+ 
+ export default function AdminLiveScreen({ title, subtitle, eyebrow = 'ÁREA ADMINISTRATIVA', navigation, mode = 'detail', backLabel = 'Voltar', onBack, backDisabled = false,
+-  bottomSafeArea = false, showTabs = false, refreshControl, children }) {
++  bottomSafeArea = false, showTabs = false, activeTab = 'Home', refreshControl, historyHeader = false, titleAccessory, children }) {
+   const auth = useAuth();
+   const owner = adminReadOwner(auth), live = useRef(auth), mounted = useRef(true);
+   live.current = auth;
+@@ -16,27 +16,45 @@ export default function AdminLiveScreen({ title, subtitle, eyebrow = 'ÁREA ADMI
+     if (!mounted.current || !owner || adminReadOwner(live.current) !== owner) return;
+     void live.current.logout();
+   }
++  const brand = <Image source={require('../../../assets/images/logo-arenago-admin.png')} style={styles.brand}
++    resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />;
++  const back = <Pressable accessibilityRole="button" accessibilityLabel={backLabel}
++    accessibilityState={{ disabled: backDisabled }} disabled={backDisabled}
++    style={({ pressed }) => [styles.back, backDisabled && styles.disabled, pressed && styles.backPressed]} onPress={onBack}>
++    <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text>
++  </Pressable>;
+   return <SafeAreaView style={styles.safe} edges={bottomSafeArea ? ['top', 'left', 'right', 'bottom'] : ['top', 'left', 'right']}>
+     <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.decoration}>
+       <View style={styles.orbitTop} /><View style={styles.orbitBottom} />
+     </View>
+     <View style={styles.header}>
+-      {mode === 'home' ? <Pressable accessibilityRole="button" accessibilityLabel="Sair da conta" style={({ pressed }) => [styles.logout, pressed && styles.backPressed]}
+-        onPress={logout}><AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text></Pressable> :
+-        <Pressable accessibilityRole="button" accessibilityLabel={backLabel} accessibilityState={{ disabled: backDisabled }} disabled={backDisabled}
+-          style={({ pressed }) => [styles.back, backDisabled && styles.disabled, pressed && styles.backPressed]} onPress={onBack}>
+-          <AdminIcon name="back" color={c.accent} size={22} /><Text style={styles.backText}>{backLabel}</Text></Pressable>}
+-      <Image source={require('../../../assets/images/logo-arenago-admin.png')} style={styles.brand} resizeMode="contain" accessible accessibilityRole="image" accessibilityLabel="ArenaGO" />
++      {historyHeader ? <>
++        {brand}
++        {mode !== 'tab' && <View style={styles.adminBadge}><AdminIcon name="shield" size={18} />
++          <Text style={styles.adminBadgeText}>ADMIN</Text></View>}
++      </> : <>
++        {mode === 'tab' ? <View /> : mode === 'home' ? <Pressable accessibilityRole="button" accessibilityLabel="Sair da conta"
++          style={({ pressed }) => [styles.logout, pressed && styles.backPressed]} onPress={logout}>
++          <AdminIcon name="logout" color={c.text} size={20} /><Text style={styles.logoutText}>Sair da conta</Text>
++        </Pressable> : back}
++        {brand}
++      </>}
+     </View>
++    {historyHeader && mode !== 'tab' && <View style={styles.backRow}>{back}</View>}
+     <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content} refreshControl={refreshControl}>
+         <Text style={styles.eyebrow}>{eyebrow}</Text>
+-        <Text style={styles.title} accessibilityRole="header">{title}</Text>
+-        {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
++        {titleAccessory ? <View style={styles.titleRow}>
++          <Text style={[styles.title, styles.titleWithAccessory]} accessibilityRole="header">{title}</Text>{titleAccessory}
++        </View> : <Text style={styles.title} accessibilityRole="header">{title}</Text>}
++        {subtitle ? <Text style={[styles.subtitle, historyHeader && styles.historySubtitle]}>{subtitle}</Text> : null}
+         {children}
+       </ScrollView>
+     </KeyboardAvoidingView>
+-    {showTabs ? <AdminBottomBar active="Home" onSelect={screen => navigation.popTo('AdminTabs', { screen })} /> : null}
++    {showTabs ? <AdminBottomBar active={activeTab} onSelect={screen => {
++      if (activeTab === 'Histórico' && screen === activeTab) onBack();
++      else navigation.popTo('AdminTabs', { screen });
++    }} /> : null}
+   </SafeAreaView>;
+ }
+ const styles = StyleSheet.create({
+@@ -46,12 +64,19 @@ const styles = StyleSheet.create({
+   orbitBottom: { position: 'absolute', width: 1000, height: 380, borderWidth: 1, borderColor: '#281036', borderRadius: 500, bottom: -250, left: -260, transform: [{ rotate: '-20deg' }] },
+   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 8, gap: 8 },
+   brand: { width: '38%', maxWidth: 150, height: 48, flexShrink: 1 },
++  adminBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, borderColor: c.border, borderWidth: 1,
++    borderRadius: 16, paddingHorizontal: 10, paddingVertical: 6 },
++  adminBadgeText: { color: c.text, fontSize: 13, fontWeight: '700' },
++  backRow: { paddingHorizontal: 20, width: '100%', maxWidth: 840, alignSelf: 'center' },
+   logout: { flexDirection: 'row', gap: 7, alignItems: 'center', borderWidth: 1, borderColor: c.border, borderRadius: 16, minHeight: 44, paddingHorizontal: 12, paddingVertical: 8 },
+   logoutText: { color: c.text, fontSize: 13 },
+   content: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 32, width: '100%', maxWidth: 840, alignSelf: 'center' },
+   eyebrow: { color: c.muted, fontSize: 12, lineHeight: 18, fontWeight: '700', letterSpacing: 2, marginTop: 12 },
+   title: { color: c.text, fontSize: 28, lineHeight: 35, fontWeight: '700', marginTop: 8 },
++  titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 8 },
++  titleWithAccessory: { flexShrink: 1, marginTop: 0 },
+   subtitle: { color: c.muted, fontSize: 16, lineHeight: 24, marginTop: 10, marginBottom: 22 },
++  historySubtitle: { marginTop: 4, marginBottom: 8 },
+   back: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, flexShrink: 1, paddingRight: 4 },
+   backPressed: { opacity: 0.7 },
+   disabled: { opacity: 0.45 },
+diff --git a/app/screens/admin/components/AdminLiveUI.js b/app/screens/admin/components/AdminLiveUI.js
+index a52409476ccb35c22ab4d73532880ed2e1f64f33..d1c559f8a622b6a92aa47dbf802a3660b33cac88 100644
+--- a/app/screens/admin/components/AdminLiveUI.js
++++ b/app/screens/admin/components/AdminLiveUI.js
+@@ -20,6 +20,19 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
+       part('divider', { left: 3, top: 10, width: 18, borderWidth: 0, borderTopWidth: 1.6 }),
+       ...[7, 16].map(left => part(`ring${left}`, { left, top: 2, height: 6, borderWidth: 0, borderLeftWidth: 1.6 })),
+       part('day', { left: 8, top: 15, width: 4, height: 2, borderWidth: 0, backgroundColor: color })]; break;
++    case 'star': shapes = <Text allowFontScaling={false}
++      style={{ color, textAlign: 'center', fontSize: 25, lineHeight: 24 }}>☆</Text>; break;
++    case 'shield': shapes = [
++      part('edge', { left: 4, top: 2, width: 16, height: 20, borderTopLeftRadius: 4, borderTopRightRadius: 4,
++        borderBottomLeftRadius: 8, borderBottomRightRadius: 8 }),
++      part('check', { left: 8, top: 7, width: 9, height: 5, borderTopWidth: 0, borderRightWidth: 0,
++        transform: [{ rotate: '-45deg' }] }),
++    ]; break;
++    case 'comment': shapes = [
++      part('box', { left: 2, top: 3, width: 20, height: 15, borderRadius: 5 }),
++      part('tail', { left: 6, top: 17, height: 5, borderWidth: 0, borderLeftWidth: 1.6, transform: [{ rotate: '36deg' }] }),
++      ...[6, 11, 16].map(left => part(`dot${left}`, { left, top: 9, width: 2, height: 2, borderRadius: 2 })),
++    ]; break;
+     case 'folder': shapes = [part('tab', { left: 2, top: 4, width: 10, height: 7, borderRadius: 2 }),
+       part('box', { left: 2, top: 8, width: 20, height: 14, borderRadius: 2, backgroundColor: c.surface })]; break;
+     case 'plus': shapes = [part('h', { left: 2, top: 12, width: 20, borderWidth: 0, borderTopWidth: 1.6 }),
+diff --git a/app/screens/admin/useAdminHistory.js b/app/screens/admin/useAdminHistory.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..283f68d8d97749d434a3fdcbe6e5d07c85b55d3c
+--- /dev/null
++++ b/app/screens/admin/useAdminHistory.js
+@@ -0,0 +1,92 @@
++import { useEffect, useMemo, useRef, useState } from 'react';
++import { useAuth } from '../../context/AuthContext';
++import { adminReadError } from '../../services/adminEventsService';
++import { adminReadOwner } from './useAdminEvents';
++
++export default function useAdminHistory(navigation, read, paginated = false) {
++  const auth = useAuth();
++  const owner = adminReadOwner(auth), client = auth.httpClient;
++  const scope = useMemo(() => ({}), [owner, client, navigation, read, paginated]);
++  const live = useRef(null), control = useRef(null);
++  live.current = { scope, auth };
++  const [snapshot, setSnapshot] = useState(null);
++
++  useEffect(() => {
++    if (!owner || !read) return undefined;
++    let mounted = true, generation = 0, busy = false;
++    let data = null, cursor = null, loadedPages = 0, seen = new Set(), failedMore = false;
++    const current = () => mounted && live.current.scope === scope &&
++      adminReadOwner(live.current.auth) === owner && navigation.isFocused();
++    const publish = patch => setSnapshot({ scope, data, nextCursor: cursor, ...patch });
++
++    async function load(more = false) {
++      if (!current() || busy || (more && !cursor)) return;
++      busy = true;
++      const ticket = generation;
++      const valid = () => current() && ticket === generation;
++      publish({ pending: data === null, refreshing: !more && data !== null, loadingMore: more });
++      try {
++        if (!paginated) {
++          const result = await read(client);
++          if (!valid()) return;
++          data = result;
++        } else {
++          const items = new Map((more ? data : []).map(item => [item.id, item]));
++          const cursors = new Set(more ? seen : []);
++          let next = more ? cursor : null, pages = more ? loadedPages : 0;
++          // Rebuild the pages already visible after focus or manual refresh so
++          // returning from a summary can keep the scroll position.
++          const requestedPages = more ? 1 : Math.max(1, loadedPages);
++          for (let i = 0; i < requestedPages; i++) {
++            const result = await read(client, next);
++            if (!valid()) return;
++            next = result.nextCursor;
++            if (next && cursors.has(next)) throw new Error('Cursor repetido.');
++            if (next) cursors.add(next);
++            for (const item of result.items) items.set(item.id, item);
++            pages++;
++            if (!next) break;
++          }
++          data = [...items.values()];
++          cursor = next;
++          seen = cursors;
++          loadedPages = pages;
++        }
++        failedMore = false;
++        publish({});
++      } catch (error) {
++        if (!valid()) return;
++        const unavailable = [401, 403, 404].includes(error?.status);
++        if (unavailable) {
++          data = null;
++          cursor = null;
++          loadedPages = 0;
++          seen = new Set();
++        }
++        failedMore = more && !unavailable;
++        publish({ error: adminReadError(error), stale: data !== null });
++      } finally {
++        busy = false;
++        if (ticket !== generation && current()) void load();
++      }
++    }
++
++    const offFocus = navigation.addListener('focus', () => { void load(); });
++    const offBlur = navigation.addListener('blur', () => { generation++; });
++    control.current = { scope, load, retry: () => load(failedMore) };
++    void load();
++    return () => {
++      mounted = false;
++      offFocus();
++      offBlur();
++      if (control.current?.scope === scope) control.current = null;
++    };
++  }, [scope, owner, client, navigation, read, paginated]);
++
++  return {
++    ...(owner && snapshot?.scope === scope ? snapshot : { pending: Boolean(owner && read) }),
++    refresh: () => control.current?.scope === scope && control.current.load(),
++    more: () => control.current?.scope === scope && control.current.load(true),
++    retry: () => control.current?.scope === scope && control.current.retry(),
++  };
++}
+diff --git a/app/services/adminBiService.js b/app/services/adminBiService.js
+index 1c356678387fbbd990a490dcf6e0b4dadfda3389..08880b662d25db34d9b0174ed29ea007820827f1 100644
+--- a/app/services/adminBiService.js
++++ b/app/services/adminBiService.js
+@@ -1,16 +1,24 @@
+ import { adminEventPath, adminEventPhases } from './adminEventsService';
+ const count = n => Number.isSafeInteger(n) && n >= 0;
+ const nullable = n => n === null || (Number.isFinite(n) && n >= 0);
++export const validBiRanking = ranking => Array.isArray(ranking) && ranking.every(r =>
++  r && typeof r.id === 'string' && typeof r.name === 'string' && count(r.completed) &&
++  Number.isFinite(r.percent) && r.percent >= 0 && r.percent <= 100);
++export const validBiRatings = ratings => count(ratings?.count) && nullable(ratings.mean) &&
++  (ratings.mean === null || ratings.mean >= 1 && ratings.mean <= 5) &&
++  Array.isArray(ratings.distribution) && ratings.distribution.length === 5 &&
++  ratings.distribution.every((r, i) => r && r.stars === i + 1 && count(r.count) &&
++    Number.isFinite(r.percent) && r.percent >= 0 && r.percent <= 100) &&
++  ratings.distribution.reduce((total, r) => total + r.count, 0) === ratings.count &&
++  ((ratings.count === 0) === (ratings.mean === null));
++export const validBiDuration = d => d && count(d.population) && nullable(d.meanSeconds) &&
++  ((d.population === 0) === (d.meanSeconds === null));
+ export function parseAdminBi(v, eventId) {
+   if (v?.event?.id !== eventId || typeof v.event.name !== 'string' || !Object.hasOwn(adminEventPhases,v.event.effectivePhase) ||
+       typeof v.event.timezone !== 'string' || !Number.isFinite(Date.parse(v.observedAt)) ||
+       !['participations','arenaEntries','completed','absent'].every(k => count(v.overview?.[k])) ||
+-      !Array.isArray(v.ranking) || v.ranking.some(r => typeof r.id !== 'string' || typeof r.name !== 'string' || !count(r.completed) || !Number.isFinite(r.percent) || r.percent<0 || r.percent>100) ||
+-      !count(v.ratings?.count) || !nullable(v.ratings.mean) || (v.ratings.mean!==null && (v.ratings.mean<1 || v.ratings.mean>5)) || !Array.isArray(v.ratings.distribution) || v.ratings.distribution.length!==5 ||
+-      v.ratings.distribution.some((r,i) => r.stars!==i+1 || !count(r.count) || !Number.isFinite(r.percent) || r.percent<0 || r.percent>100) ||
+-      ![v.durationA,v.durationB].every(d => d && count(d.population) && nullable(d.meanSeconds) && ((d.population===0)===(d.meanSeconds===null))) ||
++      !validBiRanking(v.ranking) || !validBiRatings(v.ratings) || ![v.durationA,v.durationB].every(validBiDuration) ||
+       v.audience?.available!==false) throw new Error('Resposta de BI inválida.');
+-  if (v.ratings.distribution.reduce((n,r)=>n+r.count,0)!==v.ratings.count || ((v.ratings.count===0)!==(v.ratings.mean===null))) throw new Error('Distribuição inválida.');
+   return v;
+ }
+ export async function getAdminBi(client,eventId) {
+diff --git a/app/services/adminHistoryService.js b/app/services/adminHistoryService.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..736f8b2d7a0302ab4b775d5ac2007ab064d4db86
+--- /dev/null
++++ b/app/services/adminHistoryService.js
+@@ -0,0 +1,44 @@
++import { adminEventPath, adminIdentifier } from './adminEventsService';
++import { validBiDuration, validBiRatings, validBiRanking } from './adminBiService';
++
++const count = value => Number.isSafeInteger(value) && value >= 0;
++const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value));
++const invalid = () => new Error('Resposta do Histórico inválida.');
++
++function closedEvent(event) {
++  if (event?.effectivePhase !== 'closed' || typeof event.name !== 'string' || !event.name.trim() ||
++      typeof event.timezone !== 'string' || !event.timezone.trim() ||
++      ![event.startsAt, event.officialEndsAt, event.closedAt].every(date)) throw invalid();
++  const { id, name, timezone, effectivePhase, startsAt, officialEndsAt, closedAt } = event;
++  return { id: adminIdentifier(id), name, timezone, effectivePhase, startsAt, officialEndsAt, closedAt };
++}
++
++export async function listAdminHistory(client, { search = '', period = 'all', cursor = null } = {}) {
++  const params = [['period', period], ['search', search.trim()], ['cursor', cursor]]
++    .filter(([, value]) => value)
++    .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
++  const result = await client.get(`/admin/events/history?${params}`, { auth: true });
++  if (!Array.isArray(result?.items) || !(result.nextCursor === null ||
++      typeof result.nextCursor === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(result.nextCursor))) throw invalid();
++  const items = result.items.map(item => {
++    const { participations, evaluationCount, evaluationMean } = item;
++    if (!count(participations) || !count(evaluationCount) ||
++        (evaluationCount === 0 ? evaluationMean !== null :
++          !Number.isFinite(evaluationMean) || evaluationMean < 1 || evaluationMean > 5)) throw invalid();
++    return { ...closedEvent(item), participations, evaluationCount, evaluationMean };
++  });
++  return { items, nextCursor: result.nextCursor };
++}
++
++export async function getAdminHistorySummary(client, eventId) {
++  const result = await client.get(`${adminEventPath(eventId)}/summary`, { auth: true });
++  const event = closedEvent(result?.event);
++  const { scheduledDurationSeconds, closedEarly } = result.event;
++  const { observedAt, overview, ranking, ratings, durationA } = result;
++  if (event.id !== eventId || !date(observedAt) || typeof closedEarly !== 'boolean' ||
++      !Number.isFinite(scheduledDurationSeconds) || scheduledDurationSeconds < 0 ||
++      !count(overview?.participations) || !count(overview?.completed) || !validBiRanking(ranking) ||
++      ranking.reduce((sum, row) => sum + row.completed, 0) !== overview.completed ||
++      !validBiRatings(ratings) || !validBiDuration(durationA)) throw invalid();
++  return { event: { ...event, scheduledDurationSeconds, closedEarly }, observedAt, overview, ranking, ratings, durationA };
++}
+diff --git a/app/tests/adminHistory.test.cjs b/app/tests/adminHistory.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6e39812442feba52d374ea87cdac90b188a2eda
+--- /dev/null
++++ b/app/tests/adminHistory.test.cjs
+@@ -0,0 +1,195 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { createHarness, textOf } = require('./helpers/questionnaireHarness.cjs');
++const { verifiedAdminAuth } = require('./helpers/adminAuthFixture.cjs');
++
++const id = n => `abcdef00-0000-4000-8000-${String(n).padStart(12, '0')}`;
++const closedAt = '2026-11-26T12:00:00.000000Z';
++const card = (n, name) => ({ id: id(n), name, timezone: 'America/Sao_Paulo', effectivePhase: 'closed',
++  startsAt: '2026-11-26T10:00:00.000000Z', officialEndsAt: closedAt, closedAt,
++  participations: 0, evaluationCount: 0, evaluationMean: null });
++const page = (items, nextCursor = null) => ({ items, nextCursor });
++const summary = (n, name) => ({ event: { ...card(n, name), scheduledDurationSeconds: 7200, closedEarly: false },
++  overview: { participations: 0, completed: 0 }, observedAt: closedAt, ranking: [],
++  ratings: { count: 0, mean: null, distribution: [1,2,3,4,5].map(stars => ({ stars, count: 0, percent: 0 })) },
++  durationA: { population: 0, meanSeconds: null } });
++const visible = (h, label) => h.nodes.some(node => textOf(node).includes(label));
++const flush = h => h.actAsync(() => new Promise(resolve => setImmediate(resolve)));
++function deferred() {
++  let resolve;
++  const promise = new Promise(done => { resolve = done; });
++  return { promise, resolve };
++}
++
++test('ADMIN-10 lista real tem datas no fuso do evento, paginação sem duplicatas e retorno por foco', async () => {
++  const more = deferred(), calls = [];
++  const h = createHarness('screens/admin/AdminRealHistoryScreen.js', { authContext: verifiedAdminAuth({
++    httpClient: { get: (path, options) => {
++      const url = new URL(path, 'http://localhost');
++      assert.equal(url.pathname, '/admin/events/history');
++      assert.equal(options.auth, true);
++      calls.push(url.searchParams.get('cursor'));
++      if (!url.searchParams.has('cursor')) return Promise.resolve(page([card(1, 'Arena Norte')], 'next'));
++      assert.equal(url.searchParams.get('cursor'), 'next');
++      return more.promise;
++    } },
++  }) });
++  try {
++    await flush(h);
++    assert.ok(h.nodes.some(node => /26\/11\/(20)?26/.test(textOf(node))) && visible(h, '09:00'));
++    assert.ok(!visible(h, closedAt));
++    assert.ok(h.nodes.some(node => /0\s+Participações/.test(textOf(node))) && visible(h, 'Nota média'));
++    assert.ok(!visible(h, 'Sem nota média'));
++    assert.ok(h.nodes.some(node => node.props.accessibilityLabel === 'Nota média indisponível: sem avaliações'));
++    const loadMore = h.nodes.find(node => node.type === 'Pressable' && node.props.accessibilityLabel === 'Carregar mais');
++    assert.ok(loadMore);
++    h.act(() => { loadMore.props.onPress(); loadMore.props.onPress(); });
++    assert.deepEqual(calls, [null, 'next']);
++    more.resolve(page([card(1, 'Arena Norte'), card(2, 'Arena Sul')]));
++    await flush(h);
++    assert.equal(h.nodes.filter(node => node.type === 'Text' && textOf(node) === 'Arena Norte').length, 1);
++    h.press('Ver resumo');
++    assert.equal(h.navigationCalls.at(-1).name, 'AdminHistorySummary');
++    assert.equal(h.navigationCalls.at(-1).params.eventId, id(1));
++    h.setFocused(false); h.setFocused(true);
++    assert.ok(visible(h, 'Arena Sul'));
++    await flush(h);
++    assert.deepEqual(calls, [null, 'next', null, 'next']);
++    assert.ok(visible(h, 'Arena Sul'));
++  } finally {
++    try { h.unmount(); } finally { more.resolve(page([])); }
++  }
++});
++
++test('ADMIN-10 debounce, filtro e busca invalidam respostas antigas e reiniciam o cursor', async t => {
++  t.mock.timers.enable({ apis: ['setTimeout'] });
++  const olderPage = deferred(), filteredPage = deferred(), calls = [];
++  const responses = new Map([
++    [JSON.stringify(['all', null, null]), page([card(1, 'Todos os períodos')], 'all-page')],
++    [JSON.stringify(['all', null, 'all-page']), olderPage.promise],
++    [JSON.stringify(['7', null, null]), page([card(2, 'Período selecionado')], 'seven-page')],
++    [JSON.stringify(['7', null, 'seven-page']), filteredPage.promise],
++    [JSON.stringify(['7', 'arena %_', null]), page([])],
++  ]);
++  let h;
++  try {
++    h = createHarness('screens/admin/AdminRealHistoryScreen.js', { authContext: verifiedAdminAuth({
++      httpClient: { get: path => {
++        const params = new URL(path, 'http://localhost').searchParams;
++        const query = [params.get('period'), params.get('search'), params.get('cursor')];
++        calls.push(query);
++        const key = JSON.stringify(query);
++        assert.ok(responses.has(key), `Consulta inesperada: ${key}`);
++        return Promise.resolve(responses.get(key));
++      } },
++    }) });
++    await flush(h);
++    assert.ok(visible(h, 'Todos os períodos'));
++    h.act(() => h.press('Carregar mais'));
++    h.act(() => h.press('Últimos 7 dias'));
++    await flush(h);
++    assert.ok(visible(h, 'Período selecionado') && !visible(h, 'Todos os períodos'));
++    olderPage.resolve(page([card(3, 'Resposta antiga')], 'old'));
++    await flush(h);
++    assert.ok(!visible(h, 'Resposta antiga'));
++    h.act(() => h.press('Carregar mais'));
++    const input = h.nodes.find(node => node.type === 'TextInput' && node.props.accessibilityLabel === 'Pesquisar por nome ou código');
++    assert.ok(input);
++    h.act(() => input.props.onChangeText(' arena %_ '));
++    // press() só invoca o handler. Cada act() aplica o estado antes da próxima interação.
++    const beforeSearch = [['all', null, null], ['all', null, 'all-page'], ['7', null, null], ['7', null, 'seven-page']];
++    h.act(() => t.mock.timers.tick(299));
++    await flush(h);
++    assert.deepEqual(calls, beforeSearch);
++    assert.ok(visible(h, 'Carregando histórico...'));
++    h.act(() => t.mock.timers.tick(1));
++    await flush(h);
++    assert.deepEqual(calls, [...beforeSearch, ['7', 'arena %_', null]]);
++    assert.ok(visible(h, 'Nenhum resultado para a pesquisa'));
++    filteredPage.resolve(page([card(4, 'Filtro antigo')], 'old'));
++    await flush(h);
++    assert.ok(!visible(h, 'Filtro antigo') && !visible(h, 'Carregar mais'));
++    assert.ok(visible(h, 'Nenhum resultado para a pesquisa'));
++  } finally {
++    try { h?.unmount(); } finally {
++      olderPage.resolve(page([]));
++      filteredPage.resolve(page([]));
++      t.mock.timers.reset();
++    }
++  }
++});
++
++test('ADMIN-10 resumo usa somente o evento real, mostra ausência de dados e preserva privacidade', async () => {
++  const h = createHarness('screens/admin/AdminHistorySummaryScreen.js', { props: { route: { params: { eventId: id(1) } } },
++    authContext: verifiedAdminAuth({ httpClient: { get: async (path, options) => {
++      assert.equal(path, `/admin/events/${id(1)}/summary`);
++      assert.equal(options.auth, true);
++      return { ...summary(1, 'Evento encerrado real'), comments: ['Texto privado'], audience: { gender: 'Dado privado' } };
++    } } }),
++  });
++  try {
++    await flush(h);
++    for (const label of ['Evento encerrado real', 'Duração programada', '2 h 0 min', 'Evento sem participações',
++      'Sem atendimentos concluídos.', 'Sem avaliações', 'Sem dados', 'Visualização pendente de aprovação da política de privacidade.', 'Faixa etária', 'Gênero',
++      '1 estrela', '2 estrelas', '3 estrelas', '4 estrelas', '5 estrelas']) assert.ok(visible(h, label), label);
++    for (const label of ['Texto privado', 'Dado privado', 'Exportar', 'Abrir BI completo', closedAt]) assert.ok(!visible(h, label), label);
++    assert.ok(visible(h, 'Tempo até a última experiência concluída'));
++    assert.ok(visible(h, 'Indicador A · 0 participações elegíveis'));
++    assert.equal(h.exports.scheduledDuration(14 * 86400), '14 dias');
++    assert.equal(h.exports.scheduledDuration(86400 + 2 * 3600 + 3 * 60 + 4), '1 dia 2 h 3 min 4 s');
++    assert.equal(h.exports.scheduledDuration(7200), '2 h 0 min');
++    const tab = h.nodes.find(node => node.props.accessibilityRole === 'tab' && node.props.accessibilityLabel === 'Histórico');
++    assert.equal(tab.props.accessibilityState.selected, true);
++    h.press('Voltar ao Histórico');
++    assert.equal(h.navigationCalls.at(-1).type, 'back');
++  } finally { h.unmount(); }
++});
++
++test('ADMIN-10 atualização mantém dados na falha de rede e limpa após 403 ou evento indisponível', async () => {
++  let outcome = null;
++  const h = createHarness('screens/admin/AdminHistorySummaryScreen.js', { props: { route: { params: { eventId: id(1) } } },
++    authContext: verifiedAdminAuth({ httpClient: { get: async () => {
++      if (outcome) throw outcome;
++      return summary(1, 'Arena presente');
++    } } }),
++  });
++  try {
++    await flush(h);
++    outcome = new Error('rede');
++    h.press('Atualizar resumo'); await flush(h);
++    assert.ok(visible(h, 'Dados desatualizados') && visible(h, 'Arena presente'));
++    outcome = { status: 403 };
++    h.press('Tentar novamente'); await flush(h);
++    assert.ok(visible(h, 'Sua sessão não permite') && !visible(h, 'Arena presente'));
++    outcome = { status: 404 };
++    h.setFocused(false); h.setFocused(true); await flush(h);
++    assert.ok(visible(h, 'Evento não encontrado ou indisponível'));
++  } finally { h.unmount(); }
++});
++
++for (const change of ['conta', 'evento', 'desmontagem']) test(`ADMIN-10 resumo ignora resposta após troca de ${change}`, async () => {
++  const old = deferred();
++  let accountChanged = false;
++  const client = { get: (path) => {
++    if (path === `/admin/events/${id(2)}/summary`) return Promise.resolve(summary(2, 'Novo resumo'));
++    assert.equal(path, `/admin/events/${id(1)}/summary`);
++    return accountChanged ? Promise.resolve(summary(1, 'Novo resumo')) : old.promise;
++  } };
++  const h = createHarness('screens/admin/AdminHistorySummaryScreen.js', { props: { route: { params: { eventId: id(1) } } },
++    authContext: verifiedAdminAuth({ httpClient: client }) });
++  try {
++    if (change === 'conta') {
++      accountChanged = true;
++      h.setAuthContext(verifiedAdminAuth({ httpClient: client, user: { id: id(99), sessionId: 'nova' } }));
++    }
++    if (change === 'evento') h.setProps({ route: { params: { eventId: id(2) } } });
++    if (change === 'desmontagem') h.unmount();
++    old.resolve(summary(1, 'Resumo antigo'));
++    await flush(h);
++    assert.ok(!visible(h, 'Resumo antigo'));
++    if (change !== 'desmontagem') assert.ok(visible(h, 'Novo resumo'));
++    else assert.equal(h.nodes.length, 0);
++  } finally {
++    try { h.unmount(); } finally { old.resolve(summary(1, 'Resumo antigo')); }
++  }
++});
+diff --git a/app/tests/adminNavigation.test.cjs b/app/tests/adminNavigation.test.cjs
+index c569116ef93d8260bf3bc06377509f29dfe44726..92d09779185354261f31bb37a20616c755cdde21 100644
+--- a/app/tests/adminNavigation.test.cjs
++++ b/app/tests/adminNavigation.test.cjs
+@@ -149,7 +149,7 @@ test('navegador Admin registra apenas destinos reais e respeita identidade', ()
+   const stack = () => navigator().props.children.props.children;
+   const tree = stack();
+   assert.equal(tree.key, owner);
+-  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup']);
++  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup', 'AdminHistorySummary']);
+   const tabs = tree.props.children[0].props.component();
+   assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
+   owner = 'other:session:2'; assert.notEqual(stack().key, tree.key);
+diff --git a/app/tests/roleRoutingIntegration.test.cjs b/app/tests/roleRoutingIntegration.test.cjs
+index e3607faff4ff12d34da39a9f1484cba7d4fe2981..4cb74b771dcd2bc14cd967580ad777c1dc5dd38b 100644
+--- a/app/tests/roleRoutingIntegration.test.cjs
++++ b/app/tests/roleRoutingIntegration.test.cjs
+@@ -40,7 +40,7 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+       }
+       if (url === '/participations/current') return { participation: null };
+       if (url === '/participations/return-state') return { pendingEvaluationParticipationIds: [], recentFinalization: null };
+-      if (url === '/admin/events') return { items: [], nextCursor: null };
++      if (url === '/admin/events' || url === '/admin/events/history') return { items: [], nextCursor: null };
+       if (url === '/staff/events') return { events: control.events ?? [] };
+       const entryMatch = url.match(/^\/staff\/events\/([^/]+)\/entry-control$/);
+       if (entryMatch) return { eventId: entryMatch[1], externalQueueEnabled: true, canManage: false,pendingCall:null,canCall:false,canConfirm:false,canMarkAbsent:false,canRemove:false,
+@@ -91,7 +91,16 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+   native.Platform = { OS: control.platformOS ?? 'web' };
+   function FocusedStack(props) {
+     const { state, descriptors, NavigationContent } = Navigation.useNavigationBuilder(StackRouter, props);
+-    return React.createElement(NavigationContent, null, descriptors[state.routes[state.index].key].render());
++    const focused = state.routes[state.index];
++    if (!state.routeNames.includes('AdminHistorySummary')) {
++      return React.createElement(NavigationContent, null, descriptors[focused.key].render());
++    }
++    // Native stack keeps AdminTabs mounted under the summary. Keep its key
++    // across push/pop so the nested TabRouter and History retain their state.
++    const mountedRoutes = state.routes.filter(route => route.key === focused.key ||
++      (focused.name === 'AdminHistorySummary' && route.name === 'AdminTabs'));
++    return React.createElement(NavigationContent, null, mountedRoutes.map(route =>
++      React.createElement(React.Fragment, { key: route.key }, descriptors[route.key].render())));
+   }
+   function FocusedTabs(props) {
+     const { state, descriptors, navigation, NavigationContent } = Navigation.useNavigationBuilder(TabRouter, props);
+@@ -127,7 +136,8 @@ function createIntegration({ initialToken = null, initialUser, control = {} }) {
+         return { waitAdminDemoLatency: async () => {} };
+       }
+       if (control.realAdmin && (target.startsWith('screens/admin/') || target === 'data/adminDemoData' ||
+-        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService'].includes(target))) {
++        ['services/adminEventsService', 'services/adminEventSetupService', 'services/adminEventOperationService',
++          'services/adminHistoryService', 'services/adminBiService'].includes(target))) {
+         return load(`${target}.js`);
+       }
+       if (control.realStaff && ['screens/staff/StaffEventsNavigator', 'services/staffEventsService',
+@@ -1228,9 +1238,10 @@ test('Admin: restauração válida reutiliza telas, retornos internos e logout r
+     await app.press('Gerenciar eventos');
+     await app.press('Histórico');
+     assert.equal(app.activeRoute(), 'Histórico');
+-    assert.ok(app.hasText('Em implementação'));
++    assert.ok(app.hasText('Somente eventos encerrados'));
++    assert.ok(app.hasText('Nenhum evento encerrado'));
+     assert.equal(app.hasButton('Sair da conta'), false);
+-    await app.press('Voltar para Home');
++    await app.press('Home');
+     assert.equal(app.activeRoute(), 'Home');
+     await app.press('BI');
+     assert.equal(app.activeRoute(), 'BI');
+@@ -1315,6 +1326,45 @@ test('Admin: painel real retorna à mesma rota da lista e mantém informações
+   } finally { app.dispose(); }
+ });
+ 
++test('ADMIN-10 a aba Histórico abre o resumo real na pilha Admin e retorna à aba', async () => {
++  const eventId = 'abcdef00-0000-4000-8000-000000000001';
++  const closedAt = '2026-11-26T12:00:00.000000Z';
++  const event = { id: eventId, name: 'Evento encerrado real', effectivePhase: 'closed', timezone: 'UTC',
++    startsAt: '2026-11-26T10:00:00.000000Z', officialEndsAt: closedAt, closedAt };
++  const summaryPath = `/admin/events/${eventId}/summary`;
++  const seen = [];
++  const app = createIntegration({ initialToken: 'stored-admin', initialUser: adminUser, control: { realAdmin: true,
++    http: async (route, options) => {
++      if (route === '/admin/events/history') {
++        seen.push(route);
++        return { items: [{ ...event, participations: 1, evaluationCount: 0, evaluationMean: null }], nextCursor: null };
++      }
++      if (route === summaryPath) {
++        seen.push(route);
++        assert.equal(options.method, 'GET');
++        return { event: { ...event, scheduledDurationSeconds: 7200, closedEarly: false }, observedAt: closedAt,
++          overview: { participations: 1, completed: 0 }, ranking: [],
++          ratings: { count: 0, mean: null, distribution: [1, 2, 3, 4, 5].map(stars => ({ stars, count: 0, percent: 0 })) },
++          durationA: { meanSeconds: null, population: 0 } };
++      }
++      return undefined;
++    } } });
++  await app.mount();
++  try {
++    await app.press('Histórico');
++    assert.equal(app.activeRoute(), 'Histórico');
++    assert.ok(app.hasText(event.name));
++    await app.press('Ver resumo');
++    assert.equal(app.activeRoute(), 'AdminHistorySummary');
++    assert.ok(app.hasText('Visualização pendente de aprovação da política de privacidade.'));
++    await app.press('Voltar ao Histórico');
++    assert.equal(app.activeRoute(), 'Histórico');
++    assert.equal(app.buttonProps('Histórico').accessibilityState.selected, true);
++    assert.ok(app.hasText(event.name));
++    assert.deepEqual(seen, ['/admin/events/history', summaryPath, '/admin/events/history']);
++  } finally { app.dispose(); }
++});
++
+ test('ADMIN-04: painel abre estrutura por UUID, edita em contexto e reconsulta a prontidão no retorno', async () => {
+   const id = n => 'abcdef00-0000-4000-8000-' + String(n).padStart(12, '0');
+   const eventId = id(1), base = '/admin/events/' + eventId;
+diff --git a/backend/src/events/admin-configuration-query.service.ts b/backend/src/events/admin-configuration-query.service.ts
+index ac7e7d6c810a58463c3307f5abb323ae7852ce11..46895a3a4a41a46580ebfd5c8c816cc481ebbd65 100644
+--- a/backend/src/events/admin-configuration-query.service.ts
++++ b/backend/src/events/admin-configuration-query.service.ts
+@@ -8,6 +8,7 @@ import { configurationEventViewSchema,configurationExperienceViewSchema,configur
+ import { configurationEventView,configurationProjection,experienceSelection,readinessView,stationSelection,type ConfigurationRow } from "./admin-configuration.projection";
+ import { failConfiguration } from "./admin-configuration.problem";
+ import { eventBiQuery, eventBiSchema } from './admin-bi';
++import { closedEventIdentificationQuery, closedEventsPageQuery, encodeHistoryCursor, historyCard, historySummary, type HistoryPage } from './admin-event-history';
+ 
+ export interface ConfigurationActor {userId:string;sessionId:string}
+ export async function authorizeConfigurationRead(tx:DatabaseTransactionExecutor,actor:ConfigurationActor){
+@@ -33,6 +34,22 @@ export class AdminConfigurationQueryService {
+         observedAt: row.observedAt, audience: { available: false, reason: 'PRIVACY_POLICY_PENDING' } });
+     });
+   }
++  history(actor: ConfigurationActor, page: HistoryPage) {
++    return this.snapshot(actor, async tx => {
++      const { rows } = await tx.execute(closedEventsPageQuery(page));
++      const items = rows.slice(0, page.limit).map(row => historyCard.parse(row));
++      const last = items.at(-1);
++      return { items, nextCursor: rows.length > page.limit && last ? encodeHistoryCursor(last.closedAt, last.id) : null };
++    });
++  }
++  summary(actor: ConfigurationActor, eventId: string) {
++    return this.snapshot(actor, async tx => {
++      const { rows: [event] } = await tx.execute(closedEventIdentificationQuery(eventId));
++      if (!event) failConfiguration('resource_not_found');
++      const { rows: [{ metrics }] } = await tx.execute<{ metrics: Record<string, unknown> }>(eventBiQuery(eventId));
++      return historySummary.parse({ ...metrics, event, observedAt: event.observedAt });
++    });
++  }
+   private snapshot<T>(actor:ConfigurationActor,read:(tx:DatabaseTransactionExecutor)=>Promise<T>,requireVerifiedEmail=false){return this.database.transaction(async tx=>{
+     const account=await authorizeConfigurationRead(tx,actor);
+     if(requireVerifiedEmail && !account.emailVerified)failConfiguration('actor_email_unverified');
+diff --git a/backend/src/events/admin-configuration.controller.ts b/backend/src/events/admin-configuration.controller.ts
+index d1b28cd196e014cc92217b6ca6d8809bf11cfb34..ccaf2cd4176513fc328d849fc608c9cf173b7471 100644
+--- a/backend/src/events/admin-configuration.controller.ts
++++ b/backend/src/events/admin-configuration.controller.ts
+@@ -9,6 +9,7 @@ import { AdminConfigurationQueryService } from "./admin-configuration-query.serv
+ import { AdminConfigurationService } from "./admin-configuration.service";
+ import { executeConfiguration } from "./admin-configuration.problem";
+ import { AdminIdempotencyPolicy } from "./admin-idempotency.policy";
++import { historyQuery } from './admin-event-history';
+ 
+ @Controller('admin/events')
+ @RequireSessionAuth()
+@@ -48,6 +49,20 @@ export class AdminConfigurationController {
+     const { eventId } = validateOperationParams(configurationEventParams, params);
+     return executeConfiguration(() => this.queries.bi({ userId, sessionId }, eventId));
+   }
++  @Get('history')
++  @Header('Cache-Control', 'no-store')
++  history(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Query() query: unknown) {
++    const parsed = historyQuery.safeParse(query);
++    if (!parsed.success) throw new ProblemException({ status: 400, code: 'VALIDATION_ERROR', typeSlug: 'validation-error',
++      title: 'Requisição inválida', detail: 'Confira pesquisa, período, limite e cursor.' });
++    return executeConfiguration(() => this.queries.history({ userId, sessionId }, parsed.data));
++  }
++  @Get(':eventId/summary')
++  @Header('Cache-Control', 'no-store')
++  summary(@CurrentUserId() userId: string, @CurrentUser('sessionId') sessionId: string, @Param() params: unknown) {
++    const { eventId } = validateOperationParams(configurationEventParams, params);
++    return executeConfiguration(() => this.queries.summary({ userId, sessionId }, eventId));
++  }
+   @Get(':eventId')
+   @HttpCode(200)
+   event(@CurrentUserId() userId:string,@CurrentUser('sessionId') sessionId:string,@Param() params:unknown){const {eventId}=validateOperationParams(configurationEventParams,params);return executeConfiguration(()=>this.queries.event({userId,sessionId},eventId));}
+diff --git a/backend/src/events/admin-configuration.projection.ts b/backend/src/events/admin-configuration.projection.ts
+index 9a4dcb28c34989f5e0f80d7fd74bcc4ff6020d46..67fff42cf624c91c507c899627dbe9336196feb7 100644
+--- a/backend/src/events/admin-configuration.projection.ts
++++ b/backend/src/events/admin-configuration.projection.ts
+@@ -1,5 +1,5 @@
+ import { sql, type SQL } from "drizzle-orm";
+-import { effectiveEventDeadline } from "./event-closure.projection";
++import { eventIsEffectivelyClosed } from "./event-closure.projection";
+ const trimCharacters="\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+ 
+ /** Prontidão e fase em um único snapshot PostgreSQL; não materializa estado ou ocupação. */
+@@ -19,7 +19,7 @@ export function configurationProjection(condition:SQL=sql`true`,clock:SQL=sql`cl
+   ), readiness AS (SELECT c.*,("nameAndAccessCode" AND "validScheduleAndTimezone" AND "externalQueueConfigured"
+     AND "hasExperienceWithAvailableStation" AND "hasVerifiedActiveStaff") AS ready FROM checks c),
+   projected AS (SELECT e.*,
+-    CASE WHEN e.status='closed' OR ${effectiveEventDeadline()}<=e.at THEN 'closed'
++    CASE WHEN ${eventIsEffectivelyClosed(sql`e.at`)} THEN 'closed'
+       WHEN e.status='closing' OR e.closure_requested_at IS NOT NULL OR e.official_ends_at<=e.at THEN 'closing'
+       WHEN e.at<e.starts_at THEN 'scheduled' WHEN NOT e.ready THEN 'not_ready' ELSE 'open' END AS phase,
+     (e.ready AND e.status NOT IN ('closing','closed') AND e.closure_requested_at IS NULL AND e.starts_at<=e.at AND e.at<e.official_ends_at) AS accepting
+diff --git a/backend/src/events/admin-event-history.ts b/backend/src/events/admin-event-history.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ec0af7c6de16b7bb216d11dd56b63b5f24c24a4
+--- /dev/null
++++ b/backend/src/events/admin-event-history.ts
+@@ -0,0 +1,103 @@
++import { sql, type SQL } from 'drizzle-orm';
++import { z } from 'zod';
++import { operationUuid } from '../common/http/operation-validation';
++import { isPreciseInstant } from '../evaluations/evaluation-read.dto';
++import { normalizeEventAccessCode, EventAccessCodeValidationError } from './access-code';
++import { eventBiSchema } from './admin-bi';
++import { configurationQuery } from './admin-configuration.dto';
++import { effectiveEventDeadline, eventIsEffectivelyClosed } from './event-closure.projection';
++
++const instant = z.custom<string>(isPreciseInstant);
++const cursorSchema = z.object({ v: z.literal(1), closedAt: instant, id: operationUuid }).strict();
++export function encodeHistoryCursor(closedAt: string, id: string) {
++  return Buffer.from(JSON.stringify(cursorSchema.parse({ v: 1, closedAt, id }))).toString('base64url');
++}
++
++export const historyQuery = configurationQuery.pick({ limit: true, search: true }).extend({
++  period: z.enum(['all', '7', '30', '90']).default('all'),
++  cursor: z.string().transform((value, ctx) => {
++    if (/^[A-Za-z0-9_-]{1,512}$/.test(value)) {
++      try {
++        const bytes = Buffer.from(value, 'base64url');
++        if (bytes.toString('base64url') === value) {
++          const cursor = cursorSchema.safeParse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
++          if (cursor.success) return cursor.data;
++        }
++      } catch { /* Report malformed cursors without exposing their content. */ }
++    }
++    ctx.addIssue({ code: 'custom', message: 'Cursor inválido.' });
++    return z.NEVER;
++  }).optional(),
++}).strict();
++export type HistoryPage = z.infer<typeof historyQuery>;
++
++const historyEvent = z.object({
++  id: operationUuid, name: z.string(), timezone: z.string(), effectivePhase: z.literal('closed'),
++  startsAt: instant, officialEndsAt: instant, closedAt: instant,
++});
++export const historyCard = historyEvent.extend({
++  participations: eventBiSchema.shape.overview.shape.participations,
++  evaluationCount: eventBiSchema.shape.ratings.shape.count,
++  evaluationMean: eventBiSchema.shape.ratings.shape.mean,
++});
++export const historySummary = eventBiSchema.pick({ observedAt: true, ranking: true, ratings: true, durationA: true }).extend({
++  event: historyEvent.extend({
++    scheduledDurationSeconds: z.number().nonnegative().finite(),
++    closedEarly: z.boolean(),
++  }),
++  overview: eventBiSchema.shape.overview.pick({ participations: true, completed: true }),
++});
++
++function utc(value: SQL) {
++  return sql`to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
++}
++function eligibleEvents(condition: SQL, clock: SQL) {
++  return sql`SELECT e.id,e.name,e.timezone,e.starts_at,e.official_ends_at,
++      ${effectiveEventDeadline()} AS closed_at,d.at
++    FROM events e CROSS JOIN (SELECT ${clock} AS at) d
++    WHERE ${eventIsEffectivelyClosed(sql`d.at`)} AND ${effectiveEventDeadline()}<=d.at AND ${condition}`;
++}
++const eventColumns = sql`p.id,p.name,p.timezone,'closed' AS "effectivePhase",
++  ${utc(sql`p.starts_at`)} AS "startsAt",${utc(sql`p.official_ends_at`)} AS "officialEndsAt",
++  ${utc(sql`p.closed_at`)} AS "closedAt"`;
++const databaseClock = sql`transaction_timestamp()`;
++
++function matchesSearch(search: string | undefined) {
++  if (!search) return sql`true`;
++  let code: string | null = null;
++  try {
++    code = normalizeEventAccessCode(search);
++  } catch (error) {
++    if (!(error instanceof EventAccessCodeValidationError)) throw error;
++    // A substring need not itself be a complete, valid entry code.
++    if (/^[A-Za-z0-9-]{1,64}$/.test(search)) code = search.toUpperCase();
++  }
++  const codeMatch = code ? sql`strpos(e.access_code_normalized,${code})>0` : sql`false`;
++  return sql`(strpos(lower(regexp_replace(btrim(e.name),'[[:space:]]+',' ','g')),lower(${search}))>0 OR ${codeMatch})`;
++}
++
++export function closedEventsPageQuery(page: HistoryPage, clock: SQL = databaseClock) {
++  const period = page.period === 'all' ? sql`true` : sql`p.closed_at>=p.at-${Number(page.period) * 24}::integer*interval '1 hour'`;
++  const after = page.cursor ? sql`(p.closed_at,p.id)<(${page.cursor.closedAt}::timestamptz,${page.cursor.id}::uuid)` : sql`true`;
++  return sql`WITH page AS MATERIALIZED (
++    SELECT p.* FROM (${eligibleEvents(matchesSearch(page.search),clock)}) p
++    WHERE ${period} AND ${after}
++    ORDER BY p.closed_at DESC,p.id DESC LIMIT ${page.limit + 1}
++  ), participation_counts AS (
++    SELECT a.event_id,count(*) AS total FROM participations a JOIN page p ON p.id=a.event_id GROUP BY a.event_id
++  ), evaluation_counts AS (
++    SELECT a.event_id,count(*) AS total,avg(v.rating) AS mean
++    FROM evaluations v JOIN participations a ON a.id=v.participation_id JOIN page p ON p.id=a.event_id GROUP BY a.event_id
++  )
++  SELECT ${eventColumns},coalesce(a.total,0)::float8 AS participations,
++    coalesce(v.total,0)::float8 AS "evaluationCount",v.mean::float8 AS "evaluationMean"
++  FROM page p LEFT JOIN participation_counts a ON a.event_id=p.id
++    LEFT JOIN evaluation_counts v ON v.event_id=p.id ORDER BY p.closed_at DESC,p.id DESC`;
++}
++
++export function closedEventIdentificationQuery(eventId: string, clock: SQL = databaseClock) {
++  return sql`SELECT ${eventColumns},${utc(sql`p.at`)} AS "observedAt",
++    extract(epoch FROM p.official_ends_at-p.starts_at)::float8 AS "scheduledDurationSeconds",
++    p.closed_at<p.official_ends_at AS "closedEarly"
++    FROM (${eligibleEvents(sql`e.id=${eventId}::uuid`,clock)}) p`;
++}
+diff --git a/backend/src/events/event-closure.projection.ts b/backend/src/events/event-closure.projection.ts
+index 556ca3d168a537f40373bd5492cc88d3cd163239..ae69d581c59f2c0d2def9f2f20e2bf462ffce56f 100644
+--- a/backend/src/events/event-closure.projection.ts
++++ b/backend/src/events/event-closure.projection.ts
+@@ -7,6 +7,9 @@ export const AUTOMATIC_ADMIN_REASON = "automatic_admin_deadline";
+ export function effectiveEventDeadline(event: SQL = sql`e`): SQL {
+   return sql`LEAST(${event}.operational_deadline_at,${event}.admin_deadline_at)`;
+ }
++export function eventIsEffectivelyClosed(at: SQL, event: SQL = sql`e`): SQL {
++  return sql`(${event}.status='closed' OR ${effectiveEventDeadline(event)}<=${at})`;
++}
+ export function automaticFinalizationReason(event: SQL = sql`e`): SQL {
+   return sql`CASE WHEN ${event}.closure_mode IS NULL THEN ${AUTOMATIC_OPERATIONAL_REASON} ELSE ${AUTOMATIC_ADMIN_REASON} END`;
+ }
+diff --git a/backend/test/integration/admin-event-history.integration.test.ts b/backend/test/integration/admin-event-history.integration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..559e047bae574768a52d3fd3c23efd6c81c9b385
+--- /dev/null
++++ b/backend/test/integration/admin-event-history.integration.test.ts
+@@ -0,0 +1,105 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++import { resolve } from 'node:path';
++import { Pool } from 'pg';
++import { sql, type SQL } from 'drizzle-orm';
++import { PgDialect } from 'drizzle-orm/pg-core';
++import { readMigrationFiles } from 'drizzle-orm/migrator';
++import { closedEventIdentificationQuery, closedEventsPageQuery, encodeHistoryCursor, historyCard, historyQuery, historySummary } from '../../src/events/admin-event-history';
++import { eventBiQuery } from '../../src/events/admin-bi';
++import { assertAdminRoleManagementTestDatabaseUrls, startAdminRoleManagementAfterPreflight } from './admin-role-management-db-guard';
++
++const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, '0')}`;
++const at = '2026-04-15T12:00:00.000000Z';
++const clock = sql`${at}::timestamptz`;
++const hoursFromClock = (hours: number) => new Date(Date.parse(at) + hours * 3600_000).toISOString();
++
++test('ADMIN-10 PostgreSQL: prazo efetivo, períodos, keyset, busca e métricas da ADMIN-09', async () => {
++  const connectionString = assertAdminRoleManagementTestDatabaseUrls(process.env);
++  const pool = new Pool({ connectionString, ssl: false, max: 1, connectionTimeoutMillis: 2000, statement_timeout: 10000 });
++  try {
++    const migrations = readMigrationFiles({ migrationsFolder: resolve(__dirname, '../../drizzle') }).map(m => String(m.folderMillis));
++    await startAdminRoleManagementAfterPreflight(pool, migrations, async () => {
++      const client = await pool.connect();
++      try {
++        await client.query('BEGIN');
++        for (const table of ['events', 'participations', 'evaluations', 'experiences', 'service_sessions', 'queue_entries']) {
++          await client.query(`CREATE TEMP TABLE ${table} ON COMMIT DROP AS SELECT * FROM public.${table} WITH NO DATA`);
++        }
++        const addEvent = (n: number, deadlineHours: number, status: string, mode: string | null = null,
++          adminHours: number | null = null, name = `Arena ${n}`, code = `CODE-${n}`) =>
++          client.query(`INSERT INTO events(id,name,access_code_normalized,timezone,starts_at,official_ends_at,operational_deadline_at,
++            status,closure_mode,closure_requested_at,admin_deadline_at) VALUES
++            ($1,$2,$3,'UTC',$4,$5,$6,$7,$8,$9,$10)`, [id(n), name, code, hoursFromClock(deadlineHours - 2),
++            hoursFromClock(deadlineHours - 0.5), hoursFromClock(deadlineHours), status, mode,
++            adminHours === null ? null : hoursFromClock(mode === 'immediate' ? adminHours : adminHours - 0.25),
++            adminHours === null ? null : hoursFromClock(adminHours)]);
++        await addEvent(1, -168, 'open', null, null, 'Arena   Norte %_');
++        await addEvent(2, -168, 'closed', null, null, 'Arena Norte Dois');
++        await addEvent(3, -169, 'closed');
++        await addEvent(4, -720, 'closed');
++        await addEvent(5, -721, 'closed');
++        await addEvent(6, -2160, 'closed');
++        await addEvent(7, -2161, 'closed');
++        await addEvent(8, 1, 'closed', 'immediate', -0.5, 'Admin imediato', 'ADMIN-IMEDIATO');
++        await addEvent(9, 1, 'closing', 'controlled', 0, 'Admin controlado', 'ADMIN-CONTROLADO');
++        await addEvent(10, 1, 'closing', 'controlled', 0.25);
++        await addEvent(11, 4, 'scheduled');
++        await addEvent(12, 1, 'closed'); // Inconsistent future deadline must never enter the history.
++        await addEvent(13, 1, 'open');
++
++        const dialect = new PgDialect();
++        const query = async (statement: SQL) => {
++          const { sql: text, params } = dialect.sqlToQuery(statement);
++          return (await client.query(text, params)).rows;
++        };
++        const list = async (params = {}) => (await query(closedEventsPageQuery(historyQuery.parse(params), clock)))
++          .map(row => historyCard.parse(row));
++        const eventIds = (rows: Awaited<ReturnType<typeof list>>) => rows.map(row => row.id);
++        for (const [period, expected] of [['7', [9,8,2,1]], ['30', [9,8,2,1,3,4]],
++          ['90', [9,8,2,1,3,4,5,6]], ['all', [9,8,2,1,3,4,5,6,7]]] as const) {
++          assert.deepEqual(eventIds(await list({ period })), expected.map(id));
++        }
++        assert.deepEqual(eventIds(await list({ search: '  arena norte %_ ' })), [id(1)]);
++        assert.deepEqual(eventIds(await list({ search: ' admin-imediato ' })), [id(8)]);
++        assert.deepEqual(eventIds(await list({ search: 'controlado' })), [id(9)]);
++        const first = await list({ period: '7', search: 'arena norte', limit: '1' });
++        assert.deepEqual(eventIds(first), [id(2),id(1)]); // SQL returns one lookahead row.
++        const cursor = encodeHistoryCursor(first[0].closedAt, first[0].id);
++        assert.deepEqual(eventIds(await list({ period: '7', search: 'arena norte', limit: '1', cursor })), [id(1)]);
++        const identify = (n: number) => query(closedEventIdentificationQuery(id(n), clock));
++        for (const n of [10,11,12,13,999]) assert.deepEqual(await identify(n), []);
++        assert.equal((await identify(8))[0].closedEarly, true);
++        assert.equal((await identify(9))[0].scheduledDurationSeconds, 5400);
++
++        let card = (await list({ search: '%_' }))[0];
++        assert.deepEqual([card.participations, card.evaluationCount, card.evaluationMean], [0,0,null]);
++        for (const [p, event] of [[20,1],[21,1],[22,2]]) {
++          await client.query("INSERT INTO participations(id,event_id,user_id,arena_entered_at,status) VALUES($1,$2,$3,$4,'active')",
++            [id(p), id(event), id(50), hoursFromClock(-170)]);
++        }
++        await client.query("INSERT INTO evaluations(id,participation_id,rating,comment) VALUES($1,$2,2,'PRIVADO'),($3,$4,1,NULL)",
++          [id(30),id(20),id(31),id(22)]);
++        await client.query('UPDATE evaluations SET rating=5 WHERE id=$1', [id(30)]);
++        await client.query("INSERT INTO experiences(id,event_id,name) VALUES($1,$2,'Experiência')", [id(40),id(1)]);
++        await client.query('INSERT INTO queue_entries(id,participation_id) VALUES($1,$2)', [id(41),id(20)]);
++        await client.query("INSERT INTO service_sessions(id,queue_entry_id,experience_id,status,resolved_at) VALUES($1,$2,$3,'completed',$4)",
++          [id(42),id(41),id(40),hoursFromClock(-169)]);
++        card = (await list({ search: '%_' }))[0];
++        assert.deepEqual([card.participations,card.evaluationCount,card.evaluationMean],[2,1,5]);
++        const [event] = await identify(1);
++        const [{ metrics }] = await query(eventBiQuery(id(1)));
++        const summary = historySummary.parse({ ...metrics, event, observedAt: event.observedAt });
++        assert.equal(summary.overview.participations,card.participations);
++        assert.equal(summary.ratings.mean,card.evaluationMean);
++        assert.equal(summary.ratings.count,card.evaluationCount);
++        assert.equal(summary.ratings.distribution[4].count,1);
++        assert.equal(summary.ranking.reduce((total,row)=>total+row.completed,0),summary.overview.completed);
++        assert.deepEqual(summary.durationA,{ population:1,meanSeconds:3600 });
++        assert.doesNotMatch(JSON.stringify(summary), /PRIVADO|audience|durationB/);
++      } finally {
++        try { await client.query('ROLLBACK'); } finally { client.release(); }
++      }
++    });
++  } finally { await pool.end(); }
++});
+diff --git a/backend/test/unit/admin-configuration-http.test.ts b/backend/test/unit/admin-configuration-http.test.ts
+index 055a9d88ee40a987a3be66cc1a64fcfdbc532f3d..5864d476fce1575ad678cdff209a1229e8797a71 100644
+--- a/backend/test/unit/admin-configuration-http.test.ts
++++ b/backend/test/unit/admin-configuration-http.test.ts
+@@ -61,7 +61,7 @@ const routes: Route[] = [
+ ];
+ function record(method: string, actor: Actor, input?: unknown) {
+   calls.push({ method, actor, input });
+-  if (actor.userId === staffId) throw new AdminConfigurationError("admin_required");
++  if (actor.userId === staffId || actor.userId === id(95)) throw new AdminConfigurationError("admin_required");
+   if (failure) throw failure;
+ }
+ @Module({ controllers: [AdminConfigurationController, AdminScheduleController, AdminExternalQueueController, AdminCloseController], providers: [
+@@ -72,12 +72,15 @@ function record(method: string, actor: Actor, input?: unknown) {
+     if (token === "staff-list-unverified" || token === "staff-list-no-totp") {
+       return { userId: token === "staff-list-unverified" ? unverifiedId : withoutTotpId, sessionId, roles: ["admin"] };
+     }
++    if (token === "participant") return { userId: id(95), sessionId, roles: ["participante"] };
+     if (token !== "unit-admin" && token !== "staff") throw new ProblemException({ status: 401, code: "INVALID_ACCESS_TOKEN", typeSlug: "invalid-access-token", title: "Token inválido", detail: "Token inválido." });
+     return { userId: token === "staff" ? staffId : userId, sessionId, roles: token === "staff" ? ["staff"] : ["admin"] };
+   } } },
+   { provide: AdminConfigurationService, useValue: { async mutate(input: MutationInput) { record("mutate", { userId: input.userId, sessionId: input.sessionId }, input); return result; } } },
+   { provide: AdminConfigurationQueryService, useValue: {
+     bi: async (actor: Actor, target: string) => { record("bi", actor, target); return readResult; },
++    history: async (actor: Actor, query: unknown) => { record("history", actor, query); return readResult; },
++    summary: async (actor: Actor, target: string) => { record("summary", actor, target); return readResult; },
+     events: async (actor: Actor, query: unknown) => { record("events", actor, query); return readResult; },
+     event: async (actor: Actor, target: string) => { record("event", actor, target); return readResult; },
+     readiness: async (actor: Actor, target: string) => { record("readiness", actor, target); return readResult; },
+@@ -113,6 +116,30 @@ function problem(r: supertest.Response, status: number, code: string) {
+   assert.equal(r.status, status, JSON.stringify(r.body)); assert.equal(r.body.status, status); assert.equal(r.body.code, code); assert.match(r.headers["content-type"], /application\/problem\+json/);
+ }
+ 
++test("ADMIN-10 rotas exatas, validação, sessão, TOTP e papéis", async () => {
++  const history: Route = { name: "history", method: "get", path: "/admin/events/history",
++    status: 200, response: { items: [], nextCursor: null } };
++  const summary: Route = { name: "summary", method: "get", path: `/admin/events/${eventId}/summary`,
++    status: 200, response: { event: { id: eventId } } };
++  for (const route of [history, summary]) {
++    reset(route);
++    const ok = await request(route);
++    assert.equal(ok.status, 200);
++    assert.equal(ok.headers["cache-control"], "no-store");
++    assert.deepEqual(calls[0], { method: route.name, actor: { userId, sessionId },
++      input: route === history ? { limit: 20, period: 'all' } : eventId });
++    for (const token of ["staff", "participant"]) problem(await request(route, route.path, token), 403, "ADMIN_REQUIRED");
++    problem(await request(route, route.path, "no-2fa"), 401, "ADMIN_2FA_REQUIRED");
++    problem(await request(route, route.path, "revoked"), 401, "SESSION_REVOKED");
++  }
++  reset(history);
++  problem(await request(history).query({ period: "14", cursor: "invalid" }), 400, "VALIDATION_ERROR");
++  problem(await request(summary, "/admin/events/invalid/summary"), 400, "VALIDATION_ERROR");
++  assert.equal(calls.length, 0);
++  failure = new AdminConfigurationError("resource_not_found");
++  problem(await request(summary), 404, "RESOURCE_NOT_FOUND");
++});
++
+ routes.push({ name: "staff", method: "get", path: `/admin/events/${eventId}/staff`, response: { eventId, items: [] }, status: 200 });
+ 
+ test("ADMIN-07 GET Operação usa somente ator/sessão autenticados e não é armazenável em cache", async () => {
+diff --git a/backend/test/unit/admin-configuration.test.ts b/backend/test/unit/admin-configuration.test.ts
+index c97e9c01d59404e9e1070eefc150a8ea0bb292ec..1ba78cc743e12d887bb888aad94351bba7b1955d 100644
+--- a/backend/test/unit/admin-configuration.test.ts
++++ b/backend/test/unit/admin-configuration.test.ts
+@@ -16,6 +16,7 @@ import {
+ import { AdminConfigurationQueryService } from "../../src/events/admin-configuration-query.service";
+ import { AdminConfigurationService, configurationFingerprint, CONFIGURATION_OPERATIONS, type ConfigurationInput } from "../../src/events/admin-configuration.service";
+ import { configurationMutation } from "../../src/events/admin-configuration.mutation";
++import { closedEventsPageQuery, encodeHistoryCursor, historyQuery } from "../../src/events/admin-event-history";
+ 
+ const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
+ const eventId=id(1),experienceId=id(2),stationId=id(3),userId=id(4),sessionId=id(5);
+@@ -163,7 +164,7 @@ const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntr
+ const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
+ type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
+   absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[];
+-  operation?:object; failOperation?:boolean; bi?:object};
++  operation?:object; failOperation?:boolean; bi?:object; history?:object[]; summary?:object};
+ function readFixture(options:ReadOptions={}){
+   const queries:Array<{text:string;params:unknown[]}>=[];
+   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
+@@ -181,10 +182,69 @@ function readFixture(options:ReadOptions={}){
+     if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
+     if(text.includes('FROM user_roles r JOIN users u'))return {rows:options.staff??[]};
+     if(text.startsWith('WITH people AS'))return {rows:[{metrics:options.bi}]};
++    if(text.startsWith('WITH page AS MATERIALIZED'))return {rows:options.history??[]};
++    if(text.includes('AS "scheduledDurationSeconds"'))return {rows:options.summary?[options.summary]:[]};
+     throw Error('SQL unitário inesperado: '+text);
+   }}as unknown as Client,{schema});
+   return {service:new AdminConfigurationQueryService(database),queries};
+ }
++test('ADMIN-10 paginação precisa, payload reduzido e predicados parametrizados',async()=>{
++  const cursor=encodeHistoryCursor(at,id(12));
++  const page=historyQuery.parse({limit:'1',period:'7',search:"  Arena   %_' ",cursor});
++  assert.deepEqual(page.cursor,{v:1,closedAt:at,id:id(12)});
++  assert.equal(page.search,"Arena %_'");
++  for(const query of [{limit:'51'},{period:'8'},{cursor:cursor+'='},{search:'\ud800'},{eventId}]){
++    assert.equal(historyQuery.safeParse(query).success,false);
++  }
++  const statement=new PgDialect().sqlToQuery(closedEventsPageQuery(page));
++  for(const value of [at,id(12),"Arena %_'",168,2]) assert.ok(statement.params.includes(value));
++  assert.ok(!statement.sql.includes("Arena %_'"));
++  assert.match(statement.sql,/ORDER BY p\.closed_at DESC,p\.id DESC LIMIT/);
++  assert.match(statement.sql,/p\.closed_at>=p\.at-/);
++  const card={id:eventId,name:'Arena',timezone:'UTC',effectivePhase:'closed',startsAt:at,officialEndsAt:at,closedAt:at,
++    participations:3,evaluationCount:0,evaluationMean:null};
++  const f=readFixture({history:[{...card,accessCode:'PRIVADO'},{...card,id:id(2)}]});
++  const result=await f.service.history(actor,page);
++  assert.deepEqual(result.items,[card]);
++  assert.equal(result.nextCursor,encodeHistoryCursor(at,eventId));
++  assert.equal(f.queries.length,4);
++  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
++});
++
++test('ADMIN-10 resumo reaproveita métricas do BI e mantém privados campos alheios ao contrato',async()=>{
++  const identification={id:eventId,name:'Arena',timezone:'UTC',effectivePhase:'closed',startsAt:at,officialEndsAt:at,
++    closedAt:at,observedAt:at,scheduledDurationSeconds:3600,closedEarly:true,accessCode:'PRIVADO'};
++  const bi={overview:{participations:3,arenaEntries:2,completed:1,absent:1},ranking:[{id:experienceId,name:'Experiência',completed:1,percent:100}],
++    ratings:{count:1,mean:5,distribution:[1,2,3,4,5].map(stars=>({stars,count:Number(stars===5),percent:stars===5?100:0})),comments:['PRIVADO']},
++    durationA:{meanSeconds:600,population:1},durationB:{meanSeconds:1200,population:2},audience:{gender:'PRIVADO'}};
++  const f=readFixture({summary:identification,bi});
++  const result=await f.service.summary(actor,eventId);
++  assert.deepEqual(result.overview,{participations:3,completed:1});
++  assert.deepEqual(result.durationA,bi.durationA);
++  assert.deepEqual(result.ranking,bi.ranking);
++  assert.equal(result.ratings.mean,5);
++  assert.equal(result.event.closedEarly,true);
++  for(const key of ['durationB','audience']) assert.equal(Object.hasOwn(result,key),false);
++  assert.ok(!JSON.stringify(result).includes('PRIVADO'));
++  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
++  assert.deepEqual(f.queries[2].params,[eventId]);
++  assert.ok(f.queries[3].params.every(param=>param===eventId));
++  const ineligible=readFixture();
++  await assert.rejects(ineligible.service.summary(actor,eventId),{kind:'resource_not_found'});
++  assert.ok(!ineligible.queries.some(query=>query.text.startsWith('WITH people AS')));
++});
++
++for(const [options,kind] of [[{admin:false},'admin_required'],[{valid:false},'invalid_session'],
++  [{secondFactor:false},'admin_2fa_required'],[{revoked:true},'session_revoked']] as const){
++  test(`ADMIN-10 revalida ${kind} antes das leituras`,async()=>{
++    for(const mode of ['history','summary'] as const){
++      const f=readFixture(options);
++      await assert.rejects(mode==='history'?f.service.history(actor,historyQuery.parse({})):f.service.summary(actor,eventId),{kind});
++      assert.equal(f.queries.length,3);
++      assert.equal(f.queries.at(-1)?.text,'rollback');
++    }
++  });
++}
+ for(const [option,kind]of [["active","account_inactive"],["admin","admin_required"],["valid","invalid_session"],
+   ["revoked","session_revoked"],["expired","session_expired"],["secondFactor","admin_2fa_required"]]as const)test(`E08.13 GET revalida ${kind} sem consultar eventos`,async()=>{
+   const f=readFixture({[option]:option==='revoked'||option==='expired'});
+diff --git a/docs/ADMIN_10_IMPLEMENTACAO.md b/docs/ADMIN_10_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..96fe9d40a981a510a28cc658326f16dcf26468bd
+--- /dev/null
++++ b/docs/ADMIN_10_IMPLEMENTACAO.md
+@@ -0,0 +1,129 @@
++# ADMIN-10 — Histórico Administrativo
++
++Estado final: implementação concluída e homologação funcional e visual aprovada pelo responsável em 27/11/2026, após os ajustes de layout. As evidências consolidadas e a decisão transversal para a ADMIN-10.1 constam no fechamento abaixo. As seções anteriores preservam o histórico das revisões e suas pendências à época.
++
++## Diagnóstico inicial
++
++Branch `feature/admin-analytics`, working tree inicialmente limpo e ADMIN-09 commitada em `82d30e27822967104e1178efaa3ea19f8b968ce8`. O Histórico da navegação real era um destino informativo. A ADMIN-09 já oferecia leitura administrativa em snapshot e agregações reaproveitáveis.
++
++Escopo: lista real exclusivamente de eventos encerrados e resumo individual de leitura. Referências locais: Panorama §3.8, arquitetura do backend e relatório/código ADMIN-09. Os dois prints chegaram após a implementação inicial. O Rascunho de Escopo v0.5 segue indisponível no checkout.
++
++## Contratos e cálculo
++
++As duas rotas usam autenticação de sessão, revalidação SQL de Admin global, conta ativa, sessão vinculada e vigente, TOTP, transação PostgreSQL `repeatable read read only` e `Cache-Control: no-store`. A rota literal de histórico é registrada antes de `:eventId`.
++
++- `GET /api/v1/admin/events/history` aceita `search` opcional (até 180 unidades UTF-16, com validação e normalização da listagem Admin), `period=all|7|30|90`, `limit` de 1 a 50 (padrão 20) e `cursor` opcional. Retorna `{items,nextCursor}`. Cada card inclui `id,name,timezone,effectivePhase,startsAt,officialEndsAt,closedAt,participations,evaluationCount,evaluationMean`. A pesquisa considera nome sem distinção de maiúsculas, com espaços normalizados, e trecho de código ASCII em maiúsculas, usando a normalização canônica para códigos completos. As comparações são literais e parametrizadas, sem devolver o código. Valores inválidos recebem 400.
++- `GET /api/v1/admin/events/:eventId/summary` valida UUID e retorna 404 `RESOURCE_NOT_FOUND` para evento inexistente ou inelegível. O objeto `event` contém a identificação e os horários do card, sem contagens, mais `scheduledDurationSeconds` e `closedEarly` (prazo efetivo anterior ao término oficial). A duração programada é o intervalo do início ao término oficial. A resposta inclui `observedAt`, `overview {participations,completed}`, `ranking`, `ratings` e `durationA {meanSeconds,population}`, com as mesmas definições do BI individual.
++
++A seleção compartilha o predicado de fase encerrada com a projeção administrativa e exige que o prazo efetivo seja alcançado. O prazo é o menor entre `operational_deadline_at` e `admin_deadline_at`, usando o primeiro quando inexiste antecipação. Fechamento imediato usa o instante gravado como prazo Admin. Um prazo controlado vencido entra mesmo com status persistido desatualizado. Eventos em fechamento com prazo futuro ficam de fora, assim como registros inconsistentes com status encerrado e prazo futuro. O scheduler não precisa ter regularizado o estado para a consulta funcionar.
++
++Cada requisição usa `transaction_timestamp()`. Os períodos móveis de 7, 30 e 90 dias equivalem a 168, 720 e 2.160 horas, com limite inferior inclusivo e limite superior inclusivo no instante observado. A ordenação é por prazo efetivo decrescente e UUID decrescente. O cursor versionado preserva ambos, com seis casas decimais no horário. Cada página usa seu próprio snapshot e instante de referência. Um evento pode mudar de posição ou sair de um recorte entre requisições se os dados ou o relógio avançarem.
++
++Nome, período e cursor restringem a consulta antes do limite. Os agregados da listagem são feitos em dois agrupamentos independentes para os eventos da página, incluindo a linha extra usada para detectar a próxima página. Cada participação conta como um registro, inclusive reentradas, e as avaliações usam a nota atual de cada participação avaliada. Ausência de avaliações retorna contagem zero e média nula. O resumo executa diretamente a consulta de BI da ADMIN-09 para o UUID elegível dentro do mesmo snapshot. Reaproveita ranking, notas e Indicador A sem reimplementar fórmulas.
++
++## Aplicativo
++
++A aba Histórico agora apresenta consulta real, pesquisa com debounce de 300 ms, quatro períodos, cards no fuso do evento e paginação. O resumo é aberto na pilha Admin por UUID, com retorno à mesma aba e Histórico selecionado na barra. Reutiliza cabeçalho, tema, formatação de datas, botões, avisos e componentes de ranking e avaliações extraídos do BI individual. O resumo apresenta duração programada, cinco indicadores, cinco faixas de estrelas e estados de ausência de dados. A tela BI individual mantém suas métricas, navegação e ciclo de atualização.
++
++Lista e resumo consultam inicialmente, ao recuperar foco e por ação manual. A lista recompõe somente as páginas que já estavam carregadas na atualização, mantendo-as visíveis até o novo resultado e preservando a posição quando a instância da rota continua montada. Bloqueia sobreposição no mesmo contexto, descarta cursores repetidos e deduplica cards por UUID. Mudanças de conta, sessão, cliente, evento, busca, filtro ou foco invalidam respostas obsoletas. Falha de rede preserva dados do mesmo contexto com aviso. Negação de acesso ou recurso indisponível limpa os dados anteriores. O Histórico não usa polling.
++
++## Privacidade e limites
++
++Comentários ficam indisponíveis. Nenhum texto livre de avaliação ou identificador de participante é consultado ou devolvido. Faixa etária permanece sem snapshot histórico adequado. A divulgação de gênero aguarda a política de privacidade. Os endpoints não consultam dados demográficos e não expõem parâmetros de liberação. Localização, exportação, BI Geral, comparação e ações operacionais ficam fora desta entrega. A homologação do layout em aparelho permanece pendente.
++
++## Arquivos
++
++- Backend: `admin-event-history.ts`, `admin-configuration.controller.ts`, `admin-configuration-query.service.ts`, `admin-configuration.projection.ts` e `event-closure.projection.ts` em `backend/src/events/`.
++- Aplicativo: `AdminDemoNavigator.js`, `AdminRealHistoryScreen.js`, `AdminHistorySummaryScreen.js`, `useAdminHistory.js`, `AdminRealEventBiScreen.js`, `components/AdminLiveScreen.js` e `components/AdminBiResults.js` em `app/screens/admin/`, mais `adminHistoryService.js` e `adminBiService.js` em `app/services/`.
++- Testes: `adminHistory.test.cjs`, `adminNavigation.test.cjs` e `roleRoutingIntegration.test.cjs` em `app/tests/`. No backend, `admin-configuration.test.ts`, `admin-configuration-http.test.ts` e `admin-event-history.integration.test.ts`.
++- Evidência única: `qa-evidence/ADMIN_10-changes.diff`, relativa ao HEAD inicial, excluída do próprio conteúdo.
++
++## Validação preparada
++
++Frontend cobre navegação, paginação concorrente, deduplicação, debounce, datas, troca de contexto, retomada por foco, atualização manual, falhas, vazios e privacidade. Backend simulado cobre registro das rotas, sessão/TOTP/papéis, parâmetros, snapshot somente leitura, resposta reduzida, 404 e reuso do BI. A integração PostgreSQL prepara tabelas temporárias com tipos reais e rollback, usando o guard legado da campanha ADMIN-09. Cobre fechamento natural com status desatualizado, imediato e controlado, prazo futuro, fronteiras móveis, busca literal e por código, desempate e paginação, reentradas, avaliações editadas e paridade dos agregados. O ensaio SQL não cobre HTTP com banco real, constraints das fixtures ou desempenho.
++
++Comandos preparados para a próxima campanha com Luna Medium, após conferir branch, ambiente isolado e scripts:
++
++```powershell
++$env:NODE_ENV = 'test'
++# No diretório app
++node --test tests/adminHistory.test.cjs tests/adminBi.test.cjs tests/adminRealEvents.test.cjs tests/adminNavigation.test.cjs tests/roleRoutingIntegration.test.cjs
++npm.cmd test
++# No diretório backend
++node --import tsx --test test/unit/admin-bi.test.ts test/unit/admin-configuration.test.ts test/unit/admin-configuration-http.test.ts
++npm.cmd run typecheck:test
++node node_modules/typescript/bin/tsc --noEmit --incremental false -p tsconfig.json
++# Integração somente após autorização explícita por campanha e qualificação do destino
++node --import tsx --test --test-concurrency=1 test/integration/admin-event-history.integration.test.ts
++```
++
++Para a integração, qualificar previamente a role e o banco dedicado `arenago_roles_test` em `127.0.0.1:55432`, com as três URLs idênticas exigidas pela guarda, `NODE_ENV=test`, checagem de identidade, privilégios e migrations existentes. Confirmar acesso somente leitura às tabelas públicas usadas e permissão para fixtures temporárias. Interromper se qualquer confirmação falhar. O destino `arenago_events_test` da INFRA-01 está fora desta campanha.
++
++## Inspeções desta implementação
++
++TypeScript `createSourceFile` e Babel parser aceitaram os 20 arquivos de código e testes alterados. A decodificação UTF-8 estrita passou. `git diff --check` não apontou erros. A integridade da evidência é conferida por aplicação e reversão isoladas sobre o HEAD inicial e comparação do conteúdo, com SHA-256 informado na entrega.
++
++Testes, typechecks, lint, builds e PostgreSQL aguardam campanha posterior. A aprovação final depende de validação independente e homologação visual pelo responsável.
++
++## Complementação das referências visuais
++
++Comparação estática com os prints “Admin — Histórico” e “Admin — Histórico — Evento específico”.
++
++- **Histórico de eventos.** A marca ficava à direita e os cards apresentavam horários e indicadores como texto corrido. O cabeçalho agora alinha a marca à esquerda. O aviso ganhou ícone e contorno, o campo usa o texto do print e os filtros ganharam estados ativo e inativo com quebra de linha. Os cards agrupam nome, selo de encerramento e datas junto ao ícone de calendário, destacam Participações, Avaliações e Nota média em blocos e apresentam “Ver resumo” com seta. O ícone é comum aos eventos porque o contrato não fornece categoria visual.
++- **Resumo individual.** O cabeçalho separa marca, selo Admin, retorno e identificação do evento. Os horários e a duração programada ocupam um painel próprio. Os cinco indicadores aparecem em uma grade que se reorganiza conforme a largura. A duração média é identificada como Indicador A e mantém a população elegível. O ranking usa linhas com nome, barra e quantidade. A média e o total de avaliações ficam ao lado da distribuição quando há espaço, com cinco linhas que mostram contagem e percentual.
++- **Privacidade e navegação.** Comentários e perfil do público ganharam seções próprias. Comentários continuam indisponíveis, sem “Ver tudo”. Faixa etária e gênero mostram o motivo da indisponibilidade. A localização foi omitida por falta de dado persistido. A barra inferior mantém Histórico selecionado nas duas telas. A saída continua na Home Admin para preservar o fluxo existente. Os valores vêm dos contratos atuais.
++
++A revisão alterou a apresentação das duas telas, os componentes visuais compartilhados `AdminLiveScreen`, `AdminLiveUI` e `AdminBiResults`, e acrescentou `AdminHistoryUI`. A apresentação compacta de ranking e avaliações é optativa e usada no Histórico. Uma asserção visual existente passou a verificar “Participações” com a nova quebra entre valor e rótulo. Contratos, backend, busca, filtros, paginação e cálculos foram preservados.
++
++Inspeções desta rodada: sintaxe por Babel e TypeScript, decodificação UTF-8 estrita, `git diff --check` e comparação do conteúdo do patch após aplicação e reversão isoladas. A comparação com os prints foi feita por leitura da interface e dos estilos. A aparência em aparelho e em diferentes tamanhos de fonte segue para homologação. Testes, typechecks e operações de banco não foram executados.
++
++## Correção após validação independente
++
++O teste de debounce falhou na validação independente. Por inspeção, `press()` apenas chama o handler no harness. Como a troca de período só era aplicada pelo `act()` que inseria o texto, o hook recebia as duas mudanças no mesmo ciclo e suspendia a leitura até o debounce. A chamada intermediária esperada pelo teste não ocorria. Isso explica a divergência na sequência simulada sem apontar defeito no hook.
++
++O teste agora aplica cada interação em seu próprio `act()` e associa respostas a período, busca e cursor. Ele carrega uma página adicional em cada contexto, confirma que tanto a troca de período quanto a busca começam sem cursor e verifica os dois lados do limite de 300 ms. Respostas antigas chegam separadamente após cada transição e a última não pode reintroduzir o botão de paginação.
++
++Na revisão dos demais casos, a paginação passou a reutilizar a resposta associada ao cursor, e os testes do resumo passaram a distinguir requisições pela rota e pela conta simulada. Os atrasos simulados são resolvidos no `finally`, após a desmontagem. O teste de debounce também restaura os timers no `finally`. O código de produção foi preservado. A correção foi inspecionada estaticamente e aguarda nova execução direcionada.
++
++## Correção da navegação de retorno
++
++Na campanha seguinte, o frontend encerrou naturalmente com 1.001 de 1.002 testes aprovados, sem cancelamentos ou casos ignorados. O debounce passou. A única falha informada foi o retorno do resumo para Home no teste de integração de navegação.
++
++A origem da divergência está no `FocusedStack` do harness. Ele renderizava apenas a rota focada e desmontava `AdminTabs` quando o resumo era aberto. No retorno, o `TabRouter` era recriado com Home, sua primeira rota. A implementação do native stack instalada no app mantém as rotas da pilha renderizadas por chave. O resumo usa `goBack()` na pilha Admin e a aba Histórico continua sendo a origem. Assim, a instância da lista mantém busca, período e páginas carregadas enquanto está sob o resumo e pode reconsultá-las no foco.
++
++O harness agora mantém `AdminTabs` montado pela mesma chave sob o resumo, com a pilha e o roteador de abas reais. O teste conserva as asserções de rota, evento e sequência de consultas, e também verifica que Histórico está selecionado na barra após o retorno. O ajuste se limita ao harness e à documentação. A execução do teste corrigido segue para a próxima validação.
++
++## Ajustes finais após homologação visual — 27/11/2026
++
++O responsável informou aprovação funcional, frontend 1.002/1.002, backend 1.359/1.359, integração PostgreSQL 1/1 e ambos os typechecks aprovados na revisão anterior, cujo patch era `A2D26D9CDDEDBC8A6C366F1BF408800466B5BA6ACE35762BB9B0845DF8F0A7AF`. Esses resultados antecedem os ajustes visuais abaixo e não validam automaticamente esta revisão. O encerramento da correção de navegação descrita acima integra essa evidência informada pelo responsável.
++
++No Histórico, os três indicadores passaram a empilhar ícone, valor e rótulo com alinhamento central, usando a largura integral do card e permitindo reorganização quando necessário. Nota média ausente continua representada por travessão, com rótulo curto e descrição acessível explícita de indisponibilidade por ausência de avaliações. Os filtros usam duas colunas por padrão e quatro a partir de 640 pontos medidos no contêiner, evitando a composição de três mais um. Textos continuam escaláveis e podem ocupar mais linhas dentro da célula, sem limite de linhas ou redução de fonte. Reduzidas as margens da pesquisa e do subtítulo exclusivo do Histórico; áreas interativas continuam com pelo menos 44 pontos.
++
++No resumo, horários e duração programada ocupam linhas separadas, sem disputar largura. A formatação da duração programada usa dias a partir de 24 horas e preserva horas, minutos e segundos restantes, sem alterar o contrato ou os cálculos backend. Os quatro primeiros indicadores seguem a ordem participações/avaliações, nota média/conclusões, em duas colunas responsivas. O Indicador A ocupa toda a largura abaixo, com título, valor destacado e identificação/população secundárias; definição e cálculo preservados. Mensagens de comentários, faixa etária e gênero foram abreviadas conforme solicitado, mantendo todos os bloqueios. Ranking e distribuição de avaliações foram preservados.
++
++Arquivos ajustados nesta rodada: `AdminRealHistoryScreen.js`, `AdminHistorySummaryScreen.js`, `components/AdminHistoryUI.js`, estilo `historySubtitle` de `components/AdminLiveScreen.js`, `app/tests/adminHistory.test.cjs`, `app/tests/roleRoutingIntegration.test.cjs`, este relatório e a evidência acumulada. O estilo compartilhado alterado é condicionado a `historyHeader`, sem afetar a ADMIN-09. Testes preparados atualizam os textos esperados, verificam acessibilidade da nota ausente, identificação/população A e formatação de dias com restos. Navegação, filtros, busca, paginação e atualizações não foram alterados.
++
++Limitação de referência: o anexo desta rodada contém somente o roteiro textual; os seis prints reais citados não estavam disponibilizados nesta sessão nem entre os assets encontrados. Os ajustes seguem os problemas descritos, sem afirmar inspeção dessas seis capturas. A aparência final e fontes ampliadas devem ser reconferidas no aparelho pelo responsável.
++
++Inspeções desta rodada: parsers Babel/TypeScript dos arquivos de código do patch, decodificação UTF-8 estrita, `git diff --check`, aplicação isolada na base `82d30e27822967104e1178efaa3ea19f8b968ce8`, comparação de blobs e reversão contra working tree. Índice real preservado. Testes, typechecks e builds não executados; nenhum banco acessado.
++
++## Encerramento definitivo — 27/11/2026
++
++O responsável aprovou a homologação funcional e visual após os ajustes de layout e informou os seguintes resultados efetivamente obtidos nas respectivas revisões:
++
++| Revisão | Evidência informada pelo responsável | Resultado |
++| --- | --- | --- |
++| Anterior aos ajustes visuais | Frontend completo | 1.002/1.002 aprovados |
++| Anterior aos ajustes visuais | Backend completo | 1.359/1.359 aprovados |
++| Anterior aos ajustes visuais | Integração PostgreSQL | 1/1 aprovado |
++| Anterior aos ajustes visuais | Typecheck da aplicação e dos testes | Ambos aprovados |
++| Final, após ajustes visuais | Frontend direcionado | 128/128 aprovados |
++| Final, após ajustes visuais | Homologação funcional e visual | Aprovada pelo responsável |
++
++O patch da revisão visual validada possui SHA-256 `C5F14DC80424A1AA92A9340864B504576928F411343393E1E3449A0342453CEA`. Os 128 casos direcionados constituem uma reexecução sobre o escopo afetado e não são somados aos 1.002 casos da campanha completa como testes distintos. Não se atribui à revisão visual uma nova execução integral do backend, da integração ou dos typechecks. Nenhuma campanha foi executada pelo Codex nesta consolidação.
++
++Nova decisão expressa do responsável: o Admin global deverá acessar os comentários das avaliações e o perfil agregado do público. A implementação ocorrerá na task transversal **ADMIN-10.1**, abrangendo também a ADMIN-09 e preparando reutilização pela ADMIN-11. Esta decisão registra o escopo futuro; os bloqueios atuais de comentários e perfil permanecem temporariamente nesta entrega, sem consulta ou divulgação adicional de dados. As limitações de histórico adequado para faixa etária permanecem registradas e deverão ser consideradas nessa task.
++
++ADMIN-10 encerrada no escopo entregue. A aprovação visual informada pelo responsável supera a pendência de homologação das seções históricas, sem afirmar que o Codex inspecionou as seis capturas indisponíveis nesta sessão. Exportação, BI Geral e demais funcionalidades fora do escopo continuam reservados às tasks correspondentes.
++
++Neste fechamento foram alterados exclusivamente este relatório e `qa-evidence/ADMIN_10-changes.diff`. Evidência acumulada regenerada na base `82d30e27822967104e1178efaa3ea19f8b968ce8`, incluindo o relatório final e excluindo a si própria. Integridade conferida por inventário, aplicação em índice e objetos temporários, correspondência de blobs com working tree, reversão e `git diff --check`; índice real vazio. Branch `feature/admin-analytics`, HEAD preservado. Não houve alteração de código/testes, execução de campanhas, acesso a bancos ou commit.

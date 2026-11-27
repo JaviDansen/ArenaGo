@@ -20,6 +20,19 @@ export function AdminIcon({ name, color = c.accent, size = 24 }) {
       part('divider', { left: 3, top: 10, width: 18, borderWidth: 0, borderTopWidth: 1.6 }),
       ...[7, 16].map(left => part(`ring${left}`, { left, top: 2, height: 6, borderWidth: 0, borderLeftWidth: 1.6 })),
       part('day', { left: 8, top: 15, width: 4, height: 2, borderWidth: 0, backgroundColor: color })]; break;
+    case 'star': shapes = <Text allowFontScaling={false}
+      style={{ color, textAlign: 'center', fontSize: 25, lineHeight: 24 }}>☆</Text>; break;
+    case 'shield': shapes = [
+      part('edge', { left: 4, top: 2, width: 16, height: 20, borderTopLeftRadius: 4, borderTopRightRadius: 4,
+        borderBottomLeftRadius: 8, borderBottomRightRadius: 8 }),
+      part('check', { left: 8, top: 7, width: 9, height: 5, borderTopWidth: 0, borderRightWidth: 0,
+        transform: [{ rotate: '-45deg' }] }),
+    ]; break;
+    case 'comment': shapes = [
+      part('box', { left: 2, top: 3, width: 20, height: 15, borderRadius: 5 }),
+      part('tail', { left: 6, top: 17, height: 5, borderWidth: 0, borderLeftWidth: 1.6, transform: [{ rotate: '36deg' }] }),
+      ...[6, 11, 16].map(left => part(`dot${left}`, { left, top: 9, width: 2, height: 2, borderRadius: 2 })),
+    ]; break;
     case 'folder': shapes = [part('tab', { left: 2, top: 4, width: 10, height: 7, borderRadius: 2 }),
       part('box', { left: 2, top: 8, width: 20, height: 14, borderRadius: 2, backgroundColor: c.surface })]; break;
     case 'plus': shapes = [part('h', { left: 2, top: 12, width: 20, borderWidth: 0, borderTopWidth: 1.6 }),

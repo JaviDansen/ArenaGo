@@ -16,6 +16,7 @@ import {
 import { AdminConfigurationQueryService } from "../../src/events/admin-configuration-query.service";
 import { AdminConfigurationService, configurationFingerprint, CONFIGURATION_OPERATIONS, type ConfigurationInput } from "../../src/events/admin-configuration.service";
 import { configurationMutation } from "../../src/events/admin-configuration.mutation";
+import { closedEventsPageQuery, encodeHistoryCursor, historyQuery } from "../../src/events/admin-event-history";
 
 const id=(n:number)=>`abcdef00-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const eventId=id(1),experienceId=id(2),stationId=id(3),userId=id(4),sessionId=id(5);
@@ -163,7 +164,7 @@ const experience={id:experienceId,eventId,name:"Experiência",queueAcceptingEntr
 const station={id:stationId,experienceId,label:"Estação",availability:"available",pendingServiceSessionId:null,createdAt:at,updatedAt:at};
 type ReadOptions={active?:boolean;admin?:boolean;valid?:boolean;revoked?:boolean;expired?:boolean;secondFactor?:boolean;emailVerified?:boolean;
   absent?:boolean;events?:ConfigurationRow[];experiences?:typeof experience[];stations?:typeof station[];staff?:object[];
-  operation?:object; failOperation?:boolean; bi?:object};
+  operation?:object; failOperation?:boolean; bi?:object; history?:object[]; summary?:object};
 function readFixture(options:ReadOptions={}){
   const queries:Array<{text:string;params:unknown[]}>=[];
   const database=drizzle({async query(config:{text:string},params:unknown[]=[]){
@@ -181,9 +182,68 @@ function readFixture(options:ReadOptions={}){
     if(text.startsWith('SELECT s.id,s.experience_id'))return {rows:options.stations??[station]};
     if(text.includes('FROM user_roles r JOIN users u'))return {rows:options.staff??[]};
     if(text.startsWith('WITH people AS'))return {rows:[{metrics:options.bi}]};
+    if(text.startsWith('WITH page AS MATERIALIZED'))return {rows:options.history??[]};
+    if(text.includes('AS "scheduledDurationSeconds"'))return {rows:options.summary?[options.summary]:[]};
     throw Error('SQL unitário inesperado: '+text);
   }}as unknown as Client,{schema});
   return {service:new AdminConfigurationQueryService(database),queries};
+}
+test('ADMIN-10 paginação precisa, payload reduzido e predicados parametrizados',async()=>{
+  const cursor=encodeHistoryCursor(at,id(12));
+  const page=historyQuery.parse({limit:'1',period:'7',search:"  Arena   %_' ",cursor});
+  assert.deepEqual(page.cursor,{v:1,closedAt:at,id:id(12)});
+  assert.equal(page.search,"Arena %_'");
+  for(const query of [{limit:'51'},{period:'8'},{cursor:cursor+'='},{search:'\ud800'},{eventId}]){
+    assert.equal(historyQuery.safeParse(query).success,false);
+  }
+  const statement=new PgDialect().sqlToQuery(closedEventsPageQuery(page));
+  for(const value of [at,id(12),"Arena %_'",168,2]) assert.ok(statement.params.includes(value));
+  assert.ok(!statement.sql.includes("Arena %_'"));
+  assert.match(statement.sql,/ORDER BY p\.closed_at DESC,p\.id DESC LIMIT/);
+  assert.match(statement.sql,/p\.closed_at>=p\.at-/);
+  const card={id:eventId,name:'Arena',timezone:'UTC',effectivePhase:'closed',startsAt:at,officialEndsAt:at,closedAt:at,
+    participations:3,evaluationCount:0,evaluationMean:null};
+  const f=readFixture({history:[{...card,accessCode:'PRIVADO'},{...card,id:id(2)}]});
+  const result=await f.service.history(actor,page);
+  assert.deepEqual(result.items,[card]);
+  assert.equal(result.nextCursor,encodeHistoryCursor(at,eventId));
+  assert.equal(f.queries.length,4);
+  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
+});
+
+test('ADMIN-10 resumo reaproveita métricas do BI e mantém privados campos alheios ao contrato',async()=>{
+  const identification={id:eventId,name:'Arena',timezone:'UTC',effectivePhase:'closed',startsAt:at,officialEndsAt:at,
+    closedAt:at,observedAt:at,scheduledDurationSeconds:3600,closedEarly:true,accessCode:'PRIVADO'};
+  const bi={overview:{participations:3,arenaEntries:2,completed:1,absent:1},ranking:[{id:experienceId,name:'Experiência',completed:1,percent:100}],
+    ratings:{count:1,mean:5,distribution:[1,2,3,4,5].map(stars=>({stars,count:Number(stars===5),percent:stars===5?100:0})),comments:['PRIVADO']},
+    durationA:{meanSeconds:600,population:1},durationB:{meanSeconds:1200,population:2},audience:{gender:'PRIVADO'}};
+  const f=readFixture({summary:identification,bi});
+  const result=await f.service.summary(actor,eventId);
+  assert.deepEqual(result.overview,{participations:3,completed:1});
+  assert.deepEqual(result.durationA,bi.durationA);
+  assert.deepEqual(result.ranking,bi.ranking);
+  assert.equal(result.ratings.mean,5);
+  assert.equal(result.event.closedEarly,true);
+  for(const key of ['durationB','audience']) assert.equal(Object.hasOwn(result,key),false);
+  assert.ok(!JSON.stringify(result).includes('PRIVADO'));
+  assert.equal(f.queries[0].text,'begin isolation level repeatable read read only');
+  assert.deepEqual(f.queries[2].params,[eventId]);
+  assert.ok(f.queries[3].params.every(param=>param===eventId));
+  const ineligible=readFixture();
+  await assert.rejects(ineligible.service.summary(actor,eventId),{kind:'resource_not_found'});
+  assert.ok(!ineligible.queries.some(query=>query.text.startsWith('WITH people AS')));
+});
+
+for(const [options,kind] of [[{admin:false},'admin_required'],[{valid:false},'invalid_session'],
+  [{secondFactor:false},'admin_2fa_required'],[{revoked:true},'session_revoked']] as const){
+  test(`ADMIN-10 revalida ${kind} antes das leituras`,async()=>{
+    for(const mode of ['history','summary'] as const){
+      const f=readFixture(options);
+      await assert.rejects(mode==='history'?f.service.history(actor,historyQuery.parse({})):f.service.summary(actor,eventId),{kind});
+      assert.equal(f.queries.length,3);
+      assert.equal(f.queries.at(-1)?.text,'rollback');
+    }
+  });
 }
 for(const [option,kind]of [["active","account_inactive"],["admin","admin_required"],["valid","invalid_session"],
   ["revoked","session_revoked"],["expired","session_expired"],["secondFactor","admin_2fa_required"]]as const)test(`E08.13 GET revalida ${kind} sem consultar eventos`,async()=>{

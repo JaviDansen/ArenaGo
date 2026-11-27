@@ -12,6 +12,8 @@ import { bindStaffSession } from './adminStaffSession';
 import { AdminStaffSession, AdminSetupIntents } from './adminSetupIntents';
 import AdminEventManagementInfoScreen from './AdminEventManagementInfoScreen';
 import AdminPendingScreen from './AdminPendingScreen';
+import AdminRealHistoryScreen from './AdminRealHistoryScreen';
+import AdminHistorySummaryScreen from './AdminHistorySummaryScreen';
 import AdminBottomBar from './components/AdminBottomBar';
 
 const Stack = createNativeStackNavigator(), Tabs = createBottomTabNavigator();
@@ -23,7 +25,7 @@ function AdminTabs() {
       if (!event.defaultPrevented) navigation.navigate(name);
     }} onLongPress={name => navigation.emit({ type: 'tabLongPress', target: state.routes.find(item => item.name === name).key })} />}>
     <Tabs.Screen name="Home" component={AdminHomeScreen} />
-    <Tabs.Screen name="Histórico" component={AdminPendingScreen} />
+    <Tabs.Screen name="Histórico" component={AdminRealHistoryScreen} />
     <Tabs.Screen name="BI" component={AdminPendingScreen} />
   </Tabs.Navigator>;
 }
@@ -43,6 +45,7 @@ export default function AdminDemoNavigator() {
         <Stack.Screen name="AdminRealEvent" component={AdminRealEventScreen} />
         <Stack.Screen name="AdminEventManagementInfo" component={AdminEventManagementInfoScreen} />
         <Stack.Screen name="AdminEventSetup" component={AdminEventSetupScreen} />
+        <Stack.Screen name="AdminHistorySummary" component={AdminHistorySummaryScreen} />
       </Stack.Navigator>
     </AdminStaffSession.Provider>
   </AdminSetupIntents.Provider>;

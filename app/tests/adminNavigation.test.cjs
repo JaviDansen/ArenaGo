@@ -149,7 +149,7 @@ test('navegador Admin registra apenas destinos reais e respeita identidade', () 
   const stack = () => navigator().props.children.props.children;
   const tree = stack();
   assert.equal(tree.key, owner);
-  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup']);
+  assert.deepEqual(Array.from(tree.props.children, node => node.props.name), ['AdminTabs', 'AdminEvents', 'AdminRealEvent', 'AdminEventManagementInfo', 'AdminEventSetup', 'AdminHistorySummary']);
   const tabs = tree.props.children[0].props.component();
   assert.deepEqual(Array.from(tabs.props.children, node => node.props.name), ['Home', 'Histórico', 'BI']);
   owner = 'other:session:2'; assert.notEqual(stack().key, tree.key);
