@@ -89,6 +89,10 @@ const DRAWINGS = {
       <View style={[styles.refreshHead, { borderLeftColor: color }]} />
     </View>
   ),
+  // PARTICIPANTE-02A: indicador de sucesso (L de bordas girado 45°).
+  check: (color) => (
+    <View style={[styles.checkMark, { borderColor: color }]} />
+  ),
 };
 
 export const LINE_ICON_NAMES = Object.keys(DRAWINGS);
@@ -253,6 +257,17 @@ const styles = StyleSheet.create({
     borderTopColor: 'transparent',
     borderBottomColor: 'transparent',
     transform: [{ rotate: '90deg' }],
+  },
+  checkMark: {
+    width: 6.5,
+    height: 12,
+    marginTop: -2.5,
+    borderRightWidth: STROKE + 0.2,
+    borderBottomWidth: STROKE + 0.2,
+    borderTopWidth: 0,
+    borderLeftWidth: 0,
+    borderBottomRightRadius: 1,
+    transform: [{ rotate: '45deg' }],
   },
 });
 

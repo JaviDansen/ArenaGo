@@ -1,0 +1,848 @@
+diff --git a/app/components/ui/LineIcon.js b/app/components/ui/LineIcon.js
+index 23dd714..3ba3100 100644
+--- a/app/components/ui/LineIcon.js
++++ b/app/components/ui/LineIcon.js
+@@ -89,6 +89,10 @@ const DRAWINGS = {
+       <View style={[styles.refreshHead, { borderLeftColor: color }]} />
+     </View>
+   ),
++  // PARTICIPANTE-02A: indicador de sucesso (L de bordas girado 45°).
++  check: (color) => (
++    <View style={[styles.checkMark, { borderColor: color }]} />
++  ),
+ };
+ 
+ export const LINE_ICON_NAMES = Object.keys(DRAWINGS);
+@@ -254,6 +258,17 @@ const styles = StyleSheet.create({
+     borderBottomColor: 'transparent',
+     transform: [{ rotate: '90deg' }],
+   },
++  checkMark: {
++    width: 6.5,
++    height: 12,
++    marginTop: -2.5,
++    borderRightWidth: STROKE + 0.2,
++    borderBottomWidth: STROKE + 0.2,
++    borderTopWidth: 0,
++    borderLeftWidth: 0,
++    borderBottomRightRadius: 1,
++    transform: [{ rotate: '45deg' }],
++  },
+ });
+ 
+ export default LineIcon;
+diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaScreen.js
+index 35a31d6..9c345d1 100644
+--- a/app/screens/arena/RealArenaScreen.js
++++ b/app/screens/arena/RealArenaScreen.js
+@@ -4,14 +4,15 @@ import { StatusBar } from 'expo-status-bar';
+ import * as Crypto from 'expo-crypto';
+ import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
+ 
+-import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
++import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
+ import { useAuth } from '../../context/AuthContext';
+ import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
+ import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
+ import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
+ import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
+ import { createQueueAlertManager } from '../../services/queueAlertService';
+-import { colors, spacing, typography } from '../../theme';
++import { colors, radii, spacing, typography } from '../../theme';
++import { formatExperienceCount, formatQueuePosition, formatWaitingCount } from '../../utils/arenaQueuePresentation';
+ 
+ /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
+ export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
+@@ -401,13 +402,18 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+   const pendingHere = pending?.participationId === participationId;
+   const hasOtherPending = Boolean(pending && !pendingHere);
+   const lockActions = busy || loading || Boolean(entry) || Boolean(pending);
++  // PARTICIPANTE-02A: derivações somente de apresentação; os dados continuam vindo do servidor.
++  const waiting = entry?.status === 'waiting';
++  const positionText = waiting ? formatQueuePosition(entry.position) : null;
++  const positionLabel = syncStale ? 'Última posição confirmada' : 'Posição';
++  const experienceCount = state ? formatExperienceCount(state.experiences.length) : null;
+ 
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.7} testID="active-arena-background">
+       <StatusBar style="light" />
+       <ScreenHeader
+         title="Minha Arena"
+-        subtitle="Participação ativa · informações do servidor"
++        subtitle="Participação ativa · dados do servidor"
+         showBack={false}
+         rightAction={<Badge label="ATIVA" variant="success" />}
+       />
+@@ -425,9 +431,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+           </View>
+         ) : null}
+         {notice ? (
+-          <View style={styles.noticeCard}>
+-            <Badge label="ATUALIZADO" variant="success" />
+-            <Text style={styles.notice}>{notice}</Text>
++          <View style={styles.noticeRow} accessibilityLiveRegion="polite" testID="arena-queue-notice">
++            <View style={styles.noticeIcon}>
++              <LineIcon name="check" color={colors.semantic.success} size={14} />
++            </View>
++            <Text style={styles.noticeText}>{notice}</Text>
+           </View>
+         ) : null}
+         {syncStale ? (
+@@ -440,25 +448,62 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+         ) : null}
+ 
+         {entry ? (
+-          <Card variant="highlight" style={styles.highlight}>
+-            <Badge label={entry.status === 'waiting' ? 'NA FILA' : 'SUA VEZ'} variant="brand" />
+-            <Text style={styles.sectionTitle}>{entry.status === 'waiting' ? 'Você está na fila' : 'É a sua vez!'}</Text>
+-            <Text style={styles.line}>{entry.experienceName}</Text>
+-            {entry.status === 'waiting'
+-              ? <Text style={styles.position}>Posição {entry.position}º</Text>
+-              : <Text style={styles.position}>Dirija-se à estação: {entry.stationLabel}</Text>}
+-            <Text style={styles.note}>
+-              {syncStale
+-                ? 'A conexão com o servidor oscilou. Tentando reconectar automaticamente...'
+-                : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
++          <Card variant="highlight" style={styles.queueCard} testID="arena-queue-entry-card">
++            <View style={styles.cardTopRow}>
++              <Badge label={waiting ? 'NA FILA' : 'SUA VEZ'} variant={waiting ? 'brand' : 'success'} />
++              <LineIcon
++                name={waiting ? 'queue' : 'door'}
++                color={waiting ? colors.brand.primaryLight : colors.semantic.success}
++                size={22}
++              />
++            </View>
++            <Text style={styles.queueTitle} accessibilityRole="header">
++              {waiting ? 'Você está na fila' : 'É a sua vez!'}
+             </Text>
++            <View style={styles.queueExperienceRow}>
++              <LineIcon name="gamepad" color={colors.text.secondary} size={18} />
++              <Text style={styles.queueExperience} numberOfLines={2}>{entry.experienceName}</Text>
++            </View>
++            {waiting ? (
++              <View
++                style={[styles.positionPanel, syncStale && styles.positionPanelStale]}
++                accessible
++                accessibilityLabel={`${positionLabel} na fila: ${positionText}`}
++                testID="arena-queue-position"
++              >
++                <Text style={styles.positionLine}>
++                  <Text style={styles.positionLabel}>{`${positionLabel} `}</Text>
++                  <Text style={[styles.positionNumber, syncStale && styles.positionNumberStale]}>{positionText}</Text>
++                </Text>
++              </View>
++            ) : (
++              <View style={styles.stationPanel} testID="arena-queue-station">
++                <Text style={styles.stationText}>Dirija-se à estação: {entry.stationLabel}</Text>
++              </View>
++            )}
++            <View style={styles.divider} />
++            <View style={styles.autoUpdateRow}>
++              <LineIcon
++                name={syncStale ? 'alert' : 'refresh'}
++                color={syncStale ? colors.semantic.warning : colors.text.muted}
++                size={14}
++              />
++              <Text style={[styles.autoUpdateText, syncStale && styles.autoUpdateTextStale]}>
++                {syncStale
++                  ? 'A conexão com o servidor oscilou. Exibindo as últimas informações confirmadas; reconectando automaticamente...'
++                  : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
++              </Text>
++            </View>
+           </Card>
+         ) : null}
+ 
+         {!entry && pending ? (
+-          <Card variant="elevated" style={styles.highlight}>
+-            <Badge label="TENTATIVA PENDENTE" variant="warning" />
+-            <Text style={styles.sectionTitle}>Tentativa anterior não confirmada</Text>
++          <Card variant="elevated" style={styles.queueCard}>
++            <View style={styles.cardTopRow}>
++              <Badge label="TENTATIVA PENDENTE" variant="warning" />
++              <LineIcon name="alert" color={colors.semantic.warning} size={20} />
++            </View>
++            <Text style={styles.queueTitle}>Tentativa anterior não confirmada</Text>
+             <Text style={styles.line}>
+               {hasOtherPending
+                 ? 'Há uma solicitação pendente de outra participação nesta conta. Não será criada uma nova entrada.'
+@@ -476,7 +521,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+           </Card>
+         ) : null}
+ 
+-        <Text style={styles.sectionTitle}>Experiências disponíveis</Text>
++        <View style={styles.sectionHeader}>
++          <Text style={styles.sectionTitle} accessibilityRole="header">Experiências disponíveis</Text>
++          {experienceCount ? <Text style={styles.sectionMeta}>{experienceCount}</Text> : null}
++        </View>
+         {state?.experiences.length === 0 ? (
+           <Card variant="default" style={styles.card}>
+             <Text style={styles.line}>Nenhuma experiência cadastrada.</Text>
+@@ -484,14 +532,33 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+         ) : null}
+         {state?.experiences.map((experience) => {
+           const permitted = state.acceptingNewQueueEntries && experience.acceptingNewQueueEntries;
++          const mine = entry?.experienceId === experience.id;
+           return (
+-            <Card key={experience.id} variant="default" style={styles.card}>
++            <Card
++              key={experience.id}
++              variant="default"
++              style={[styles.card, mine && styles.cardMine]}
++              testID={`arena-experience-${experience.id}`}
++            >
+               <View style={styles.experienceHeader}>
+-                <Text style={styles.cardTitle}>{experience.name}</Text>
++                <View style={[styles.experienceIcon, !permitted && styles.experienceIconClosed]}>
++                  <LineIcon name="gamepad" color={permitted ? colors.brand.primaryLight : colors.text.muted} size={22} />
++                </View>
++                <View style={styles.experienceInfo}>
++                  <Text style={styles.cardTitle} numberOfLines={2}>{experience.name}</Text>
++                  <View style={styles.waitingRow}>
++                    <LineIcon name="queue" color={colors.text.secondary} size={14} />
++                    <Text style={styles.waitingText}>{formatWaitingCount(experience.waitingCount)}</Text>
++                  </View>
++                </View>
+                 <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
+               </View>
+-              <Text style={styles.line}>{experience.waitingCount} pessoa(s) aguardando</Text>
+-              <Text style={styles.note}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
++              <View style={styles.divider} />
++              <View style={styles.experienceFooter}>
++                <View style={[styles.statusDot, permitted ? styles.statusDotOpen : styles.statusDotClosed]} />
++                <Text style={styles.experienceStatus}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
++                {mine ? <Badge label="SUA FILA" variant="brand" size="sm" /> : null}
++              </View>
+               {!entry && !pending && permitted ? (
+                 <Button
+                   title={busy ? 'Verificando...' : 'Entrar na fila'}
+@@ -504,30 +571,40 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+             </Card>
+           );
+         })}
+-        <Button
+-          title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
+-          variant="secondary"
+-          disabled={busy || loading}
+-          onPress={refresh}
+-          style={styles.actionButton}
+-        />
+-        <Button
+-          title="Atualizar situação da participação"
+-          variant="outline"
+-          onPress={refreshParticipation}
+-          style={styles.actionButton}
+-        />
+-        <Button
+-          title={busy ? 'Aguarde...' : 'Sair da Arena'}
+-          variant="dangerOutline"
+-          disabled={busy || loading || finished || Boolean(pending)}
+-          onPress={finish}
+-          style={styles.actionButton}
+-        />
+-        <Text style={styles.note}>
+-          Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
+-          nem permite cancelar somente a fila.
+-        </Text>
++
++        <View style={styles.actionsSection}>
++          <Button
++            title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
++            variant="secondary"
++            size="md"
++            disabled={busy || loading}
++            onPress={refresh}
++            style={styles.actionButton}
++          />
++          <Button
++            title="Atualizar situação da participação"
++            variant="outline"
++            size="md"
++            onPress={refreshParticipation}
++            style={styles.actionButton}
++          />
++          <View style={styles.actionsDivider} />
++          <Button
++            title={busy ? 'Aguarde...' : 'Sair da Arena'}
++            variant="dangerOutline"
++            size="md"
++            disabled={busy || loading || finished || Boolean(pending)}
++            onPress={finish}
++            style={styles.actionButton}
++          />
++          <View style={styles.staffNoteRow}>
++            <LineIcon name="alert" color={colors.text.muted} size={14} />
++            <Text style={styles.staffNote}>
++              Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
++              nem permite cancelar somente a fila.
++            </Text>
++          </View>
++        </View>
+       </ScrollView>
+     </AuthBackground>
+   );
+@@ -536,33 +613,111 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+ const styles = StyleSheet.create({
+   body: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.md, paddingBottom: 40 },
+   stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg },
+-  sectionTitle: { ...typography.titleSmall, color: colors.text.primary, marginTop: spacing.lg },
+-  highlight: { marginBottom: spacing.lg, alignItems: 'flex-start' },
+-  card: { marginBottom: spacing.md, alignItems: 'stretch' },
+-  experienceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
+-  cardTitle: { ...typography.titleSmall, color: colors.text.primary, flex: 1 },
+   line: { ...typography.body, color: colors.text.secondary, marginTop: spacing.sm },
+-  position: { ...typography.titleMedium, color: colors.brand.primaryLight, marginTop: spacing.md },
+-  note: { ...typography.bodySmall, color: colors.text.muted, marginTop: spacing.md, lineHeight: 20 },
+   actionButton: { marginTop: spacing.md },
+-  errorCard: { borderColor: colors.semantic.danger, borderWidth: 1, backgroundColor: colors.semantic.dangerBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
++  divider: { height: 1, alignSelf: 'stretch', backgroundColor: colors.border.subtle, marginTop: spacing.md },
++
++  // Avisos
++  errorCard: { borderColor: colors.semantic.danger, borderWidth: 1, backgroundColor: colors.semantic.dangerBg, borderRadius: radii.lg, padding: spacing.lg, marginBottom: spacing.md },
+   error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.sm },
+-  noticeCard: { borderColor: colors.semantic.success, borderWidth: 1, backgroundColor: colors.semantic.successBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
+-  notice: { ...typography.body, color: colors.text.primary, marginTop: spacing.sm },
+-  syncWarningCard: {
++  noticeRow: {
+     flexDirection: 'row',
+     alignItems: 'center',
+     gap: spacing.sm,
+-    borderColor: '#F59E0B',
++    borderColor: colors.semantic.success,
+     borderWidth: 1,
+-    backgroundColor: '#2D2013',
++    backgroundColor: colors.semantic.successBg,
++    borderRadius: radii.lg,
++    paddingVertical: spacing.sm,
++    paddingHorizontal: spacing.md,
++    marginBottom: spacing.md,
++  },
++  noticeIcon: {
++    width: 24,
++    height: 24,
+     borderRadius: 12,
++    borderWidth: 1.5,
++    borderColor: colors.semantic.success,
++    alignItems: 'center',
++    justifyContent: 'center',
++  },
++  noticeText: { ...typography.bodySmall, color: colors.text.primary, flex: 1, lineHeight: 20 },
++  syncWarningCard: {
++    flexDirection: 'row',
++    alignItems: 'center',
++    gap: spacing.sm,
++    borderColor: colors.semantic.warning,
++    borderWidth: 1,
++    backgroundColor: colors.semantic.warningBg,
++    borderRadius: radii.lg,
+     padding: spacing.md,
+     marginBottom: spacing.md,
+   },
+-  syncWarningText: {
+-    ...typography.bodySmall,
+-    color: '#FCD34D',
+-    flex: 1,
++  syncWarningText: { ...typography.bodySmall, color: colors.semantic.warning, flex: 1 },
++
++  // Card principal da fila
++  queueCard: { marginBottom: spacing.lg, alignItems: 'stretch' },
++  cardTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
++  queueTitle: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.md },
++  queueExperienceRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs },
++  queueExperience: { ...typography.bodyLarge, color: colors.text.primary, flex: 1 },
++  positionPanel: {
++    marginTop: spacing.lg,
++    paddingVertical: spacing.md,
++    paddingHorizontal: spacing.lg,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: colors.brand.primary,
++    backgroundColor: colors.brand.primaryDim,
++  },
++  positionPanelStale: { borderColor: colors.semantic.warning, backgroundColor: colors.semantic.warningBg },
++  positionLine: { color: colors.text.primary },
++  positionLabel: { ...typography.bodyLarge, color: colors.text.secondary },
++  positionNumber: { fontFamily: typography.fontFamily, fontSize: 44, lineHeight: 52, fontWeight: '800', letterSpacing: -0.5, color: colors.text.primary },
++  positionNumberStale: { color: colors.text.secondary },
++  stationPanel: {
++    marginTop: spacing.lg,
++    paddingVertical: spacing.md,
++    paddingHorizontal: spacing.lg,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: colors.semantic.success,
++    backgroundColor: colors.semantic.successBg,
+   },
++  stationText: { ...typography.titleSmall, color: colors.text.primary },
++  autoUpdateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
++  autoUpdateText: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
++  autoUpdateTextStale: { color: colors.semantic.warning },
++
++  // Experiências
++  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.lg, marginBottom: spacing.md },
++  sectionTitle: { ...typography.titleSmall, color: colors.text.primary, flexShrink: 1 },
++  sectionMeta: { ...typography.bodySmall, color: colors.text.muted },
++  card: { marginBottom: spacing.md, alignItems: 'stretch' },
++  cardMine: { borderColor: colors.brand.primary },
++  experienceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
++  experienceIcon: {
++    width: 44,
++    height: 44,
++    borderRadius: radii.md,
++    alignItems: 'center',
++    justifyContent: 'center',
++    backgroundColor: colors.brand.primaryDim,
++  },
++  experienceIconClosed: { backgroundColor: colors.background.elevated },
++  experienceInfo: { flex: 1, minWidth: 0 },
++  cardTitle: { ...typography.titleSmall, color: colors.text.primary },
++  waitingRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs },
++  waitingText: { ...typography.bodySmall, color: colors.text.secondary },
++  experienceFooter: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
++  statusDot: { width: 8, height: 8, borderRadius: 4 },
++  statusDotOpen: { backgroundColor: colors.semantic.success },
++  statusDotClosed: { backgroundColor: colors.text.disabled },
++  experienceStatus: { ...typography.bodySmall, color: colors.text.secondary, flex: 1 },
++
++  // Ações
++  actionsSection: { marginTop: spacing.sm },
++  actionsDivider: { height: 1, backgroundColor: colors.border.subtle, marginTop: spacing.lg },
++  staffNoteRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginTop: spacing.lg },
++  staffNote: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
+ });
+diff --git a/app/tests/participante02aFilaVisual.test.cjs b/app/tests/participante02aFilaVisual.test.cjs
+new file mode 100644
+index 0000000..408dbbb
+--- /dev/null
++++ b/app/tests/participante02aFilaVisual.test.cjs
+@@ -0,0 +1,249 @@
++// PARTICIPANTE-02A — aprimoramento visual da fila virtual (RealArenaScreen).
++// Somente apresentação: os testes conferem que tudo exibido vem do estado do servidor e que
++// as ações existentes continuam presentes e ligadas aos mesmos handlers.
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { loadModule, createParticipantUiStubs, createParticipantThemeStub, nodes, textOf } = require('./helpers/questionnaireHarness.cjs');
++
++const presentation = loadModule('utils/arenaQueuePresentation.js', require).exports;
++
++const USER = '20000000-0000-4000-8000-000000000001';
++const EVENT = 'e10da075-c6cb-4fd6-ba97-7b52403ebff8';
++const PARTICIPATION = 'c79b25f1-b171-487f-9fee-a24d184054b5';
++const EXP_A = '60000000-0000-4000-8000-00000000000a';
++const EXP_B = '60000000-0000-4000-8000-00000000000b';
++const EXP_C = '60000000-0000-4000-8000-00000000000c';
++
++const experiences = (overrides = {}) => [
++  { id: EXP_A, name: 'Street Fighter', waitingCount: 1, acceptingNewQueueEntries: true },
++  { id: EXP_B, name: 'PS5 VR', waitingCount: 0, acceptingNewQueueEntries: true },
++  { id: EXP_C, name: 'Simulador de corrida', waitingCount: 2, acceptingNewQueueEntries: false },
++].map((item) => ({ ...item, ...(overrides[item.id] || {}) }));
++
++const waitingEntry = (position = 1, extra = {}) => ({
++  id: '50000000-0000-4000-8000-000000000004', experienceId: EXP_A, experienceName: 'Street Fighter',
++  status: 'waiting', position, stationLabel: null, serviceSessionId: null, ...extra,
++});
++
++const arena = (extra = {}) => ({ acceptingNewQueueEntries: true, experiences: experiences(), currentQueueEntry: null, pendingIntent: null, ...extra });
++
++/**
++ * Renderiza a tela real com o mesmo harness dos testes existentes (autoQueueSync).
++ * Ordem dos `useState` da tela: state, busy, loading, error, notice, syncStale, finished, readError.
++ */
++function render(arenaState, { notice = null, syncStale = false, busy = false } = {}) {
++  const values = [arenaState, busy, false, null, notice, syncStale, false, null];
++  const calls = { participation: 0, alerts: [] };
++  let index = 0;
++  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
++    if (name === 'react') {
++      return {
++        useRef: (value) => ({ current: value }),
++        useEffect: (effect) => effect(),
++        useMemo: (factory) => factory(),
++        useCallback: (fn) => fn,
++        useState(initial) { const i = index++; return [i < values.length ? values[i] : initial, () => {}]; },
++      };
++    }
++    if (name === '@react-navigation/native') return { useFocusEffect: () => {} };
++    if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
++    if (name === 'react-native') {
++      return {
++        ActivityIndicator: 'ActivityIndicator',
++        Alert: { alert: (...args) => { calls.alerts.push(args); } },
++        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
++        ScrollView: 'ScrollView', StyleSheet: { create: (s) => s }, Text: 'Text', View: 'View', Vibration: { vibrate() {} },
++      };
++    }
++    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../theme') return createParticipantThemeStub();
++    if (name === '../../context/AuthContext') {
++      return { useAuth: () => ({ isAuthenticated: true, user: { id: USER }, httpClient: {}, getSessionEpoch: () => 1 }) };
++    }
++    if (name === '../../services/arenaQueueService') {
++      return { createArenaQueueCoordinator: () => ({ read: async () => arenaState, join: async () => ({}) }), describeArenaError: () => 'erro' };
++    }
++    if (name === '../../services/arenaQueueIntentStorage') return { defaultArenaQueueIntentStorage: {} };
++    if (name === '../../services/participationActionService') {
++      return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
++    }
++    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++    if (name === '../../services/queueAlertService') return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
++    return require(name);
++  }).exports.default;
++  const refreshParticipation = async () => { calls.participation += 1; };
++  const tree = screen({ participation: { id: PARTICIPATION, eventId: EVENT }, refreshParticipation });
++  const all = nodes(tree);
++  const texts = all.filter((n) => n.type === 'Text').map(textOf);
++  return {
++    all, texts, calls, refreshParticipation,
++    has: (text) => texts.some((t) => t.includes(text)),
++    exact: (text) => all.find((n) => n.type === 'Text' && textOf(n) === text),
++    button: (title) => all.find((n) => n.props?.title === title && typeof n.type === 'function'),
++    buttons: (title) => all.filter((n) => n.props?.title === title && typeof n.type === 'function'),
++    byTestID: (id) => all.find((n) => n.props?.testID === id),
++    icons: () => all.filter((n) => n.props?.iconName).map((n) => n.props.iconName),
++  };
++}
++
++const flatStyle = (style) => (Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean).map(flatStyle)) : style || {});
++
++test('02A-01: plural e posição usam só os números do servidor', () => {
++  assert.equal(presentation.formatWaitingCount(0), '0 pessoas aguardando');
++  assert.equal(presentation.formatWaitingCount(1), '1 pessoa aguardando');
++  assert.equal(presentation.formatWaitingCount(2), '2 pessoas aguardando');
++  assert.equal(presentation.formatWaitingCount(-1), null);
++  assert.equal(presentation.formatWaitingCount(1.5), null);
++  assert.equal(presentation.formatQueuePosition(1), '1º');
++  assert.equal(presentation.formatQueuePosition(1234), '1234º');
++  assert.equal(presentation.formatQueuePosition(0), null);
++  assert.equal(presentation.formatExperienceCount(1), '1 experiência');
++  assert.equal(presentation.formatExperienceCount(3), '3 experiências');
++});
++
++test('02A-02 (§10 ativo sem fila): experiências, entrada e ações continuam disponíveis', () => {
++  const h = render(arena());
++  assert.equal(h.byTestID('arena-queue-entry-card'), undefined, 'sem card de fila');
++  const header = h.all.find((n) => typeof n.type === 'function' && n.props?.title === 'Minha Arena');
++  assert.ok(header, 'título "Minha Arena" (o contrato atual não traz o nome do evento)');
++  assert.equal(header.props.rightAction.props.label, 'ATIVA');
++  assert.equal(header.props.rightAction.props.variant, 'success');
++  assert.ok(h.exact('3 experiências'));
++  for (const name of ['Street Fighter', 'PS5 VR', 'Simulador de corrida']) assert.ok(h.exact(name), name);
++  // Ordem preservada (a do servidor).
++  const order = h.texts.filter((t) => ['Street Fighter', 'PS5 VR', 'Simulador de corrida'].includes(t));
++  assert.deepEqual(order, ['Street Fighter', 'PS5 VR', 'Simulador de corrida']);
++  const joins = h.buttons('Entrar na fila');
++  assert.equal(joins.length, 2, 'só as experiências abertas oferecem entrada');
++  assert.ok(joins.every((b) => b.props.disabled === false && typeof b.props.onPress === 'function'));
++  for (const title of ['Atualizar fila e experiências', 'Atualizar situação da participação', 'Sair da Arena']) {
++    assert.ok(h.button(title), title);
++    assert.equal(h.button(title).props.disabled ?? false, false, title);
++  }
++});
++
++test('02A-03 (§10 aguardando): card da fila com a posição do servidor em destaque', () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(1) }));
++  const card = h.byTestID('arena-queue-entry-card');
++  assert.ok(card);
++  assert.ok(h.exact('NA FILA') && h.exact('Você está na fila'));
++  assert.ok(h.texts.filter((t) => t === 'Street Fighter').length >= 1, 'nome da experiência');
++  assert.ok(h.has('Posição 1º'), 'frase única para leitores de tela e testes existentes');
++  const panel = h.byTestID('arena-queue-position');
++  assert.equal(panel.props.accessibilityLabel, 'Posição na fila: 1º');
++  const number = h.exact('1º');
++  assert.ok(number, 'número em texto próprio');
++  const style = flatStyle(number.props.style);
++  assert.ok(style.fontSize >= 40 && style.fontWeight === '800', 'posição é o maior destaque do card');
++  const others = h.all.filter((n) => n.type === 'Text' && n !== number)
++    .map((n) => flatStyle(n.props.style).fontSize).filter((size) => typeof size === 'number');
++  assert.ok(others.every((size) => size < style.fontSize), 'nenhum outro texto com tipografia maior');
++  assert.ok(h.has('A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'));
++  assert.ok(h.icons().includes('queue') && h.icons().includes('refresh'));
++  // A experiência da entrada atual é marcada e ninguém pode entrar em outra fila.
++  assert.ok(h.exact('SUA FILA'));
++  assert.equal(h.buttons('Entrar na fila').length, 0);
++});
++
++test('02A-04 (§10 posição alterada): a nova posição recebida é apresentada', () => {
++  assert.ok(render(arena({ currentQueueEntry: waitingEntry(3) })).has('Posição 3º'));
++  const after = render(arena({ currentQueueEntry: waitingEntry(2) }));
++  assert.ok(after.has('Posição 2º'));
++  assert.equal(after.has('Posição 3º'), false);
++});
++
++test('02A-05 (§10 chamado): estado de espera substituído pela chamada, sem posição', () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(1, { status: 'called', position: null, stationLabel: 'Estação 2', serviceSessionId: '70000000-0000-4000-8000-000000000007' }) }));
++  assert.ok(h.exact('SUA VEZ') && h.exact('É a sua vez!'));
++  assert.ok(h.has('Dirija-se à estação: Estação 2'));
++  assert.equal(h.byTestID('arena-queue-position'), undefined);
++  assert.equal(h.texts.some((t) => /Posição|NA FILA|Você está na fila/.test(t)), false);
++  assert.ok(h.byTestID('arena-queue-station'));
++});
++
++test('02A-06 (§10 abertas e encerradas): indicadores coerentes com o servidor', () => {
++  const h = render(arena());
++  const card = (id) => nodes(h.byTestID(`arena-experience-${id}`)).filter((n) => n.type === 'Text').map(textOf);
++  assert.ok(card(EXP_A).includes('ABERTA') && card(EXP_A).includes('Recebendo entradas') && card(EXP_A).includes('1 pessoa aguardando'));
++  assert.ok(card(EXP_B).includes('0 pessoas aguardando'));
++  assert.ok(card(EXP_C).includes('ENCERRADA') && card(EXP_C).includes('Entrada na fila encerrada') && card(EXP_C).includes('2 pessoas aguardando'));
++  assert.equal(nodes(h.byTestID(`arena-experience-${EXP_C}`)).some((n) => n.props?.title === 'Entrar na fila'), false);
++  // Entradas globalmente encerradas: nenhuma experiência aparece como aberta.
++  const closed = render(arena({ acceptingNewQueueEntries: false }));
++  assert.equal(closed.texts.filter((t) => t === 'ABERTA').length, 0);
++  assert.equal(closed.texts.filter((t) => t === 'ENCERRADA').length, 3);
++  assert.equal(closed.buttons('Entrar na fila').length, 0);
++  assert.equal(h.texts.some((t) => t.includes('pessoa(s)')), false);
++});
++
++test('02A-07 (§10 conexão instável): a posição exibida é identificada como a última confirmada', () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(4) }), { syncStale: true });
++  assert.ok(h.has('Conexão instável. Exibindo as últimas informações confirmadas.'));
++  assert.ok(h.has('Última posição confirmada 4º'));
++  assert.equal(h.has('Posição 4º'), false, 'posição antiga não parece recém-confirmada');
++  assert.equal(h.byTestID('arena-queue-position').props.accessibilityLabel, 'Última posição confirmada na fila: 4º');
++  assert.ok(h.has('Exibindo as últimas informações confirmadas; reconectando automaticamente'));
++  assert.equal(h.has('atualizadas automaticamente a cada 5 segundos'), false);
++});
++
++test('02A-08 (§10 tentativa pendente): recuperação preservada e ações bloqueadas como antes', () => {
++  const h = render(arena({ pendingIntent: { participationId: PARTICIPATION, experienceId: EXP_A } }));
++  assert.ok(h.exact('TENTATIVA PENDENTE'));
++  const repeat = h.button('Conferir / repetir a mesma tentativa');
++  assert.ok(repeat && repeat.props.disabled === false && typeof repeat.props.onPress === 'function');
++  assert.equal(h.buttons('Entrar na fila').length, 0);
++  assert.equal(h.button('Sair da Arena').props.disabled, true);
++  const other = render(arena({ pendingIntent: { participationId: '99999999-9999-4999-8999-999999999999', experienceId: EXP_A } }));
++  assert.ok(other.has('Há uma solicitação pendente de outra participação nesta conta.'));
++  assert.equal(other.button('Conferir / repetir a mesma tentativa'), undefined);
++});
++
++test('02A-09 (§10 atualização manual e saída): ações ligadas aos mesmos handlers', async () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(1) }));
++  const situation = h.button('Atualizar situação da participação');
++  assert.equal(situation.props.onPress, h.refreshParticipation, 'mesmo handler da participação');
++  await situation.props.onPress();
++  assert.equal(h.calls.participation, 1);
++  const refresh = h.button('Atualizar fila e experiências');
++  assert.ok(refresh && refresh.props.disabled === false && typeof refresh.props.onPress === 'function');
++  const leave = h.button('Sair da Arena');
++  assert.equal(leave.props.disabled, false);
++  leave.props.onPress();
++  assert.equal(h.calls.alerts.length, 1);
++  assert.equal(h.calls.alerts[0][0], 'Deseja sair da Arena?');
++});
++
++test('02A-10 (§10 nome longo e posição extensa): sem corte da posição e nomes limitados a 2 linhas', () => {
++  const longName = 'Experiência de realidade virtual com nome muito longo para testar o layout da Arena';
++  const h = render(arena({
++    currentQueueEntry: waitingEntry(1234, { experienceName: longName }),
++    experiences: experiences({ [EXP_A]: { name: longName } }),
++  }));
++  const number = h.exact('1234º');
++  assert.ok(number && number.props.numberOfLines === undefined, 'posição nunca é truncada');
++  const names = h.all.filter((n) => n.type === 'Text' && textOf(n) === longName);
++  assert.equal(names.length, 2);
++  assert.ok(names.every((n) => n.props.numberOfLines === 2));
++});
++
++test('02A-11 (§6.2): aviso de entrada confirmada é compacto, com indicador de sucesso, e só aparece com o aviso real', () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(1) }), { notice: 'Entrada na fila confirmada pelo servidor.' });
++  const row = h.byTestID('arena-queue-notice');
++  assert.ok(row);
++  assert.ok(nodes(row).some((n) => n.props?.iconName === 'check'));
++  assert.ok(nodes(row).some((n) => n.type === 'Text' && textOf(n) === 'Entrada na fila confirmada pelo servidor.'));
++  assert.equal(render(arena({ currentQueueEntry: waitingEntry(1) })).byTestID('arena-queue-notice'), undefined);
++});
++
++test('02A-12 (§6.6/§6.7): sem contadores fictícios, sem emojis e só ícones existentes', () => {
++  const lineIcon = loadModule('components/ui/LineIcon.js', (name) => (name === 'react-native'
++    ? { StyleSheet: { create: (s) => s }, View: 'View' } : require(name))).exports;
++  assert.ok(lineIcon.LINE_ICON_NAMES.includes('check'));
++  assert.ok(lineIcon.LineIcon({ name: 'check', color: '#00E676', size: 14 }), 'desenho de sucesso existe');
++  for (const h of [render(arena()), render(arena({ currentQueueEntry: waitingEntry(2) }), { notice: 'Entrada na fila confirmada pelo servidor.', syncStale: true })]) {
++    assert.equal(h.texts.some((t) => /conclu[ií]d/i.test(t)), false, 'sem "Concluídas"');
++    assert.equal(h.texts.some((t) => /\p{Extended_Pictographic}/u.test(t)), false, 'sem emojis');
++    assert.ok(h.icons().every((icon) => lineIcon.LINE_ICON_NAMES.includes(icon)), 'ícones do LineIcon');
++  }
++});
+diff --git a/app/utils/arenaQueuePresentation.js b/app/utils/arenaQueuePresentation.js
+new file mode 100644
+index 0000000..740f64c
+--- /dev/null
++++ b/app/utils/arenaQueuePresentation.js
+@@ -0,0 +1,24 @@
++/**
++ * Textos da tela real da Arena (PARTICIPANTE-02A). Somente apresentação: os números vêm
++ * sempre do servidor (já validados em `arenaQueueService`) e nada aqui é calculado ou inventado.
++ */
++
++const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
++
++/** "0 pessoas aguardando", "1 pessoa aguardando", "2 pessoas aguardando". */
++export function formatWaitingCount(count) {
++  if (!isCount(count)) return null;
++  return `${count} ${count === 1 ? 'pessoa' : 'pessoas'} aguardando`;
++}
++
++/** Posição ordinal recebida do servidor ("1º", "12º"); nunca estimada. */
++export function formatQueuePosition(position) {
++  if (!Number.isSafeInteger(position) || position < 1) return null;
++  return `${position}º`;
++}
++
++/** "1 experiência", "3 experiências". */
++export function formatExperienceCount(count) {
++  if (!isCount(count)) return null;
++  return `${count} ${count === 1 ? 'experiência' : 'experiências'}`;
++}
+diff --git a/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md b/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..5a39d82
+--- /dev/null
++++ b/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md
+@@ -0,0 +1,146 @@
++# PARTICIPANTE-02A — Aprimoramento visual da fila virtual
++
++**Task:** PARTICIPANTE-02A, antecipação **parcial e somente visual** da PARTICIPANTE-02 para a captura do paper acadêmico. Não conclui a PARTICIPANTE-02.
++**Responsável pela implementação:** Heliom
++**Módulo:** Participante (frontend Expo)
++**Branch:** `feature/heliom-participante-ux`
++**Base (SHA):** `94766a13c80bc3c91f0963c9db9acea35efac488` (local e `origin` sincronizados; último commit: registro da R02 da PARTICIPANTE-01)
++**Estado atual:** entregue para validação. A documentação inicial (§1–§7) foi registrada **antes** de qualquer alteração de código, no commit próprio `43eb5fe` (ver §8.8). Implementação e resultados em §8.
++
++> O documento indicado na task (`ProgramacaoMobile/docs/...`) corresponde, neste repositório, a `docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md` (não há pasta `ProgramacaoMobile`).
++
++## 1. Objetivo e escopo
++
++Melhorar a apresentação, a hierarquia visual e o acabamento da **tela real** de participação ativa (`app/screens/arena/RealArenaScreen.js`), com prioridade para o estado "participante aguardando atendimento na fila virtual de uma experiência, com a posição visível". O funcionamento atual deve ser preservado integralmente.
++
++**Fora do escopo:** contadores de atendimentos concluídos, contratos de backend, regras de fila, chamadas, push, fila externa (`ExternalQueueScreen`), correções pendentes da PARTICIPANTE-01, outras telas do Participante e os fluxos demonstrativos (`ActiveArenaScreen`, `ArenaQueueScreen`). Também não haverá tela ou modo especial para o paper.
++
++## 2. Referência visual
++
++- `ArenaGO_02_Fila_Padronizada(4).png` **não está disponível neste computador**: não veio anexada à mensagem e a busca em Documentos, Downloads, Mesa e Imagens não encontrou o arquivo. A imagem foi solicitada ao responsável.
++- Até o recebimento, a implementação segue a descrição textual detalhada da task (§4 e §6): posição em destaque, separação entre o estado do participante e a lista de experiências, organização dos cards, hierarquia e ícones equilibrados. A comparação com a imagem fica pendente e será registrada aqui quando houver acesso.
++- Nenhuma imagem será usada como background, elemento estático ou evidência.
++
++## 3. Diagnóstico visual da tela atual (base `94766a1`)
++
++| Área | Situação atual | Problema visual |
++|---|---|---|
++| Cabeçalho | `ScreenHeader` "Minha Arena", subtítulo "Participação ativa · informações do servidor", `Badge` "ATIVA" (success). | Funcional, mas o subtítulo é genérico. **Fonte do nome do evento:** `GET /participations/current` (`participationView`, DTO estrito) só devolve `id`, `eventId`, `status`, horários e `externalQueue`, **sem nome do evento**. Não há fonte confiável no fluxo atual, e o título continua "Minha Arena" (6.1 da task). |
++| Aviso de sucesso | Bloco com borda verde, `padding` grande, `Badge` "ATUALIZADO" e o texto "Entrada na fila confirmada pelo servidor." em linhas separadas. | Grande demais para uma frase curta; o selo e o texto competem. |
++| Conexão instável | Faixa com cores fixas fora do tema (`#F59E0B`, `#2D2013`, `#FCD34D`). | Paleta divergente dos tokens `semantic.warning`/`warningBg`. |
++| Card da fila (aguardando) | `Card` highlight; `Badge` "NA FILA"; título com o estilo de seção (`marginTop` de seção); nome da experiência em `body` secundário; "Posição Nº" em `titleMedium` (20 px, roxo claro); nota "A posição e a chamada são atualizadas automaticamente a cada 5 segundos." | A posição tem o mesmo peso de um título comum e não é o elemento dominante. O nome da experiência tem pouca ênfase. Informação principal e auxiliar não estão separadas. Não há iconografia. |
++| Card da fila (chamado) | Mesmo card, `Badge` "SUA VEZ" (brand, igual ao estado de espera), "É a sua vez!", "Dirija-se à estação: X" no estilo da posição. | A chamada não se diferencia visualmente da espera. (A posição já não aparece quando chamado; o comportamento está correto.) |
++| Tentativa pendente | `Card` elevated, `Badge` "TENTATIVA PENDENTE", texto e "Conferir / repetir a mesma tentativa". | Adequado; só falta alinhar o espaçamento ao novo padrão. |
++| Lista de experiências | Título de seção; cards com nome + `Badge` ABERTA/ENCERRADA, "N pessoa(s) aguardando", nota "Recebendo entradas"/"Entrada na fila encerrada" e "Entrar na fila". | Pluralização "pessoa(s)". Sem ícone. Contagem e disponibilidade com o mesmo peso. Não indica em qual experiência o participante está (o dado `currentQueueEntry.experienceId` existe). |
++| Ações | Três botões de largura total empilhados logo após a lista, mais uma nota sobre o Staff. | Visualmente pesados e misturados à lista (sem separação de seção). |
++| Iconografia | Nenhum ícone; nenhum emoji. | — |
++
++## 4. Componentes e recursos identificados
++
++- `AuthBackground` (variant `login`, overlay 0,7): background da tela, **preservado**.
++- `ScreenHeader`, `Card` (`default`, `highlight`, `elevated`), `Badge` (`brand`, `success`, `warning`, `danger`, `default`; `sm`/`md`) e `Button` (`primary`, `secondary`, `outline`, `dangerOutline`).
++- `LineIcon` (PARTICIPANTE-01): `gamepad`, `queue`, `refresh`, `alert`, `door`, `clock` etc. Ícones desenhados com `View`, sem biblioteca.
++- Tokens `colors`, `spacing`, `radii` e `typography` de `app/theme/`.
++- Dados do backend, já validados por `arenaQueueService.js`. `currentQueueEntry` tem `experienceId`, `experienceName`, `status` (`waiting`/`called`), `position` (só em `waiting`) e `stationLabel` (só em `called`). `experiences[]` tem `id`, `name`, `waitingCount` e `acceptingNewQueueEntries`. O contrato não fornece contadores de conclusões.
++
++## 5. Melhorias planejadas
++
++1. **Cabeçalho (6.1):** manter "Minha Arena" e o selo "ATIVA"; subtítulo mais claro sobre a origem dos dados. Sem endpoint novo e sem nome fixo.
++2. **Aviso de entrada confirmada (6.2):** componente compacto em linha, com indicador de sucesso (novo desenho `check` no `LineIcon`, no mesmo padrão de `View`) e o texto atual. A apresentação e a remoção continuam dependendo da confirmação real (lógica inalterada).
++3. **Card principal (6.3):** cabeçalho com "NA FILA" e ícone de fila; título "Você está na fila"; linha da experiência com ícone e nome em destaque; **área interna destacada da posição** (fundo `brand.primaryDim`, borda `brand.primary`), com o número em tipografia grande e pesada. A frase "Posição Nº" é mantida como um único texto para leitores de tela. A posição vem do servidor.
++4. **Atualização automática (6.4):** linha discreta com ícone `refresh` e o texto atual, intervalo inalterado (5 s). Com conexão instável, a área da posição passa a "Última posição confirmada" em tom de aviso, para não parecer recém-confirmada. O aviso de conexão instável é mantido e passa a usar os tokens de aviso do tema.
++5. **Estado chamado (7):** selo "SUA VEZ" em verde e painel da estação; nenhuma posição de espera.
++6. **Experiências disponíveis (6.5):** cabeçalho de seção com a quantidade; card com ícone em caixa, nome (até 2 linhas), contagem com plural correto ("0 pessoas", "1 pessoa", "2 pessoas aguardando"), selo ABERTA/ENCERRADA, divisor e linha de recebimento de entradas; marca "SUA FILA" na experiência da entrada atual (dado do servidor). A ordem recebida é mantida.
++7. **Ações (6.8):** agrupadas numa seção própria, separadas da lista, com os mesmos títulos, estados e handlers.
++8. **Sem contadores (6.6):** nenhum indicador "Concluídas".
++
++## 6. Funcionalidades preservadas
++
++Sem alteração em: contratos HTTP, `arenaQueueService`, intenções de fila, idempotência, polling de 5 s, `AppState`, foco, alertas de chamada (`queueAlertService`), saída da Arena, avaliação pós-saída, autenticação, isolamento de sessão, regras de disponibilidade, ordem e posição. Toda a lógica antes do `return` de `RealArenaScreen` fica intacta, inclusive a **ordem dos hooks**: os testes existentes simulam `useState` pela ordem das chamadas. Os títulos dos botões e os textos já verificados pelos testes ("Posição Nº", nota de 5 s, avisos) são mantidos.
++
++## 7. Testes previstos
++
++- Suítes existentes: `autoQueueSync`, `participationActionScreens`, `homeFlow`, `homeReturnEvaluation`, `arenaQueue`, `activeArena`, `arenaQueueService.integration`, `arenaAccessGuard.integration`, `roleRoutingIntegration`, `uiComponents`.
++- Novo `app/tests/participante02aFilaVisual.test.cjs`, cobrindo a matriz do §10 da task: ativo sem fila; aguardando com posição em destaque; posição alterada; chamado sem posição; abertas/encerradas; conexão instável; tentativa pendente; atualização manual; saída; nome longo e posição de vários dígitos; plural; ausência de contadores.
++- Suíte completa do app (`npm test` em `app/`) e `npx expo export` (Android/iOS) para verificar a compilação.
++- **Captura real:** depende de aparelho/emulador e de backend com dados reais. Não há nenhum dos dois neste ambiente, então serão registrados os passos para o responsável.
++
++## 8. Implementação e resultados
++
++**Ambiente:** macOS 12.7.6 (x86_64), Node v22.23.5, dependências já instaladas em `app/` e `qa/regression/`. Implementação, testes, commit e push foram feitos pelo assistente (Claude Code) por pedido explícito do responsável. Nenhum backend, banco ou serviço externo foi usado.
++
++### 8.1 Melhorias visuais realizadas
++
++| Item da task | O que mudou |
++|---|---|
++| 6.1 Cabeçalho | Mantidos "Minha Arena" e o selo "ATIVA". Subtítulo mais curto, "Participação ativa · dados do servidor", que cabe em uma linha a 390 px. Sem nome de evento, porque o contrato não o fornece (§3). |
++| 6.2 Aviso de entrada | Linha compacta (borda e fundo `semantic.success`), com indicador circular e ícone `check` + texto. O mesmo estado `notice`; apresentação e remoção inalteradas. |
++| 6.3 Card da fila | Linha superior com "NA FILA" + ícone de fila; título "Você está na fila" (`titleMedium`); nome da experiência com ícone `gamepad` (`bodyLarge`, primário, até 2 linhas); **painel da posição** (fundo `brand.primaryDim`, borda `brand.primary`, `radii.lg`) com "Posição" e o número em 44 px / peso 800, o maior texto da tela. A frase "Posição Nº" segue como um único `Text` (rótulo e número aninhados), com `accessibilityLabel` "Posição na fila: Nº". |
++| 6.4 Atualização automática | Divisor e linha discreta com ícone `refresh` e o texto existente (intervalo de 5 s inalterado). Com conexão instável: o painel passa a tom de aviso e rótulo "Última posição confirmada", o número fica em cor secundária e a nota diz "Exibindo as últimas informações confirmadas; reconectando automaticamente...". O aviso "INSTÁVEL" do topo foi mantido e passou a usar os tokens `semantic.warning`/`warningBg` no lugar das cores fixas. |
++| 7 Chamado | Selo "SUA VEZ" em verde, ícone `door` e painel verde "Dirija-se à estação: X". Nenhuma posição de espera é exibida. |
++| 7 Tentativa pendente | Mesmo conteúdo e botão "Conferir / repetir a mesma tentativa", agora com ícone de alerta e o mesmo espaçamento do card da fila. |
++| 6.5 Experiências | Cabeçalho da seção com a quantidade ("3 experiências"); card com ícone `gamepad` em caixa (apagada quando encerrada), nome (até 2 linhas), ícone de fila + contagem com plural correto, selo ABERTA/ENCERRADA, divisor e linha com ponto de status + "Recebendo entradas"/"Entrada na fila encerrada". Na experiência da entrada atual (`currentQueueEntry.experienceId`), borda roxa e selo "SUA FILA". A ordem do servidor é mantida. |
++| 6.6 Contadores | Não implementados (nenhum "Concluídas"). |
++| 6.8 Ações | Seção própria após a lista: "Atualizar fila e experiências" e "Atualizar situação da participação" em tamanho `md`; divisor; "Sair da Arena"; nota do Staff com ícone. Títulos, `disabled` e handlers idênticos. |
++
++### 8.2 Arquivos
++
++| Arquivo | Alteração |
++|---|---|
++| `app/screens/arena/RealArenaScreen.js` | Imports (`LineIcon`, `radii`, utilitário) e o bloco visual (derivações de apresentação após `lockActions`, JSX e estilos). **Nenhuma linha de lógica alterada:** hooks, ordem dos `useState`, polling, `refresh`, `syncSilent`, `join`, `finish`, alertas e guardas de sessão continuam idênticos (o diff começa depois de `lockActions`). |
++| `app/components/ui/LineIcon.js` | Novo desenho `check` (L de bordas girado 45°, mesmo padrão de `View`, sem dependência). |
++| `app/utils/arenaQueuePresentation.js` (novo) | `formatWaitingCount`, `formatQueuePosition` e `formatExperienceCount`: só formatação de números do servidor. |
++| `app/tests/participante02aFilaVisual.test.cjs` (novo) | 12 testes (§8.4). |
++| `qa-evidence/PARTICIPANTE_02A-changes.diff` (novo) | Patch da task (§8.8). |
++
++Sem alteração de backend, contratos, serviços, intenções, idempotência, polling, navegação, `ExternalQueueScreen`, `ActiveArenaScreen` ou `ArenaQueueScreen`.
++
++### 8.3 Componentes reutilizados
++
++`AuthBackground` (inalterado), `ScreenHeader`, `Card` (`highlight`, `elevated`, `default`), `Badge` (`brand`, `success`, `warning`, `danger`, `default`), `Button` (`primary`, `secondary`, `outline`, `dangerOutline`; tamanho `md` nas ações), `LineIcon` (`queue`, `gamepad`, `refresh`, `alert`, `door` e o novo `check`) e os tokens `colors`, `spacing`, `radii` e `typography`. Nenhuma biblioteca nova, nenhum emoji, nenhuma dimensão tirada de pixels do mockup.
++
++### 8.4 Testes executados
++
++| Comando (em `app/`) | SHA testado | Total | Aprov. | Falhas | Cancel. | Ignor. | Exit |
++|---|---|---|---|---|---|---|---|
++| Suítes da Arena antes dos testes novos: `autoQueueSync`, `participationActionScreens`, `homeFlow`, `homeReturnEvaluation`, `arenaQueue`, `activeArena`, `arenaQueueService.integration`, `arenaAccessGuard.integration`, `roleRoutingIntegration`, `uiComponents` | working tree sobre `43eb5fe` | 176 | 176 | 0 | 0 | 0 | 0 |
++| `node --test tests/participante02aFilaVisual.test.cjs` | idem | 12 | 12 | 0 | 0 | 0 | 0 |
++| `npm test` (suíte completa, com deps de `qa/regression`) | idem (idêntico ao commit da task) | **1009** | **1009** | 0 | 0 | 0 | 0 |
++| `npx expo export --platform android` / `ios` | idem | — | — | — | — | — | 0 / 0 |
++| `git diff --check` | idem | — | — | — | — | — | sem problemas |
++
++- 1009 = 997 (campanha da PARTICIPANTE-01 R02) + 12 novos. Nenhum teste existente foi alterado ou removido: as 176 verificações da Arena passaram com a tela nova sem ajuste.
++- Os testes novos cobrem a matriz do §10 da task: ativo sem fila (02A-02), aguardando com a posição como maior tipografia (02A-03), posição alterada (02A-04), chamado sem posição (02A-05), abertas/encerradas e encerramento global (02A-06), conexão instável identificando a última posição confirmada (02A-07), tentativa pendente (02A-08), atualização manual e saída com os mesmos handlers (02A-09), nome longo e posição de 4 dígitos (02A-10), aviso compacto só com aviso real (02A-11), sem contadores, sem emojis e só ícones do `LineIcon` (02A-12), plural e ordinal (02A-01).
++
++### 8.5 Conferência visual local (não é evidência)
++
++Para conferir o layout sem aparelho, a tela real foi renderizada com `react-native-web` (dependência já existente do app), usando os componentes e o tema reais e estados simulados. As capturas foram feitas no Chrome headless a 390 px de largura: aguardando, chamado, sem fila, conexão instável, nome longo/posição 1234 e tentativa pendente. A conferência levou a um ajuste: o subtítulo do cabeçalho foi encurtado porque ocupava duas linhas. O script e as imagens ficaram só na pasta temporária do assistente e **não foram versionados**. Também **não servem de evidência para o paper**: não rodam no app, não usam dados reais e não carregam o background de imagem nem as fontes do aparelho.
++
++### 8.6 Captura real para o paper: PENDENTE (passos para o responsável)
++
++Não há aparelho, emulador nem backend com banco neste ambiente. Para obter a captura real:
++
++1. Backend em ambiente de teste autorizado, com um **evento aberto e fila externa desativada** (`externalQueueEnabled = false`). Assim o ingresso cria a participação já `active` (`participations.service.ts`, `status = externalQueueEnabled ? "waiting" : "active"`) e o app abre a Minha Arena (`RealArenaScreen`). Com a fila externa ativa, o participante vê primeiro a `ExternalQueueScreen` até a liberação pelo Staff.
++2. Experiências e estações cadastradas e disponíveis (Admin).
++3. Conta de teste de participante com questionário completo e **nome fictício**.
++4. No aparelho: entrar no evento (QR Code ou código) → Confirmar entrada → abrir Minha Arena.
++5. Para uma posição maior que 1º, outras contas de teste entram antes na mesma experiência.
++6. Tocar em "Entrar na fila" na experiência escolhida. Aparece "Entrada na fila confirmada pelo servidor." e o card "Você está na fila" com a posição real.
++7. O Staff **não** deve chamar o participante até a captura. Capturar com o atalho do aparelho, sem edição posterior. A tela não mostra dados pessoais; conferir a barra de notificações antes.
++
++### 8.7 Limitações e decisões
++
++- **Mockup:** `ArenaGO_02_Fila_Padronizada(4).png` continua indisponível. A comparação com ele fica pendente.
++- **Nome do evento:** não exibido. `GET /participations/current` não o fornece, e a task proíbe endpoint novo.
++- **Nota de 5 s:** mantida literalmente ("…atualizadas automaticamente a cada 5 segundos."). É verdadeira (o intervalo é 5 s) e já era verificada por teste existente.
++- **Validação física** (Android/iOS, fonte ampliada, áreas seguras, navegação inferior): pendente, pelo mesmo motivo da §8.6. O `ScrollView` e os `paddings` existentes foram mantidos.
++- Nenhuma necessidade de alteração funcional foi identificada.
++
++### 8.8 Git e evidências
++
++- `43eb5fe`: `docs(participante): iniciar documentacao da PARTICIPANTE-02A`, **somente** §1–§7 deste documento, antes de qualquer código.
++- Commit seguinte: `feat(participante): aprimorar interface da fila virtual` (código, testes, esta seção e o patch).
++- **Patch:** `qa-evidence/PARTICIPANTE_02A-changes.diff`, base `94766a13c80bc3c91f0963c9db9acea35efac488` (SHA de início da task). Escopo: todo o trabalho da task, isto é, documento inicial, código, testes e esta atualização, exceto o próprio patch. Verificado com `git apply --check` sobre a base.
++- Push sem force em `feature/heliom-participante-ux`, com a conta `heliom13` (a mesma das entregas anteriores). Sem merge na `develop`. PARTICIPANTE-01 e o restante da PARTICIPANTE-02 não foram retomados.
++
++**Estado da task:** PARTICIPANTE-02A entregue para validação. A captura real e a comparação com o mockup ficam pendentes com o responsável.

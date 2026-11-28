@@ -5,7 +5,7 @@
 **Módulo:** Participante (frontend Expo)
 **Branch:** `feature/heliom-participante-ux`
 **Base (SHA):** `94766a13c80bc3c91f0963c9db9acea35efac488` (local e `origin` sincronizados; último commit: registro da R02 da PARTICIPANTE-01)
-**Estado atual:** documentação inicial registrada **antes** de qualquer alteração de código (commit próprio). Implementação ainda não iniciada.
+**Estado atual:** entregue para validação. A documentação inicial (§1–§7) foi registrada **antes** de qualquer alteração de código, no commit próprio `43eb5fe` (ver §8.8). Implementação e resultados em §8.
 
 > O documento indicado na task (`ProgramacaoMobile/docs/...`) corresponde, neste repositório, a `docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md` (não há pasta `ProgramacaoMobile`).
 
@@ -67,4 +67,80 @@ Sem alteração em: contratos HTTP, `arenaQueueService`, intenções de fila, id
 
 ## 8. Implementação e resultados
 
-_Pendente: será preenchido ao final._
+**Ambiente:** macOS 12.7.6 (x86_64), Node v22.23.5, dependências já instaladas em `app/` e `qa/regression/`. Implementação, testes, commit e push foram feitos pelo assistente (Claude Code) por pedido explícito do responsável. Nenhum backend, banco ou serviço externo foi usado.
+
+### 8.1 Melhorias visuais realizadas
+
+| Item da task | O que mudou |
+|---|---|
+| 6.1 Cabeçalho | Mantidos "Minha Arena" e o selo "ATIVA". Subtítulo mais curto, "Participação ativa · dados do servidor", que cabe em uma linha a 390 px. Sem nome de evento, porque o contrato não o fornece (§3). |
+| 6.2 Aviso de entrada | Linha compacta (borda e fundo `semantic.success`), com indicador circular e ícone `check` + texto. O mesmo estado `notice`; apresentação e remoção inalteradas. |
+| 6.3 Card da fila | Linha superior com "NA FILA" + ícone de fila; título "Você está na fila" (`titleMedium`); nome da experiência com ícone `gamepad` (`bodyLarge`, primário, até 2 linhas); **painel da posição** (fundo `brand.primaryDim`, borda `brand.primary`, `radii.lg`) com "Posição" e o número em 44 px / peso 800, o maior texto da tela. A frase "Posição Nº" segue como um único `Text` (rótulo e número aninhados), com `accessibilityLabel` "Posição na fila: Nº". |
+| 6.4 Atualização automática | Divisor e linha discreta com ícone `refresh` e o texto existente (intervalo de 5 s inalterado). Com conexão instável: o painel passa a tom de aviso e rótulo "Última posição confirmada", o número fica em cor secundária e a nota diz "Exibindo as últimas informações confirmadas; reconectando automaticamente...". O aviso "INSTÁVEL" do topo foi mantido e passou a usar os tokens `semantic.warning`/`warningBg` no lugar das cores fixas. |
+| 7 Chamado | Selo "SUA VEZ" em verde, ícone `door` e painel verde "Dirija-se à estação: X". Nenhuma posição de espera é exibida. |
+| 7 Tentativa pendente | Mesmo conteúdo e botão "Conferir / repetir a mesma tentativa", agora com ícone de alerta e o mesmo espaçamento do card da fila. |
+| 6.5 Experiências | Cabeçalho da seção com a quantidade ("3 experiências"); card com ícone `gamepad` em caixa (apagada quando encerrada), nome (até 2 linhas), ícone de fila + contagem com plural correto, selo ABERTA/ENCERRADA, divisor e linha com ponto de status + "Recebendo entradas"/"Entrada na fila encerrada". Na experiência da entrada atual (`currentQueueEntry.experienceId`), borda roxa e selo "SUA FILA". A ordem do servidor é mantida. |
+| 6.6 Contadores | Não implementados (nenhum "Concluídas"). |
+| 6.8 Ações | Seção própria após a lista: "Atualizar fila e experiências" e "Atualizar situação da participação" em tamanho `md`; divisor; "Sair da Arena"; nota do Staff com ícone. Títulos, `disabled` e handlers idênticos. |
+
+### 8.2 Arquivos
+
+| Arquivo | Alteração |
+|---|---|
+| `app/screens/arena/RealArenaScreen.js` | Imports (`LineIcon`, `radii`, utilitário) e o bloco visual (derivações de apresentação após `lockActions`, JSX e estilos). **Nenhuma linha de lógica alterada:** hooks, ordem dos `useState`, polling, `refresh`, `syncSilent`, `join`, `finish`, alertas e guardas de sessão continuam idênticos (o diff começa depois de `lockActions`). |
+| `app/components/ui/LineIcon.js` | Novo desenho `check` (L de bordas girado 45°, mesmo padrão de `View`, sem dependência). |
+| `app/utils/arenaQueuePresentation.js` (novo) | `formatWaitingCount`, `formatQueuePosition` e `formatExperienceCount`: só formatação de números do servidor. |
+| `app/tests/participante02aFilaVisual.test.cjs` (novo) | 12 testes (§8.4). |
+| `qa-evidence/PARTICIPANTE_02A-changes.diff` (novo) | Patch da task (§8.8). |
+
+Sem alteração de backend, contratos, serviços, intenções, idempotência, polling, navegação, `ExternalQueueScreen`, `ActiveArenaScreen` ou `ArenaQueueScreen`.
+
+### 8.3 Componentes reutilizados
+
+`AuthBackground` (inalterado), `ScreenHeader`, `Card` (`highlight`, `elevated`, `default`), `Badge` (`brand`, `success`, `warning`, `danger`, `default`), `Button` (`primary`, `secondary`, `outline`, `dangerOutline`; tamanho `md` nas ações), `LineIcon` (`queue`, `gamepad`, `refresh`, `alert`, `door` e o novo `check`) e os tokens `colors`, `spacing`, `radii` e `typography`. Nenhuma biblioteca nova, nenhum emoji, nenhuma dimensão tirada de pixels do mockup.
+
+### 8.4 Testes executados
+
+| Comando (em `app/`) | SHA testado | Total | Aprov. | Falhas | Cancel. | Ignor. | Exit |
+|---|---|---|---|---|---|---|---|
+| Suítes da Arena antes dos testes novos: `autoQueueSync`, `participationActionScreens`, `homeFlow`, `homeReturnEvaluation`, `arenaQueue`, `activeArena`, `arenaQueueService.integration`, `arenaAccessGuard.integration`, `roleRoutingIntegration`, `uiComponents` | working tree sobre `43eb5fe` | 176 | 176 | 0 | 0 | 0 | 0 |
+| `node --test tests/participante02aFilaVisual.test.cjs` | idem | 12 | 12 | 0 | 0 | 0 | 0 |
+| `npm test` (suíte completa, com deps de `qa/regression`) | idem (idêntico ao commit da task) | **1009** | **1009** | 0 | 0 | 0 | 0 |
+| `npx expo export --platform android` / `ios` | idem | — | — | — | — | — | 0 / 0 |
+| `git diff --check` | idem | — | — | — | — | — | sem problemas |
+
+- 1009 = 997 (campanha da PARTICIPANTE-01 R02) + 12 novos. Nenhum teste existente foi alterado ou removido: as 176 verificações da Arena passaram com a tela nova sem ajuste.
+- Os testes novos cobrem a matriz do §10 da task: ativo sem fila (02A-02), aguardando com a posição como maior tipografia (02A-03), posição alterada (02A-04), chamado sem posição (02A-05), abertas/encerradas e encerramento global (02A-06), conexão instável identificando a última posição confirmada (02A-07), tentativa pendente (02A-08), atualização manual e saída com os mesmos handlers (02A-09), nome longo e posição de 4 dígitos (02A-10), aviso compacto só com aviso real (02A-11), sem contadores, sem emojis e só ícones do `LineIcon` (02A-12), plural e ordinal (02A-01).
+
+### 8.5 Conferência visual local (não é evidência)
+
+Para conferir o layout sem aparelho, a tela real foi renderizada com `react-native-web` (dependência já existente do app), usando os componentes e o tema reais e estados simulados. As capturas foram feitas no Chrome headless a 390 px de largura: aguardando, chamado, sem fila, conexão instável, nome longo/posição 1234 e tentativa pendente. A conferência levou a um ajuste: o subtítulo do cabeçalho foi encurtado porque ocupava duas linhas. O script e as imagens ficaram só na pasta temporária do assistente e **não foram versionados**. Também **não servem de evidência para o paper**: não rodam no app, não usam dados reais e não carregam o background de imagem nem as fontes do aparelho.
+
+### 8.6 Captura real para o paper: PENDENTE (passos para o responsável)
+
+Não há aparelho, emulador nem backend com banco neste ambiente. Para obter a captura real:
+
+1. Backend em ambiente de teste autorizado, com um **evento aberto e fila externa desativada** (`externalQueueEnabled = false`). Assim o ingresso cria a participação já `active` (`participations.service.ts`, `status = externalQueueEnabled ? "waiting" : "active"`) e o app abre a Minha Arena (`RealArenaScreen`). Com a fila externa ativa, o participante vê primeiro a `ExternalQueueScreen` até a liberação pelo Staff.
+2. Experiências e estações cadastradas e disponíveis (Admin).
+3. Conta de teste de participante com questionário completo e **nome fictício**.
+4. No aparelho: entrar no evento (QR Code ou código) → Confirmar entrada → abrir Minha Arena.
+5. Para uma posição maior que 1º, outras contas de teste entram antes na mesma experiência.
+6. Tocar em "Entrar na fila" na experiência escolhida. Aparece "Entrada na fila confirmada pelo servidor." e o card "Você está na fila" com a posição real.
+7. O Staff **não** deve chamar o participante até a captura. Capturar com o atalho do aparelho, sem edição posterior. A tela não mostra dados pessoais; conferir a barra de notificações antes.
+
+### 8.7 Limitações e decisões
+
+- **Mockup:** `ArenaGO_02_Fila_Padronizada(4).png` continua indisponível. A comparação com ele fica pendente.
+- **Nome do evento:** não exibido. `GET /participations/current` não o fornece, e a task proíbe endpoint novo.
+- **Nota de 5 s:** mantida literalmente ("…atualizadas automaticamente a cada 5 segundos."). É verdadeira (o intervalo é 5 s) e já era verificada por teste existente.
+- **Validação física** (Android/iOS, fonte ampliada, áreas seguras, navegação inferior): pendente, pelo mesmo motivo da §8.6. O `ScrollView` e os `paddings` existentes foram mantidos.
+- Nenhuma necessidade de alteração funcional foi identificada.
+
+### 8.8 Git e evidências
+
+- `43eb5fe`: `docs(participante): iniciar documentacao da PARTICIPANTE-02A`, **somente** §1–§7 deste documento, antes de qualquer código.
+- Commit seguinte: `feat(participante): aprimorar interface da fila virtual` (código, testes, esta seção e o patch).
+- **Patch:** `qa-evidence/PARTICIPANTE_02A-changes.diff`, base `94766a13c80bc3c91f0963c9db9acea35efac488` (SHA de início da task). Escopo: todo o trabalho da task, isto é, documento inicial, código, testes e esta atualização, exceto o próprio patch. Verificado com `git apply --check` sobre a base.
+- Push sem force em `feature/heliom-participante-ux`, com a conta `heliom13` (a mesma das entregas anteriores). Sem merge na `develop`. PARTICIPANTE-01 e o restante da PARTICIPANTE-02 não foram retomados.
+
+**Estado da task:** PARTICIPANTE-02A entregue para validação. A captura real e a comparação com o mockup ficam pendentes com o responsável.
