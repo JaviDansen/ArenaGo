@@ -525,6 +525,8 @@ Sem alteração de schema, migration, retenção, autenticação ou contratos de
 
 ### 11.14 Commits da revisão
 
-- Registrados no commit seguinte, após o push do commit principal.
+- `84ffb2aea82128531c41f1a442bb160b63aeeac6`: `fix(participante): garantir reconciliacao segura de intencoes de ingresso` (código, testes, este documento e `qa-evidence/PARTICIPANTE_01_R02-changes.diff`). O código desse commit é idêntico ao working tree testado em 11.11. Depois dos testes mudaram apenas este documento e o patch.
+- Commit seguinte: somente este registro de commits no documento.
+- Push para `origin/feature/heliom-participante-ux` sem force (`970ae10..84ffb2a`), com a conta `heliom13`, a mesma das entregas anteriores. O SHA final da branch é o do commit de registro, informado no resumo da entrega.
 
 **Estado da task:** Revisão 02 entregue para revalidação — não aprovada.
