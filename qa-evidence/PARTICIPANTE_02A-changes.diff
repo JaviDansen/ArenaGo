@@ -1,8 +1,28 @@
 diff --git a/app/components/ui/LineIcon.js b/app/components/ui/LineIcon.js
-index 23dd714..3ba3100 100644
+index 23dd714..deea739 100644
 --- a/app/components/ui/LineIcon.js
 +++ b/app/components/ui/LineIcon.js
-@@ -89,6 +89,10 @@ const DRAWINGS = {
+@@ -9,6 +9,19 @@ const BASE = 20;
+ const STROKE = 1.8;
+ 
+ const DRAWINGS = {
++  bell: (color) => (
++    <>
++      <View style={[styles.bellHandle, { backgroundColor: color }]} />
++      <View style={[styles.bellBody, { borderColor: color }]} />
++      <View style={[styles.bellBase, { backgroundColor: color }]} />
++      <View style={[styles.bellClapper, { backgroundColor: color }]} />
++    </>
++  ),
++  location: (color) => (
++    <View style={[styles.locationPin, { borderColor: color }]}>
++      <View style={[styles.locationDot, { borderColor: color }]} />
++    </View>
++  ),
+   qr: (color) => (
+     <>
+       {[[1, 1], [11, 1], [1, 11]].map(([left, top]) => (
+@@ -89,6 +102,10 @@ const DRAWINGS = {
        <View style={[styles.refreshHead, { borderLeftColor: color }]} />
      </View>
    ),
@@ -13,7 +33,20 @@ index 23dd714..3ba3100 100644
  };
  
  export const LINE_ICON_NAMES = Object.keys(DRAWINGS);
-@@ -254,6 +258,17 @@ const styles = StyleSheet.create({
+@@ -113,6 +130,12 @@ export function LineIcon({ name, color = '#FFFFFF', size = BASE, style, testID }
+ }
+ 
+ const styles = StyleSheet.create({
++  bellHandle: { position: 'absolute', top: 1, width: 2, height: 3, borderRadius: 1 },
++  bellBody: { position: 'absolute', top: 3, width: 12, height: 11, borderWidth: STROKE, borderTopLeftRadius: 7, borderTopRightRadius: 7 },
++  bellBase: { position: 'absolute', top: 13, width: 16, height: STROKE, borderRadius: 1 },
++  bellClapper: { position: 'absolute', top: 16, width: 4, height: 2.5, borderRadius: 2 },
++  locationPin: { width: 13, height: 13, borderWidth: STROKE, borderRadius: 7, borderBottomRightRadius: 1, transform: [{ rotate: '45deg' }], alignItems: 'center', justifyContent: 'center', marginTop: -3 },
++  locationDot: { width: 4, height: 4, borderWidth: STROKE - 0.3, borderRadius: 2 },
+   canvas: {
+     position: 'absolute',
+     left: 0,
+@@ -254,6 +277,17 @@ const styles = StyleSheet.create({
      borderBottomColor: 'transparent',
      transform: [{ rotate: '90deg' }],
    },
@@ -32,48 +65,106 @@ index 23dd714..3ba3100 100644
  
  export default LineIcon;
 diff --git a/app/screens/arena/RealArenaScreen.js b/app/screens/arena/RealArenaScreen.js
-index 35a31d6..9c345d1 100644
+index 35a31d6..cfa81a6 100644
 --- a/app/screens/arena/RealArenaScreen.js
 +++ b/app/screens/arena/RealArenaScreen.js
-@@ -4,14 +4,15 @@ import { StatusBar } from 'expo-status-bar';
+@@ -2,16 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useFocusEffect } from '@react-navigation/native';
+ import { StatusBar } from 'expo-status-bar';
  import * as Crypto from 'expo-crypto';
- import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
+-import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
++import { ActivityIndicator, Alert, AppState, Image, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
  
 -import { AuthBackground, Badge, Button, Card, ScreenHeader } from '../../components/ui';
-+import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
++import { AuthBackground, Badge, Button, Card, LineIcon } from '../../components/ui';
  import { useAuth } from '../../context/AuthContext';
  import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
  import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
  import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
- import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
+-import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
++import { fetchCurrentArenaEventName, fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
  import { createQueueAlertManager } from '../../services/queueAlertService';
 -import { colors, spacing, typography } from '../../theme';
 +import { colors, radii, spacing, typography } from '../../theme';
 +import { formatExperienceCount, formatQueuePosition, formatWaitingCount } from '../../utils/arenaQueuePresentation';
++
++// Variações locais violeta da R01; não alteram o tema dos demais módulos.
++const arenaPalette = { surface: '#191326', secondary: '#181626', selected: '#241632',
++  position: '#503078', border: '#A855F7', accent: '#B56CFF', support: '#C4BBD2' };
  
  /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
  export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
-@@ -401,13 +402,18 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -43,6 +48,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+   const [syncStale, setSyncStale] = useState(false);
+   const [finished, setFinished] = useState(false);
+   const [readError, setReadError] = useState(null);
++  const [eventNameState, setEventNameState] = useState(null);
++  const [eventNameAttempt, setEventNameAttempt] = useState(0);
++  const eventNameKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}:${eventId}`;
++  const eventNameKeyRef = useRef(eventNameKey);
++  eventNameKeyRef.current = eventNameKey;
+   const busyRef = useRef(false);
+   const alertManagerRef = useRef(null);
+   const mountedRef = useRef(false);
+@@ -50,6 +60,22 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+   const appStateRef = useRef(AppState?.currentState || 'active');
+ 
+   const sessionKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}`;
++  useEffect(() => {
++    let current = true;
++    const isCurrent = () => current && eventNameKeyRef.current === eventNameKey
++      && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
++      && typeof getEpoch === 'function' && getEpoch() === epoch;
++    setEventNameState({ key: eventNameKey, loading: true, name: null, error: false });
++    (async () => {
++      try {
++        const name = await fetchCurrentArenaEventName(client, participationId, eventId, { isCurrent });
++        if (isCurrent()) setEventNameState({ key: eventNameKey, loading: false, name, error: !name });
++      } catch {
++        if (isCurrent()) setEventNameState({ key: eventNameKey, loading: false, name: null, error: true });
++      }
++    })();
++    return () => { current = false; };
++  }, [client, userId, getEpoch, epoch, participationId, eventId, eventNameKey, eventNameAttempt]);
+   if (lastSessionKeyRef.current !== sessionKey) {
+     lastSessionKeyRef.current = sessionKey;
+     initialReadDoneRef.current = false;
+@@ -401,17 +427,27 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
    const pendingHere = pending?.participationId === participationId;
    const hasOtherPending = Boolean(pending && !pendingHere);
    const lockActions = busy || loading || Boolean(entry) || Boolean(pending);
 +  // PARTICIPANTE-02A: derivações somente de apresentação; os dados continuam vindo do servidor.
 +  const waiting = entry?.status === 'waiting';
++  const called = entry?.status === 'called';
 +  const positionText = waiting ? formatQueuePosition(entry.position) : null;
 +  const positionLabel = syncStale ? 'Última posição confirmada' : 'Posição';
 +  const experienceCount = state ? formatExperienceCount(state.experiences.length) : null;
++  const currentEventName = eventNameState?.key === eventNameKey ? eventNameState : null;
  
    return (
      <AuthBackground variant="login" overlayOpacity={0.7} testID="active-arena-background">
        <StatusBar style="light" />
-       <ScreenHeader
-         title="Minha Arena"
+-      <ScreenHeader
+-        title="Minha Arena"
 -        subtitle="Participação ativa · informações do servidor"
-+        subtitle="Participação ativa · dados do servidor"
-         showBack={false}
-         rightAction={<Badge label="ATIVA" variant="success" />}
-       />
-@@ -425,9 +431,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+-        showBack={false}
+-        rightAction={<Badge label="ATIVA" variant="success" />}
+-      />
+-      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
++      <View style={styles.header} testID="arena-header">
++        <View style={styles.headerRow}>
++          <Text style={[styles.heading, styles.headerTitle]} accessibilityRole="header">{currentEventName?.name || (currentEventName?.error ? 'Evento indisponível' : 'Carregando evento...')}</Text>
++          <Image source={require('../../assets/images/Logo ArenaGO render (admin-staff).png')}
++            resizeMode="contain" style={styles.headerLogo} accessible accessibilityRole="image"
++            accessibilityLabel="ArenaGO" testID="arena-header-logo" />
++        </View>
++        <Text style={styles.headerSubtitle}>Sua participação em tempo real</Text>
++      </View>
++      <ScrollView style={styles.scroll} contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+         {loading && !state ? (
+           <Card variant="elevated" style={styles.stateCard}>
+             <ActivityIndicator accessibilityLabel="Consultando a Arena" color={colors.brand.primaryLight} />
+@@ -425,9 +461,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
            </View>
          ) : null}
          {notice ? (
@@ -88,7 +179,7 @@ index 35a31d6..9c345d1 100644
            </View>
          ) : null}
          {syncStale ? (
-@@ -440,25 +448,62 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -440,25 +478,65 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
          ) : null}
  
          {entry ? (
@@ -103,21 +194,18 @@ index 35a31d6..9c345d1 100644
 -              {syncStale
 -                ? 'A conexão com o servidor oscilou. Tentando reconectar automaticamente...'
 -                : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
-+          <Card variant="highlight" style={styles.queueCard} testID="arena-queue-entry-card">
++          <Card variant="highlight" style={[styles.queueCard, called && styles.calledCard]} testID="arena-queue-entry-card">
 +            <View style={styles.cardTopRow}>
 +              <Badge label={waiting ? 'NA FILA' : 'SUA VEZ'} variant={waiting ? 'brand' : 'success'} />
-+              <LineIcon
-+                name={waiting ? 'queue' : 'door'}
-+                color={waiting ? colors.brand.primaryLight : colors.semantic.success}
-+                size={22}
-+              />
++              {called ? <LineIcon name="bell" color={arenaPalette.accent} size={22} /> : null}
 +            </View>
 +            <Text style={styles.queueTitle} accessibilityRole="header">
 +              {waiting ? 'Você está na fila' : 'É a sua vez!'}
              </Text>
++            {called ? <Text style={styles.calledMessage}>O Staff está aguardando você.</Text> : null}
 +            <View style={styles.queueExperienceRow}>
-+              <LineIcon name="gamepad" color={colors.text.secondary} size={18} />
-+              <Text style={styles.queueExperience} numberOfLines={2}>{entry.experienceName}</Text>
++              <LineIcon name="gamepad" color={arenaPalette.accent} size={22} />
++              <Text style={styles.queueExperience}>{entry.experienceName}</Text>
 +            </View>
 +            {waiting ? (
 +              <View
@@ -126,25 +214,31 @@ index 35a31d6..9c345d1 100644
 +                accessibilityLabel={`${positionLabel} na fila: ${positionText}`}
 +                testID="arena-queue-position"
 +              >
-+                <Text style={styles.positionLine}>
++                <LineIcon name="queue" color={colors.text.primary} size={22} />
++                <View style={styles.positionDivider} />
++                <View style={styles.positionLine} testID="arena-position-text">
 +                  <Text style={styles.positionLabel}>{`${positionLabel} `}</Text>
-+                  <Text style={[styles.positionNumber, syncStale && styles.positionNumberStale]}>{positionText}</Text>
-+                </Text>
++                  <Text style={[styles.positionNumber, syncStale && styles.positionNumberStale]} testID="arena-position-number">{positionText}</Text>
++                </View>
 +              </View>
 +            ) : (
-+              <View style={styles.stationPanel} testID="arena-queue-station">
-+                <Text style={styles.stationText}>Dirija-se à estação: {entry.stationLabel}</Text>
++              <View style={styles.stationPanel} testID="arena-queue-station" accessible accessibilityLabel={`Dirija-se à estação: ${entry.stationLabel}`}>
++                <LineIcon name="location" color={arenaPalette.accent} size={24} />
++                <View style={styles.stationDivider} />
++                <View style={styles.stationInfo}>
++                  <Text style={styles.stationLabel}>Dirija-se à estação</Text>
++                  <Text style={styles.stationText}>{entry.stationLabel}</Text>
++                </View>
 +              </View>
 +            )}
-+            <View style={styles.divider} />
 +            <View style={styles.autoUpdateRow}>
 +              <LineIcon
-+                name={syncStale ? 'alert' : 'refresh'}
-+                color={syncStale ? colors.semantic.warning : colors.text.muted}
++                name={called ? 'door' : syncStale ? 'alert' : 'refresh'}
++                color={called ? arenaPalette.support : syncStale ? colors.semantic.warning : arenaPalette.support}
 +                size={14}
 +              />
-+              <Text style={[styles.autoUpdateText, syncStale && styles.autoUpdateTextStale]}>
-+                {syncStale
++              <Text style={[styles.autoUpdateText, !called && syncStale && styles.autoUpdateTextStale]}>
++                {called ? 'Apresente-se ao Staff para iniciar sua experiência.' : syncStale
 +                  ? 'A conexão com o servidor oscilou. Exibindo as últimas informações confirmadas; reconectando automaticamente...'
 +                  : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
 +              </Text>
@@ -165,7 +259,15 @@ index 35a31d6..9c345d1 100644
              <Text style={styles.line}>
                {hasOtherPending
                  ? 'Há uma solicitação pendente de outra participação nesta conta. Não será criada uma nova entrada.'
-@@ -476,7 +521,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -468,6 +546,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+               <Button
+                 title="Conferir / repetir a mesma tentativa"
+                 variant="outline"
++                textStyle={styles.secondaryActionText}
+                 disabled={busy || loading}
+                 onPress={() => join(pending.experienceId)}
+                 style={styles.actionButton}
+@@ -476,7 +555,10 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
            </Card>
          ) : null}
  
@@ -177,7 +279,7 @@ index 35a31d6..9c345d1 100644
          {state?.experiences.length === 0 ? (
            <Card variant="default" style={styles.card}>
              <Text style={styles.line}>Nenhuma experiência cadastrada.</Text>
-@@ -484,14 +532,33 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+@@ -484,18 +566,37 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
          ) : null}
          {state?.experiences.map((experience) => {
            const permitted = state.acceptingNewQueueEntries && experience.acceptingNewQueueEntries;
@@ -187,35 +289,40 @@ index 35a31d6..9c345d1 100644
 +            <Card
 +              key={experience.id}
 +              variant="default"
-+              style={[styles.card, mine && styles.cardMine]}
++              padding={spacing.md}
++              style={[styles.card, Boolean(entry) && styles.cardCompact, mine && styles.cardMine]}
 +              testID={`arena-experience-${experience.id}`}
 +            >
                <View style={styles.experienceHeader}>
 -                <Text style={styles.cardTitle}>{experience.name}</Text>
+-                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
 +                <View style={[styles.experienceIcon, !permitted && styles.experienceIconClosed]}>
-+                  <LineIcon name="gamepad" color={permitted ? colors.brand.primaryLight : colors.text.muted} size={22} />
++                  <LineIcon name="gamepad" color={permitted ? arenaPalette.accent : colors.text.secondary} size={24} />
 +                </View>
 +                <View style={styles.experienceInfo}>
-+                  <Text style={styles.cardTitle} numberOfLines={2}>{experience.name}</Text>
++                  <Text style={styles.cardTitle}>{experience.name}</Text>
 +                  <View style={styles.waitingRow}>
 +                    <LineIcon name="queue" color={colors.text.secondary} size={14} />
 +                    <Text style={styles.waitingText}>{formatWaitingCount(experience.waitingCount)}</Text>
 +                  </View>
++                  {mine ? <View style={styles.mineLabel}><Badge label={called ? 'CHAMADO' : 'SUA FILA'} variant="brand" size="sm" /></View> : null}
 +                </View>
-                 <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
++                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" style={!permitted ? styles.closedBadge : undefined} />
                </View>
 -              <Text style={styles.line}>{experience.waitingCount} pessoa(s) aguardando</Text>
 -              <Text style={styles.note}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
-+              <View style={styles.divider} />
-+              <View style={styles.experienceFooter}>
-+                <View style={[styles.statusDot, permitted ? styles.statusDotOpen : styles.statusDotClosed]} />
-+                <Text style={styles.experienceStatus}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
-+                {mine ? <Badge label="SUA FILA" variant="brand" size="sm" /> : null}
-+              </View>
++              {!entry ? <View style={styles.experienceFooter}>
++                {!entry ? <Text style={styles.experienceStatus}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text> : null}
++              </View> : null}
                {!entry && !pending && permitted ? (
                  <Button
                    title={busy ? 'Verificando...' : 'Entrar na fila'}
-@@ -504,30 +571,40 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+                   variant="primary"
++                  size="sm"
+                   disabled={lockActions}
+                   onPress={() => join(experience.id)}
+                   style={styles.actionButton}
+@@ -504,65 +605,166 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
              </Card>
            );
          })}
@@ -245,55 +352,59 @@ index 35a31d6..9c345d1 100644
 -        </Text>
 +
 +        <View style={styles.actionsSection}>
-+          <Button
-+            title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
-+            variant="secondary"
-+            size="md"
++          {error || readError || syncStale || currentEventName?.error ? <Button
++            title="Tentar novamente"
++            variant="ghost"
++            size="sm"
++            textStyle={styles.secondaryActionText}
 +            disabled={busy || loading}
-+            onPress={refresh}
++            onPress={() => { void refresh(); setEventNameAttempt(value => value + 1); }}
 +            style={styles.actionButton}
-+          />
-+          <Button
-+            title="Atualizar situação da participação"
-+            variant="outline"
-+            size="md"
-+            onPress={refreshParticipation}
-+            style={styles.actionButton}
-+          />
-+          <View style={styles.actionsDivider} />
++          /> : null}
 +          <Button
 +            title={busy ? 'Aguarde...' : 'Sair da Arena'}
 +            variant="dangerOutline"
 +            size="md"
 +            disabled={busy || loading || finished || Boolean(pending)}
 +            onPress={finish}
-+            style={styles.actionButton}
++            style={styles.leaveAction}
++            textStyle={styles.leaveActionText}
 +          />
 +          <View style={styles.staffNoteRow}>
 +            <LineIcon name="alert" color={colors.text.muted} size={14} />
 +            <Text style={styles.staffNote}>
-+              Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
-+              nem permite cancelar somente a fila.
++              O Staff realiza a chamada e o atendimento. A saída encerra sua participação na Arena.
 +            </Text>
 +          </View>
 +        </View>
        </ScrollView>
      </AuthBackground>
    );
-@@ -536,33 +613,111 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
+ }
+ 
  const styles = StyleSheet.create({
-   body: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.md, paddingBottom: 40 },
-   stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg },
+-  body: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.md, paddingBottom: 40 },
+-  stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg },
 -  sectionTitle: { ...typography.titleSmall, color: colors.text.primary, marginTop: spacing.lg },
 -  highlight: { marginBottom: spacing.lg, alignItems: 'flex-start' },
 -  card: { marginBottom: spacing.md, alignItems: 'stretch' },
 -  experienceHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
 -  cardTitle: { ...typography.titleSmall, color: colors.text.primary, flex: 1 },
++  header: { paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingVertical: spacing.sm },
++  headerRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
++  headerTitle: { flex: 1, minWidth: 0 },
++  headerLogo: { width: 96, height: 32, flexShrink: 0 },
++  heading: { ...typography.titleLarge, color: colors.text.primary },
++  headerSubtitle: { ...typography.bodySmall, color: arenaPalette.support, marginTop: spacing.xxs },
++  scroll: { flex: 1, minHeight: 0 },
++  body: { paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.sm, paddingBottom: spacing.xxxl },
++  stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg, backgroundColor: colors.background.base, borderColor: `${colors.brand.primaryLight}40` },
    line: { ...typography.body, color: colors.text.secondary, marginTop: spacing.sm },
 -  position: { ...typography.titleMedium, color: colors.brand.primaryLight, marginTop: spacing.md },
 -  note: { ...typography.bodySmall, color: colors.text.muted, marginTop: spacing.md, lineHeight: 20 },
    actionButton: { marginTop: spacing.md },
 -  errorCard: { borderColor: colors.semantic.danger, borderWidth: 1, backgroundColor: colors.semantic.dangerBg, borderRadius: 12, padding: spacing.lg, marginBottom: spacing.md },
++  secondaryActionText: { color: colors.brand.primaryLight },
 +  divider: { height: 1, alignSelf: 'stretch', backgroundColor: colors.border.subtle, marginTop: spacing.md },
 +
 +  // Avisos
@@ -344,60 +455,71 @@ index 35a31d6..9c345d1 100644
 +  syncWarningText: { ...typography.bodySmall, color: colors.semantic.warning, flex: 1 },
 +
 +  // Card principal da fila
-+  queueCard: { marginBottom: spacing.lg, alignItems: 'stretch' },
++  queueCard: { marginBottom: spacing.sm, alignItems: 'stretch', padding: spacing.lg, backgroundColor: arenaPalette.surface, borderColor: arenaPalette.border },
++  calledCard: { borderColor: arenaPalette.border },
++  calledMessage: { ...typography.bodySmall, color: arenaPalette.support, marginTop: spacing.xs },
 +  cardTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
-+  queueTitle: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.md },
++  queueTitle: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.sm },
 +  queueExperienceRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs },
 +  queueExperience: { ...typography.bodyLarge, color: colors.text.primary, flex: 1 },
 +  positionPanel: {
-+    marginTop: spacing.lg,
-+    paddingVertical: spacing.md,
-+    paddingHorizontal: spacing.lg,
++    marginTop: spacing.md,
++    paddingVertical: spacing.xs,
++    paddingHorizontal: spacing.md,
 +    borderRadius: radii.lg,
 +    borderWidth: 1,
-+    borderColor: colors.brand.primary,
-+    backgroundColor: colors.brand.primaryDim,
-+  },
-+  positionPanelStale: { borderColor: colors.semantic.warning, backgroundColor: colors.semantic.warningBg },
-+  positionLine: { color: colors.text.primary },
-+  positionLabel: { ...typography.bodyLarge, color: colors.text.secondary },
-+  positionNumber: { fontFamily: typography.fontFamily, fontSize: 44, lineHeight: 52, fontWeight: '800', letterSpacing: -0.5, color: colors.text.primary },
-+  positionNumberStale: { color: colors.text.secondary },
-+  stationPanel: {
-+    marginTop: spacing.lg,
-+    paddingVertical: spacing.md,
-+    paddingHorizontal: spacing.lg,
-+    borderRadius: radii.lg,
-+    borderWidth: 1,
-+    borderColor: colors.semantic.success,
-+    backgroundColor: colors.semantic.successBg,
++    borderColor: arenaPalette.accent,
++    backgroundColor: arenaPalette.position,
++    flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 56,
    },
-+  stationText: { ...typography.titleSmall, color: colors.text.primary },
-+  autoUpdateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
-+  autoUpdateText: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
++  positionPanelStale: { borderColor: colors.semantic.warning, backgroundColor: colors.semantic.warningBg },
++  positionDivider: { width: 1, height: 28, backgroundColor: arenaPalette.accent },
++  positionLine: { flex: 1, minWidth: 0, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: spacing.xs },
++  positionLabel: { fontFamily: typography.fontFamily, fontSize: 22, fontWeight: '700', color: colors.text.primary, flexShrink: 1 },
++  // Text nativo independente: métricas próprias, sem herdar a linha pequena de um Text pai.
++  positionNumber: { fontFamily: typography.fontFamily, fontSize: 34, fontWeight: '800', color: colors.text.primary, flexShrink: 1 },
++  positionNumberStale: { color: colors.semantic.warning },
++  stationPanel: {
++    marginTop: spacing.md,
++    padding: spacing.md,
++    borderRadius: radii.lg,
++    borderWidth: 1,
++    borderColor: `${arenaPalette.border}80`,
++    backgroundColor: arenaPalette.selected,
++    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
++  },
++  stationDivider: { width: 1, height: 28, backgroundColor: arenaPalette.accent },
++  stationInfo: { flex: 1, minWidth: 0 },
++  stationLabel: { ...typography.bodySmall, color: colors.text.secondary },
++  stationText: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.xxs },
++  autoUpdateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs },
++  autoUpdateText: { ...typography.bodySmall, color: arenaPalette.support, flex: 1 },
 +  autoUpdateTextStale: { color: colors.semantic.warning },
 +
 +  // Experiências
-+  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.lg, marginBottom: spacing.md },
++  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.sm, marginBottom: spacing.sm },
 +  sectionTitle: { ...typography.titleSmall, color: colors.text.primary, flexShrink: 1 },
-+  sectionMeta: { ...typography.bodySmall, color: colors.text.muted },
-+  card: { marginBottom: spacing.md, alignItems: 'stretch' },
-+  cardMine: { borderColor: colors.brand.primary },
++  sectionMeta: { ...typography.bodySmall, color: colors.text.secondary },
++  card: { marginBottom: spacing.sm, alignItems: 'stretch', backgroundColor: arenaPalette.secondary, borderColor: `${arenaPalette.border}80` },
++  cardCompact: { paddingVertical: spacing.sm },
++  cardMine: { borderColor: arenaPalette.border, backgroundColor: arenaPalette.selected },
++  mineLabel: { alignSelf: 'flex-start', marginTop: spacing.xs },
 +  experienceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
 +  experienceIcon: {
-+    width: 44,
-+    height: 44,
++    width: 36,
++    height: 36,
 +    borderRadius: radii.md,
 +    alignItems: 'center',
 +    justifyContent: 'center',
-+    backgroundColor: colors.brand.primaryDim,
++    backgroundColor: `${arenaPalette.border}20`,
 +  },
-+  experienceIconClosed: { backgroundColor: colors.background.elevated },
++  experienceIconClosed: { backgroundColor: colors.background.base },
++  closedBadge: { backgroundColor: colors.background.base },
 +  experienceInfo: { flex: 1, minWidth: 0 },
 +  cardTitle: { ...typography.titleSmall, color: colors.text.primary },
 +  waitingRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs },
 +  waitingText: { ...typography.bodySmall, color: colors.text.secondary },
-+  experienceFooter: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
++  experienceFooter: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flexWrap: 'wrap', marginTop: spacing.xs },
 +  statusDot: { width: 8, height: 8, borderRadius: 4 },
 +  statusDotOpen: { backgroundColor: colors.semantic.success },
 +  statusDotClosed: { backgroundColor: colors.text.disabled },
@@ -405,16 +527,188 @@ index 35a31d6..9c345d1 100644
 +
 +  // Ações
 +  actionsSection: { marginTop: spacing.sm },
-+  actionsDivider: { height: 1, backgroundColor: colors.border.subtle, marginTop: spacing.lg },
++  leaveAction: { marginTop: 0, borderColor: '#A84E66' },
++  leaveActionText: { color: '#E58A9D' },
 +  staffNoteRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginTop: spacing.lg },
 +  staffNote: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
  });
+diff --git a/app/services/participationHistoryService.js b/app/services/participationHistoryService.js
+index 6430365..48a21fb 100644
+--- a/app/services/participationHistoryService.js
++++ b/app/services/participationHistoryService.js
+@@ -65,6 +65,27 @@ export async function fetchParticipationHistory(client, { limit = 20, cursor = n
+   return parseHistoryResponse(await client.get(`/participations/history${query}`, { auth: true }));
+ }
+ 
++/** Nome oficial da participação corrente, sem cache entre contas/sessões/eventos. */
++export async function fetchCurrentArenaEventName(client, participationId, eventId, { isCurrent = () => true } = {}) {
++  if (!UUID.test(participationId) || !UUID.test(eventId)) throw new Error('Identidade da participação inválida.');
++  let cursor = null;
++  const seen = new Set();
++  do {
++    if (!isCurrent()) return null;
++    const page = await fetchParticipationHistory(client, { limit: 50, cursor });
++    if (!isCurrent()) return null;
++    const item = page.items.find(value => value.participationId === participationId);
++    if (item) {
++      if (item.event.id !== eventId || item.status !== 'active') throw new Error('Evento da participação não confirmado.');
++      return item.event.name;
++    }
++    cursor = page.nextCursor;
++    if (cursor && seen.has(cursor)) throw new Error('Cursor de histórico repetido.');
++    if (cursor) seen.add(cursor);
++  } while (cursor);
++  throw new Error('Nome do evento indisponível.');
++}
++
+ /** Só devolve o item real quando ambas as leituras confirmam avaliação pendente. */
+ export async function fetchPendingEvaluationHistoryItem(client, participationId, { isCurrent = () => true } = {}) {
+   if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');
+diff --git a/app/tests/autoQueueSync.test.cjs b/app/tests/autoQueueSync.test.cjs
+index 933adde..e7c3e82 100644
+--- a/app/tests/autoQueueSync.test.cjs
++++ b/app/tests/autoQueueSync.test.cjs
+@@ -512,7 +512,7 @@ test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos
+       };
+     }
+     if (name === '../../services/participationHistoryService') {
+-      return { fetchPendingEvaluationHistoryItem: async () => null };
++      return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+     }
+     if (name === '../../services/queueAlertService') {
+       return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+@@ -531,7 +531,7 @@ test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos
+     'deve exibir a nota de atualização automática a cada 5 segundos'
+   );
+   assert.ok(
+-    texts.some((t) => t.includes('Posição 3º')),
++    nodes(tree).some(n => n.props?.testID === 'arena-position-text' && textOf(n) === 'Posição 3º'),
+     'deve exibir a posição do participante na fila interna'
+   );
+ });
+@@ -600,7 +600,7 @@ test('RealArenaScreen (Cenário 8): useFocusEffect inicializa timer de 5s e limp
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -718,7 +718,7 @@ test('RealArenaScreen (Cenário 1): respostas fora de ordem entre gerações de
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -824,7 +824,7 @@ test('RealArenaScreen (Cenário 2): atualização manual não sobrepõe com poll
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -940,7 +940,7 @@ test('RealArenaScreen (Cenário 3): resposta tardia após logout ou troca de par
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -1051,7 +1051,7 @@ test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -1400,7 +1400,7 @@ test('RealArenaScreen: atualizações sucessivas de posição NÃO recriam o tim
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return {
+           createQueueAlertManager: () => ({
+@@ -1714,7 +1714,7 @@ test('RealArenaScreen (P1 - Concorrência join vs syncSilent): consulta antiga p
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
+       }
+@@ -1882,7 +1882,7 @@ test('RealArenaScreen (P2 - Vibração em Atualização Manual): chamada nova id
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return { createQueueAlertManager };
+       }
+@@ -2017,7 +2017,7 @@ test('RealArenaScreen (Regressão - Foco com Consulta Pendente): perda e recuper
+       if (name === '../../services/participationActionService') {
+         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
+       }
+-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+       if (name === '../../services/queueAlertService') {
+         return {
+           createQueueAlertManager: () => ({
+@@ -2164,7 +2164,7 @@ function createArenaAuditRig({ initialRead } = {}) {
+       createParticipationActionCoordinator: () => ({ finish: (...args) => finish(...args) }),
+       describeParticipationActionError: error => error.message,
+     };
+-    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++    if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
+     if (name === '../../services/queueAlertService') return { createQueueAlertManager };
+     return require(name);
+   });
+@@ -2320,7 +2320,8 @@ test('auditoria P2: leitura anterior à suspensão não consome referência vál
+     assert.equal(h.vibrations, 0);
+     resumed.resolve(auditArena(auditCalled()));
+     await h.flush();
+-    assert.match(h.text(), /Dirija-se à estação: Estação 1/);
++    assert.match(h.text(), /Dirija-se à estação/);
++    assert.match(h.text(), /Estação 1/);
+     assert.equal(h.vibrations, 0);
+     h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall))));
+     h.tick(); await h.flush(); h.tick(); await h.flush();
+diff --git a/app/tests/helpers/questionnaireHarness.cjs b/app/tests/helpers/questionnaireHarness.cjs
+index 00203aa..4d47622 100644
+--- a/app/tests/helpers/questionnaireHarness.cjs
++++ b/app/tests/helpers/questionnaireHarness.cjs
+@@ -31,6 +31,12 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
+   });
+   const module = { exports: {} };
+   const wrappedRequire = (id) => {
++    // Metro resolve este asset como recurso nativo; Node não deve interpretar PNG como JS.
++    if (relativePath.replace(/\\/g, '/') === 'screens/arena/RealArenaScreen.js'
++      && id === '../../assets/images/Logo ArenaGO render (admin-staff).png') {
++      readFileSync(path.resolve(path.dirname(filename), id));
++      return { uri: id };
++    }
+     try {
+       return requireModule ? requireModule(id) : require(id);
+     } catch (err) {
 diff --git a/app/tests/participante02aFilaVisual.test.cjs b/app/tests/participante02aFilaVisual.test.cjs
 new file mode 100644
-index 0000000..408dbbb
+index 0000000..3b3033b
 --- /dev/null
 +++ b/app/tests/participante02aFilaVisual.test.cjs
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,307 @@
 +// PARTICIPANTE-02A — aprimoramento visual da fila virtual (RealArenaScreen).
 +// Somente apresentação: os testes conferem que tudo exibido vem do estado do servidor e que
 +// as ações existentes continuam presentes e ligadas aos mesmos handlers.
@@ -448,8 +742,8 @@ index 0000000..408dbbb
 + * Renderiza a tela real com o mesmo harness dos testes existentes (autoQueueSync).
 + * Ordem dos `useState` da tela: state, busy, loading, error, notice, syncStale, finished, readError.
 + */
-+function render(arenaState, { notice = null, syncStale = false, busy = false } = {}) {
-+  const values = [arenaState, busy, false, null, notice, syncStale, false, null];
++function render(arenaState, { notice = null, syncStale = false, busy = false, readError = null, eventName = 'Evento oficial', eventNameError = false } = {}) {
++  const values = [arenaState, busy, false, null, notice, syncStale, false, readError, { key: `${USER}:1:${PARTICIPATION}:${EVENT}`, name: eventName, error: eventNameError }];
 +  const calls = { participation: 0, alerts: [] };
 +  let index = 0;
 +  const screen = loadModule('screens/arena/RealArenaScreen.js', (name) => {
@@ -466,7 +760,7 @@ index 0000000..408dbbb
 +    if (name === 'expo-crypto') return { randomUUID: () => '33333333-3333-4333-8333-333333333333' };
 +    if (name === 'react-native') {
 +      return {
-+        ActivityIndicator: 'ActivityIndicator',
++        ActivityIndicator: 'ActivityIndicator', Image: 'Image',
 +        Alert: { alert: (...args) => { calls.alerts.push(args); } },
 +        AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
 +        ScrollView: 'ScrollView', StyleSheet: { create: (s) => s }, Text: 'Text', View: 'View', Vibration: { vibrate() {} },
@@ -485,7 +779,7 @@ index 0000000..408dbbb
 +    if (name === '../../services/participationActionService') {
 +      return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
 +    }
-+    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
++    if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => eventName, fetchPendingEvaluationHistoryItem: async () => null };
 +    if (name === '../../services/queueAlertService') return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
 +    return require(name);
 +  }).exports.default;
@@ -495,7 +789,7 @@ index 0000000..408dbbb
 +  const texts = all.filter((n) => n.type === 'Text').map(textOf);
 +  return {
 +    all, texts, calls, refreshParticipation,
-+    has: (text) => texts.some((t) => t.includes(text)),
++    has: (text) => texts.some((t) => t.includes(text)) || all.some(n => n.props?.testID === 'arena-position-text' && textOf(n).includes(text)),
 +    exact: (text) => all.find((n) => n.type === 'Text' && textOf(n) === text),
 +    button: (title) => all.find((n) => n.props?.title === title && typeof n.type === 'function'),
 +    buttons: (title) => all.filter((n) => n.props?.title === title && typeof n.type === 'function'),
@@ -522,10 +816,15 @@ index 0000000..408dbbb
 +test('02A-02 (§10 ativo sem fila): experiências, entrada e ações continuam disponíveis', () => {
 +  const h = render(arena());
 +  assert.equal(h.byTestID('arena-queue-entry-card'), undefined, 'sem card de fila');
-+  const header = h.all.find((n) => typeof n.type === 'function' && n.props?.title === 'Minha Arena');
-+  assert.ok(header, 'título "Minha Arena" (o contrato atual não traz o nome do evento)');
-+  assert.equal(header.props.rightAction.props.label, 'ATIVA');
-+  assert.equal(header.props.rightAction.props.variant, 'success');
++  const header = h.byTestID('arena-header');
++  assert.ok(header, 'cabeçalho do evento corrente');
++  assert.ok(nodes(header).some(n => n.type === 'Text' && textOf(n) === 'Evento oficial'));
++  const active = nodes(header).find(n => n.props?.label === 'ATIVA');
++  assert.equal(active, undefined, 'selo ATIVA removido apenas da apresentação');
++  const logo = h.byTestID('arena-header-logo');
++  assert.equal(logo.type, 'Image');
++  assert.equal(logo.props.resizeMode, 'contain');
++  assert.equal(logo.props.accessibilityLabel, 'ArenaGO');
 +  assert.ok(h.exact('3 experiências'));
 +  for (const name of ['Street Fighter', 'PS5 VR', 'Simulador de corrida']) assert.ok(h.exact(name), name);
 +  // Ordem preservada (a do servidor).
@@ -534,10 +833,10 @@ index 0000000..408dbbb
 +  const joins = h.buttons('Entrar na fila');
 +  assert.equal(joins.length, 2, 'só as experiências abertas oferecem entrada');
 +  assert.ok(joins.every((b) => b.props.disabled === false && typeof b.props.onPress === 'function'));
-+  for (const title of ['Atualizar fila e experiências', 'Atualizar situação da participação', 'Sair da Arena']) {
-+    assert.ok(h.button(title), title);
-+    assert.equal(h.button(title).props.disabled ?? false, false, title);
-+  }
++  assert.equal(h.button('Atualizar fila e experiências'), undefined);
++  assert.equal(h.button('Atualizar situação da participação'), undefined);
++  assert.ok(h.button('Sair da Arena'));
++  assert.equal(h.button('Sair da Arena').props.disabled, false);
 +});
 +
 +test('02A-03 (§10 aguardando): card da fila com a posição do servidor em destaque', () => {
@@ -546,13 +845,13 @@ index 0000000..408dbbb
 +  assert.ok(card);
 +  assert.ok(h.exact('NA FILA') && h.exact('Você está na fila'));
 +  assert.ok(h.texts.filter((t) => t === 'Street Fighter').length >= 1, 'nome da experiência');
-+  assert.ok(h.has('Posição 1º'), 'frase única para leitores de tela e testes existentes');
++  assert.ok(h.has('Posição 1º'), 'rótulo e ordinal continuam compondo a posição oficial');
 +  const panel = h.byTestID('arena-queue-position');
 +  assert.equal(panel.props.accessibilityLabel, 'Posição na fila: 1º');
 +  const number = h.exact('1º');
 +  assert.ok(number, 'número em texto próprio');
 +  const style = flatStyle(number.props.style);
-+  assert.ok(style.fontSize >= 40 && style.fontWeight === '800', 'posição é o maior destaque do card');
++  assert.ok(style.fontSize >= 32 && style.fontWeight === '800', 'posição compacta mantém destaque tipográfico');
 +  const others = h.all.filter((n) => n.type === 'Text' && n !== number)
 +    .map((n) => flatStyle(n.props.style).fontSize).filter((size) => typeof size === 'number');
 +  assert.ok(others.every((size) => size < style.fontSize), 'nenhum outro texto com tipografia maior');
@@ -573,10 +872,20 @@ index 0000000..408dbbb
 +test('02A-05 (§10 chamado): estado de espera substituído pela chamada, sem posição', () => {
 +  const h = render(arena({ currentQueueEntry: waitingEntry(1, { status: 'called', position: null, stationLabel: 'Estação 2', serviceSessionId: '70000000-0000-4000-8000-000000000007' }) }));
 +  assert.ok(h.exact('SUA VEZ') && h.exact('É a sua vez!'));
-+  assert.ok(h.has('Dirija-se à estação: Estação 2'));
++  assert.ok(h.exact('Dirija-se à estação'));
++  assert.ok(h.exact('Estação 2'));
++  assert.equal(h.byTestID('arena-queue-station').props.accessibilityLabel, 'Dirija-se à estação: Estação 2');
++  assert.ok(h.exact('O Staff está aguardando você.'));
++  assert.ok(h.exact('Apresente-se ao Staff para iniciar sua experiência.'));
++  assert.ok(h.exact('CHAMADO'));
++  assert.equal(h.exact('SUA FILA'), undefined);
++  assert.ok(h.icons().includes('bell') && h.icons().includes('location'));
++  assert.equal(flatStyle(h.byTestID('arena-queue-entry-card').props.style).borderColor, '#A855F7');
++  assert.equal(flatStyle(h.byTestID('arena-queue-entry-card').props.style).backgroundColor, '#191326');
 +  assert.equal(h.byTestID('arena-queue-position'), undefined);
 +  assert.equal(h.texts.some((t) => /Posição|NA FILA|Você está na fila/.test(t)), false);
 +  assert.ok(h.byTestID('arena-queue-station'));
++  assert.equal(h.has('atualizadas automaticamente a cada 5 segundos'), false);
 +});
 +
 +test('02A-06 (§10 abertas e encerradas): indicadores coerentes com o servidor', () => {
@@ -618,12 +927,11 @@ index 0000000..408dbbb
 +
 +test('02A-09 (§10 atualização manual e saída): ações ligadas aos mesmos handlers', async () => {
 +  const h = render(arena({ currentQueueEntry: waitingEntry(1) }));
-+  const situation = h.button('Atualizar situação da participação');
-+  assert.equal(situation.props.onPress, h.refreshParticipation, 'mesmo handler da participação');
-+  await situation.props.onPress();
-+  assert.equal(h.calls.participation, 1);
-+  const refresh = h.button('Atualizar fila e experiências');
-+  assert.ok(refresh && refresh.props.disabled === false && typeof refresh.props.onPress === 'function');
++  assert.equal(h.button('Atualizar situação da participação'), undefined);
++  assert.equal(h.button('Atualizar fila e experiências'), undefined);
++  const failed = render(arena(), { syncStale: true });
++  const retry = failed.button('Tentar novamente');
++  assert.ok(retry && retry.props.disabled === false && typeof retry.props.onPress === 'function');
 +  const leave = h.button('Sair da Arena');
 +  assert.equal(leave.props.disabled, false);
 +  leave.props.onPress();
@@ -631,7 +939,7 @@ index 0000000..408dbbb
 +  assert.equal(h.calls.alerts[0][0], 'Deseja sair da Arena?');
 +});
 +
-+test('02A-10 (§10 nome longo e posição extensa): sem corte da posição e nomes limitados a 2 linhas', () => {
++test('02A-10 (§10 nome longo e posição extensa): posição e nomes completos sem truncamento', () => {
 +  const longName = 'Experiência de realidade virtual com nome muito longo para testar o layout da Arena';
 +  const h = render(arena({
 +    currentQueueEntry: waitingEntry(1234, { experienceName: longName }),
@@ -641,7 +949,7 @@ index 0000000..408dbbb
 +  assert.ok(number && number.props.numberOfLines === undefined, 'posição nunca é truncada');
 +  const names = h.all.filter((n) => n.type === 'Text' && textOf(n) === longName);
 +  assert.equal(names.length, 2);
-+  assert.ok(names.every((n) => n.props.numberOfLines === 2));
++  assert.ok(names.every((n) => n.props.numberOfLines === undefined));
 +});
 +
 +test('02A-11 (§6.2): aviso de entrada confirmada é compacto, com indicador de sucesso, e só aparece com o aviso real', () => {
@@ -663,6 +971,50 @@ index 0000000..408dbbb
 +    assert.equal(h.texts.some((t) => /\p{Extended_Pictographic}/u.test(t)), false, 'sem emojis');
 +    assert.ok(h.icons().every((icon) => lineIcon.LINE_ICON_NAMES.includes(icon)), 'ícones do LineIcon');
 +  }
++});
++
++test('02A-R01: cabeçalho local, cards compactos e recuperação com menor ênfase', () => {
++  const noQueue = render(arena());
++  assert.ok(noQueue.byTestID('arena-header'));
++  assert.equal(noQueue.button('Atualizar fila e experiências'), undefined);
++  assert.equal(noQueue.button('Atualizar situação da participação'), undefined);
++  assert.equal(noQueue.button('Sair da Arena').props.variant, 'dangerOutline');
++  assert.ok(noQueue.buttons('Entrar na fila').every(b => b.props.size === 'sm'));
++  const waiting = render(arena({ currentQueueEntry: waitingEntry(2) }));
++  assert.ok(flatStyle(waiting.byTestID(`arena-experience-${EXP_A}`).props.style).paddingVertical < 12);
++  assert.ok(waiting.exact('SUA FILA'));
++  assert.equal(waiting.exact('Recebendo entradas'), undefined, 'disponibilidade não é repetida durante espera');
++});
++
++test('02A-R01 visual: posição usa Texts irmãos com métricas independentes para um e múltiplos dígitos', () => {
++  for (const position of [1, 12, 1234]) {
++    const h = render(arena({ currentQueueEntry: waitingEntry(position) }));
++    const line = h.byTestID('arena-position-text');
++    assert.equal(line.type, 'View', 'não herdar métricas de linha de um Text pai');
++    const children = line.props.children.filter(Boolean);
++    assert.equal(children.length, 2);
++    assert.ok(children.every(child => child.type === 'Text'));
++    assert.equal(textOf(children[0]), 'Posição ');
++    assert.equal(textOf(children[1]), `${position}º`);
++    assert.ok(children.every(child => child.props.numberOfLines === undefined));
++    assert.equal(flatStyle(children[1].props.style).lineHeight, undefined, 'fonte nativa calcula a altura própria');
++    assert.equal(h.byTestID('arena-queue-position').props.accessibilityLabel, `Posição na fila: ${position}º`);
++  }
++});
++
++test('02A-R01 visual: superfícies violeta, ícones de jogo/fila e rolagem limitada ao viewport', () => {
++  const h = render(arena({ currentQueueEntry: waitingEntry(1) }));
++  assert.equal(flatStyle(h.byTestID('arena-queue-entry-card').props.style).backgroundColor, '#191326');
++  assert.equal(flatStyle(h.byTestID('arena-queue-position').props.style).backgroundColor, '#503078');
++  const queue = nodes(h.byTestID('arena-queue-entry-card'));
++  assert.equal(queue.filter(n => n.props?.iconName === 'queue').length, 1, 'sem ícone duplicado no canto');
++  assert.ok(h.icons().includes('gamepad'));
++  assert.equal(h.icons().includes('flag'), false);
++  const scroll = h.all.find(n => n.type === 'ScrollView');
++  assert.equal(flatStyle(scroll.props.style).flex, 1);
++  assert.ok(flatStyle(scroll.props.contentContainerStyle).paddingBottom >= 24);
++  assert.equal(h.button('Atualizar fila e experiências'), undefined);
++  assert.equal(typeof h.button('Sair da Arena').props.onPress, 'function');
 +});
 diff --git a/app/utils/arenaQueuePresentation.js b/app/utils/arenaQueuePresentation.js
 new file mode 100644
@@ -696,10 +1048,10 @@ index 0000000..740f64c
 +}
 diff --git a/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md b/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md
 new file mode 100644
-index 0000000..5a39d82
+index 0000000..bac54b4
 --- /dev/null
 +++ b/docs/PARTICIPANTE_02A_FILA_VIRTUAL_VISUAL_IMPLEMENTACAO.md
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,266 @@
 +# PARTICIPANTE-02A — Aprimoramento visual da fila virtual
 +
 +**Task:** PARTICIPANTE-02A, antecipação **parcial e somente visual** da PARTICIPANTE-02 para a captura do paper acadêmico. Não conclui a PARTICIPANTE-02.
@@ -846,3 +1198,211 @@ index 0000000..5a39d82
 +- Push sem force em `feature/heliom-participante-ux`, com a conta `heliom13` (a mesma das entregas anteriores). Sem merge na `develop`. PARTICIPANTE-01 e o restante da PARTICIPANTE-02 não foram retomados.
 +
 +**Estado da task:** PARTICIPANTE-02A entregue para validação. A captura real e a comparação com o mockup ficam pendentes com o responsável.
++
++## Revisão 01 — Refinamento visual após validação em aparelho
++
++### Diagnóstico e estratégia antes da implementação
++
++Base efetiva: `52dfe6309e6f9ed6898164796427e4638c482b18`, branch `feature/heliom-participante-ux`, working tree inicialmente limpo. Consulta remota tentada, indisponível por falha de conexão ao GitHub. O pedido relata capturas reais em iPhone; as imagens não acompanham este anexo acessível, portanto o diagnóstico foi confrontado com os componentes reais, sem alegar inspeção dessas capturas.
++
++O cabeçalho centralizado, o padding padrão dos cards e os divisores repetidos consomem área vertical. A revisão utilizará cabeçalho local alinhado à esquerda, posição oficial em painel roxo compacto, experiências com menos separadores e ações de recuperação com menor ênfase. Preservará estados, handlers, polling, regras de ingresso e encerramento. Nomes longos e fontes ampliadas continuarão com rolagem e expansão natural. Não será criado dado ou fluxo para captura.
++
++### Implementação e revisão estática
++
++- Cabeçalho local com título à esquerda, subtítulo discreto e ATIVA à direita, sem alteração global do ScreenHeader.
++- Card de fila com padding de 12 dp, menos divisores e painel roxo mais compacto; posição oficial continua em 44 dp/800. SUA VEZ mantém a estação do servidor sem posição antiga. Aviso de ingresso mantém seu ciclo de vida.
++- Experiências com ícone genérico de bandeira, padding de 12 dp (8 dp vertical durante participação em fila), sem divisores redundantes e sem truncar nomes. Disponibilidade não é repetida quando já há fila; SUA FILA permanece.
++- Ingresso usa Button sm, cujo componente real garante toque mínimo de 48 dp. Atualizações usam ghost, com handlers distintos preservados; saída continua separada, com confirmação original. Nenhuma alteração na lógica acima das derivações de apresentação.
++- Testes existentes adaptados ao cabeçalho local e nomes sem truncamento; acrescentada verificação da compactação e da hierarquia das ações. Cenários prévios de espera/chamada, posição, polling, pendência, aviso e recuperação preservados.
++- Inspeção sintática estática e Git realizadas; testes não executados nesta etapa de implementação (AGENTS.md exige Luna Medium para a execução). Não há nova contagem de aprovados. A campanha anterior não é evidência desta revisão.
++- Renderização nativa, dimensões de 375–430 dp, fontes ampliadas e capturas reais no backend continuam pendentes no Expo. Nenhuma imagem ilustrativa foi criada como evidência do paper.
++
++### Engrenagem e limites
++
++A busca estática em screens/components/navigation não encontrou um controle circular flutuante de engrenagem nestas telas. O botão Abrir configurações de EventEntryScreen abre os ajustes de permissão de câmera e não tem a composição relatada. A origem do controle sobreposto não pode ser confirmada pelo código nem pelas imagens deste anexo, que não estão disponíveis. Pode ser overlay externo ou de desenvolvimento, mas isso não está comprovado. Nenhum controle global foi removido. Antes da captura, verificar os overlays ativos do dispositivo/Expo e ocultar somente a ferramenta identificada pelo responsável.
++
++### Validação preparada para Luna Medium
++
++Após inspecionar scripts e configurar NODE_ENV=test em ambiente isolado, executar separadamente, na raiz:
++
++```powershell
++node --test app/tests/participante02aFilaVisual.test.cjs
++node --test app/tests/autoQueueSync.test.cjs
++node --test app/tests/participationActionScreens.test.cjs
++```
++
++Confirmar também os nomes das demais suítes afetadas no inventário local antes da campanha. A regressão geral autorizada é `npm.cmd --prefix app test`, após aprovação dos testes focados. Sem PostgreSQL, migrations, seeds ou publicação Git. Evidência única da task atualizada em `qa-evidence/PARTICIPANTE_02A-changes.diff`, preservando a base acumulada `94766a13c80bc3c91f0963c9db9acea35efac488` e o escopo original de cinco arquivos, sem o próprio patch.
++
++Estado: refinamento implementado localmente, aguardando execução automatizada e validação visual pelo responsável. Não conclui a Task 02.
++
++Conferência final: análise sintática dos JS/CJS alterados aprovada; comparação estática confirmou o corpo dos handlers de RealArenaScreen idêntico ao SHA de origem. `git diff --check -- app docs` passou. A verificação global inclui um aviso de espaço final numa linha de contexto vazia do patch acumulado (o prefixo de contexto do formato diff); o conteúdo fonte está limpo. O patch passou em `git apply --reverse --check`. Nenhuma validação funcional foi executada.
++
++### Correção complementar — identidade visual e paleta
++
++Revisada a paleta oficial de `app/theme/colors.js` antes da campanha automatizada. A aplicação anterior herdava `background.surface`/`background.elevated` dos cards, cuja composição tem tom azulado. Os estilos locais da Minha Arena agora usam `background.base` como superfície neutra, contornos suaves derivados de `primaryLight` com alfa 40 hexadecimal e `primary` nos destaques. SUA FILA e fundos de ícones usam `primaryDim`; posição e rótulos de recuperação usam `primaryLight`. Os botões primários mantêm primary/primaryHover do componente compartilhado. Experiências encerradas ficam neutras; sucesso/ATIVA/ABERTA e chamada permanecem verdes, erros/saída vermelhos e instabilidade/pendência amarelas.
++
++O AuthBackground e seus parâmetros foram preservados, assim como os tokens globais, handlers, polling e regras. A modificação complementar ficou restrita a cores/estilos das duas telas e a esta documentação/evidências. Inspeção estática de sintaxe e diff realizada; não foram executados testes, lint, typecheck ou build. A campanha continua condicionada à confirmação manual de GPT-6 Luna Medium. A percepção final das cores deve ser conferida pelo responsável no iPhone, incluindo contraste, estados semânticos e interação pressionada, antes das capturas do paper.
++
++### Ajustes complementares após conferência Android — nome oficial e recuperação contextual
++
++O título passa a usar o nome oficial do evento. Fonte existente: `GET /participations/history?limit=50`, autenticado, com paginação quando necessária. `EvaluationReadController` exige autenticação; `EvaluationReadService.getHistory` seleciona participações da própria conta, inclui status active e obtém `event.name` de `events` por JOIN. O frontend confere simultaneamente participationId, event.id igual ao eventId corrente e status active. Não usa o nome salvo no ingresso. Não houve extensão de contrato nem modificação de backend.
++
++`fetchCurrentArenaEventName` foi acrescentado ao serviço de histórico como leitura dedicada. A tela busca novamente ao montar/restaurar, ao trocar participação/evento/conta/sessão e ao tentar recuperar uma falha. Não há cache persistente ou global de nomes. Chave local inclui conta, epoch, participação e evento; cleanup e guarda de identidade descartam respostas antigas. Antes de uma resposta válida, mostra Carregando evento...; na indisponibilidade, Evento indisponível. O título permite quebra natural sem número fixo de linhas, com espaço flexível ao lado de ATIVA. O subtítulo, background e paleta anteriores foram preservados.
++
++Removido o botão permanente Atualizar fila e experiências. A função interna refresh permanece; não foi alterado o intervalo de 5000 ms, a atualização de posição/disponibilidade/chamadas nem o tratamento de foco e primeiro plano. Tentar novamente aparece contextualmente para erro de ação/leitura, conexão instável ou nome indisponível, acionando a leitura da fila e uma nova consulta do título. Atualizar situação da participação e Sair da Arena preservam os handlers e regras. O nome não é incluído no polling de cinco segundos, evitando uma consulta de histórico por ciclo; uma renomeação no servidor será refletida na próxima montagem, troca de contexto ou tentativa contextual, e não necessariamente em tempo real.
++
++Testes preparados/adaptados: `participante02aEventHeader.test.cjs` cobre consulta autenticada, nova montagem, nome extenso, descarte de resposta antiga após troca de conta/evento, paginação, incompatibilidade de evento e recuperação de falha. `participante02aFilaVisual.test.cjs` verifica o título e ausência do botão normal; `autoQueueSync.test.cjs` mantém os cenários de polling/primeiro plano, com expectativas ajustadas à recuperação contextual. A campanha deve começar por esses três arquivos, seguida das regressões relacionadas e da suíte completa já documentada. Nenhum teste executado nesta implementação: aguarda confirmação manual de Luna Medium conforme AGENTS.md.
++
++Inspeção estática de sintaxe e Git/evidência realizada. O patch único 02A mantém a base `94766a13c80bc3c91f0963c9db9acea35efac488`; seu escopo foi ampliado apenas para incluir o serviço de histórico, o teste do cabeçalho e a adaptação da regressão de polling. Exclui o próprio patch. A tela de detalhes e sua evidência 05A não foram modificadas nesta correção. A próxima conferência visual permanece necessária no emulador e no celular real.
++
++### Segunda validação física — revisão da composição e legibilidade
++
++As duas imagens foram analisadas diretamente no chat antes da alteração: referência com card violeta/posição dominante e captura real iOS com número ilegível como retângulo, bandeiras nas experiências, superfície quase preta, texto auxiliar apagado e saída parcialmente fora do viewport. A referência orienta hierarquia e contraste; suas proporções distorcidas e contadores de conclusões não foram reproduzidos.
++
++**Diagnóstico da posição:** formatQueuePosition continua produzindo uma string numérica seguida de U+00BA (`º`), exclusivamente a partir da posição inteira validada do servidor. A fonte configurada no iOS é System (Android sans-serif); não há fonte de ícones no texto. O componente anterior encaixava rótulo de 16 dp/lineHeight 22 e número de 44 dp/lineHeight 52 num Text pai sem métricas explícitas. A captura comprova a falha visual, e a inspeção identifica mistura de métricas de texto aninhado como hipótese concreta de clipping/fragmentação da linha nativa. Não foi reproduzida instrumentadamente no iOS, portanto não se afirma causa raiz confirmada, falha de glyph ou bug específico de fonte/React Native.
++
++A composição foi alterada para dois Texts irmãos dentro de View flexível: rótulo em 22 dp/700, ordinal em 44 dp/800, altura intrínseca, sem lineHeight forçado, sem limite de linhas nem tamanho fixo do número. O painel mantém rótulo acessível único com a posição completa; aceita quebra natural para valores longos e fontes ampliadas. O estado chamado continua substituindo a posição pela estação oficial. A instabilidade mantém identificação de última posição confirmada e amarelo semântico.
++
++**Direção visual aplicada localmente:** superfície principal #191326, secundária #181626, seleção #241632, painel #503078, borda #A855F7 e destaques #B56CFF. Painel com pessoas, separador vertical e textos brancos; isso reforça contraste em vez de copiar o texto violeta de baixo contraste da referência. O ícone duplicado no canto do card foi retirado. O gamepad existente em LineIcon é desenhado por Views/bordas nativas e foi reutilizado, sem alterar seus desenhos globais ou inferir categorias específicas. As bandeiras eram a seleção explícita de `name="flag"`, e não um defeito comprovado do desenho gamepad. O selo SUA FILA acompanha o conteúdo da experiência, sem footer extra. Disponibilidade e ingresso são mantidos onde cabíveis.
++
++O subtítulo e a nota automática ganharam contraste. Mantido nome oficial do evento e ATIVA; optou-se por não acrescentar logo/barra para preservar espaço e prioridade do nome. Aviso verde e seu ciclo de vida não foram alterados. As ações inferiores têm margens menores; ScrollView recebe flex:1/minHeight:0 para ter viewport limitado, conteúdo natural e padding inferior de 32 dp. As áreas seguras existentes de AuthBackground e a barra inferior não foram modificadas. A saída permanece rolável e exige conferência real no dispositivo.
++
++**Validações e limites:** preparados testes de Texts irmãos, posições 1/12/1234, rótulo acessível, ausência de clipping por lineHeight herdado, superfícies, iconografia e estrutura rolável. A regressão automática mantém as demais verificações e passa a ler a posição no grupo de apresentação. Análise sintática estática e conferência Git/evidência realizadas; não equivalem à renderização nativa. Nenhum teste, build, lint ou typecheck executado pelo implementador. A execução continua reservada a Luna Medium com confirmação manual. A única renderização real examinada é a captura anterior fornecida pelo responsável; não foi produzida captura posterior à correção. Portanto a resolução visual no iOS permanece pendente de nova execução física, principalmente para ordinal, um/múltiplos dígitos, nomes longos, escala de fonte, sem fila/chamado/instabilidade e rolagem até Sair da Arena. Não há nova contagem de testes aprovados.
++
++Campanha preparada: participante02aFilaVisual, participante02aEventHeader, autoQueueSync, arenaQueueService.integration e participationActionScreens, seguida da regressão app quando aprovadas as focadas. Backend, dados, contratos, polling, autenticação e detalhes da participação foram preservados. Evidência acumulada única 02A regenerada com a mesma base e escopo da correção anterior.
++
++### Ajuste final — compactação do painel da posição
++
++Reduzida a altura mínima do painel de 80 para 56 dp (30%), com padding vertical de 12 para 4 dp, ícone de 28 para 22 dp, divisor de altura mínima esticada de 36 dp para altura decorativa de 28 dp e número de 44 para 34 dp/800. O rótulo permanece em 22 dp; o número continua sendo o principal destaque. O espaço até a informação de atualização automática caiu de 8 para 4 dp. Cores, bordas e o restante da composição foram preservados.
++
++Ícone, divisor e textos continuam em composição horizontal com alinhamento vertical central. Rótulo e número permanecem Texts irmãos, sem Text pai, sem lineHeight forçado ou altura fixa para o conteúdo. A altura mínima permite crescimento para fontes ampliadas, nomes/valores extensos e instabilidade, em vez de recortar o texto; portanto a redução visual exata depende da escala de fonte no aparelho. Mantidos os testes de ordinal com um e múltiplos dígitos; ajustado apenas o limite tipográfico anterior de 40 dp, incompatível com a redução solicitada, preservando a verificação de maior destaque que os demais textos.
++
++Rodada restrita à apresentação: nenhuma regra funcional alterada. Inspeção sintática, diff de código/documentação e consistência reversa da evidência realizadas; não foram executados testes ou renderização nativa. A confirmação visual final no iPhone continua necessária e a campanha automatizada permanece condicionada à seleção manual de Luna Medium. Patch acumulado 02A atualizado com a mesma base e escopo.
++
++### Fechamento da interface — somente saída no estado normal
++
++A compactação de aproximadamente 30% já estava aplicada: painel com minHeight 56 dp (antes 80), padding vertical 4 dp, ícone 22 dp, divisor 28 dp, número 34 dp e intervalo de 4 dp até o texto de atualização. Essas medidas foram preservadas, sem aplicar outra redução cumulativa. Permanecem Texts irmãos, altura intrínseca do número, composição horizontal e alinhamento central, com expansão para acessibilidade.
++
++Removido Atualizar situação da participação do estado normal. A área abaixo das experiências mantém apenas Sair da Arena como botão permanente; foi retirado o divisor e zerada a margem superior do botão de saída. Tentar novamente permanece contextual em falhas da fila/sincronização/nome do evento. Não houve remoção de refresh interno, da sincronização automática de participação, do polling de cinco segundos ou da recuperação de HomeFlowScreen (onRetry=refreshParticipation). O refreshParticipation após finalização continua presente. Nenhuma alteração de contrato, negócio ou tela de detalhes.
++
++Adaptadas as expectativas dos testes visuais e de cabeçalho para ausência de ambos os botões de atualização, preservando verificações da ação de saída e recuperação contextual. Feitas apenas inspeção sintática e verificações estáticas de diff/evidência; nenhum teste, lint, build ou typecheck executado. Conferência física final e campanha com Luna Medium continuam pendentes. Markdown e patch acumulado atualizados, sem staging, commit ou push.
++
++### Refinamento exclusivo da chamada — É a sua vez!
++
++No estado confirmado `called`, o card mantém #191326 e passa a borda externa para verde semântico. Sino no canto superior direito e mensagem O Staff está aguardando você. abaixo do título reforçam a chamada. O painel da estação usa localização, divisor e dois Texts independentes: Dirija-se à estação e o stationLabel oficial, sem truncamento ou altura fixa. Rodapé substituído por Apresente-se ao Staff para iniciar sua experiência. A experiência correspondente troca SUA FILA por CHAMADO em verde apenas durante called; as outras experiências não recebem o selo.
++
++Adicionados desenhos opt-in bell/location ao LineIcon, com Views/bordas nativas, sem dependências, emojis ou alteração dos ícones existentes. Estado waiting permanece com borda/painel violeta e texto automático; a chamada não exibe posição anterior. O aviso superior de conexão instável continua disponível quando necessário, mesmo durante a chamada. A mudança do rodapé não altera polling, vibração, sincronização, fonte do nome da estação ou qualquer ação operacional. Não foram criados cronômetros ou novas ações.
++
++Expectativas dos testes de apresentação e retomada ajustadas para rótulo/estação separados, nome oficial acessível, borda/superfície, ícones e selo exclusivo. Executadas somente inspeção sintática, diff e consistência do patch; nenhuma execução automatizada ou renderização nativa nesta rodada. Campanha continua pendente com Luna Medium e conferência física necessária para estação longa, fontes ampliadas e instabilidade. Patch único 02A regenerado na base acumulada existente; alterações locais preservadas, sem staging/commit/push.
++
++### Harmonização cromática do chamado — estrutura aprovada preservada
++
++Ajuste exclusivamente local de cores: borda externa volta a #A855F7; sino/localização e divisor usam #B56CFF. Painel da estação passa a #241632 com contorno violeta discreto (#A855F7 a 50%); nome oficial da estação permanece branco com a mesma tipografia. Ícone e texto da orientação inferior usam cinza claro #C4BBD2. CHAMADO passa à variante brand roxa; SUA VEZ, ATIVA e ABERTA permanecem verdes. Superfície externa, composição, hierarquia, textos, medidas e handlers não foram alterados.
++
++A saída mantém variante dangerOutline e confirmação destrutiva, com substituições locais da borda por #A84E66 e texto #E58A9D, reduzindo a saturação/intensidade do vermelho sem transformá-la numa ação da marca. O componente mantém os estados pressionado e desabilitado existentes. Nenhum token global foi modificado. Espera continua roxa e instabilidade mantém seu aviso semântico.
++
++A expectativa de borda no teste visual foi adaptada à cor solicitada; as verificações de chamada, estação e texto permanecem. Inspeção estática de sintaxe, diff e integridade do patch realizada. Nenhum teste ou renderização nativa executado; conferir as cores finais e os estados de interação no aparelho. Mantida a exigência de confirmação Luna Medium para a campanha, sem staging, commit ou push.
++
++### Cabeçalho final — logo oficial e ATIVA em coluna
++
++Reutilizado diretamente `app/assets/images/Logo ArenaGO render (admin-staff).png`, PNG RGBA existente de 2048 × 682. A inspeção visual confirmou a arte branca/roxa e o SHA-256 é idêntico ao asset logo-arenago-admin.png já utilizado pelo módulo Admin (28181211CB703993F6031EC3521F879534418C4FD3E6534ECFA64DC771A9F8CE). Nenhum asset foi criado, editado ou substituído; não há texto redesenhando o logo, tintColor ou imagem externa.
++
++No único cabeçalho da RealArenaScreen, coluna à direita com Image de 96 × 32 dp, resizeMode contain, rótulo acessível ArenaGO e ATIVA abaixo, com intervalo de 4 dp. Nome oficial e subtítulo seguem à esquerda, em contêiner flexível com minWidth:0; a coluna da marca não encolhe, e o nome pode quebrar sem sobreposição. O mesmo cabeçalho antecede todos os estados: carga, indisponibilidade, sem fila, espera, chamado e falhas. Conteúdo dos cards, textos, paleta, fluxo e fontes de dados foram preservados.
++
++A expectativa de cabeçalho verifica o Image e contain. O helper Node recebeu apenas o mapeamento explícito desse PNG nessa tela, confirmando a existência do arquivo antes de retornar recurso simulado; não houve fallback genérico para imports desconhecidos. Isso permite preparar a campanha sem interpretar bytes PNG como JavaScript. A evidência 02A inclui essa pequena adaptação do helper, sem outras mudanças preexistentes nesse arquivo desde a base.
++
++Inspeção sintática e integridade Git/patch realizadas; nenhum teste ou build executado. Conferir no emulador/celular a legibilidade do logo e a quebra de nomes longos/fontes ampliadas antes das capturas. Campanha permanece condicionada à confirmação manual de Luna Medium. Mantida a branch feature/heliom-participante-ux e as alterações locais, sem staging/commit/push.
++
++### Último ajuste do cabeçalho — título e logo alinhados, sem ATIVA
++
++Removido integralmente o selo ATIVA da apresentação da RealArenaScreen, sem modificar o status da participação. Nome oficial e logo compartilham agora a primeira linha, com alinhamento vertical central; o subtítulo Sua participação em tempo real permanece à esquerda abaixo dessa linha. A imagem oficial existente continua em 96 × 32 dp, contain e sem tintColor/recorte/distorção. A altura do logo e os paddings existentes foram mantidos; eliminar a coluna logo+selo evita crescimento desnecessário do cabeçalho. Nome longo ocupa espaço flexível (minWidth:0) e pode quebrar, enquanto o logo não encolhe nem se sobrepõe. Fontes ampliadas e nomes extensos mantêm expansão natural para legibilidade, sem altura fixa limitante.
++
++O cabeçalho único permanece em todos os estados ativos e preserva a leitura autenticada do nome, fallback e subtítulo. Nenhum elemento restante da tela, cor ou regra operacional foi alterado. Adaptada a expectativa existente de teste para ausência do selo. Inspeção sintática, diff de código/documentação e consistência reversa do patch realizadas; nenhum teste ou build executado. Conferência visual com nome longo/fonte ampliada pendente no aparelho. Evidência única 02A atualizada na base e escopo acumulados, sem staging, commit ou push.
+diff --git a/app/tests/participante02aEventHeader.test.cjs b/app/tests/participante02aEventHeader.test.cjs
+new file mode 100644
+index 0000000..2f46fac
+--- /dev/null
++++ b/app/tests/participante02aEventHeader.test.cjs
+@@ -0,0 +1,82 @@
++﻿const test = require('node:test');
++const assert = require('node:assert/strict');
++const { loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
++const history = loadModule('services/participationHistoryService.js', require).exports;
++const P = '22222222-2222-4222-8222-222222222222', E = '11111111-1111-4111-8111-111111111111';
++const B = '33333333-3333-4333-8333-333333333333';
++const page = (name, eventId = E, participationId = P) => ({ items: [{ participationId, event: { id: eventId, name }, status: 'active',
++  joinedAt: '2026-11-17T10:00:00Z', arenaEnteredAt: '2026-11-17T10:00:00Z', finishedAt: null,
++  completedServicesCount: 0, evaluation: { eligible: false, submitted: false, pending: false } }], nextCursor: null });
++const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
++function rig(get) {
++  const hooks = [], effects = []; let cursor = 0, tree;
++  let props = { participation: { id: P, eventId: E }, refreshParticipation() {} };
++  const auth = { isAuthenticated: true, user: { id: 'A' }, getSessionEpoch: () => 1, httpClient: { get } };
++  const memo = (factory, deps) => { const i = cursor++; if (!hooks[i] || deps.some((d,j) => !Object.is(d,hooks[i].deps[j]))) hooks[i] = { value: factory(), deps }; return hooks[i].value; };
++  const screen = loadModule('screens/arena/RealArenaScreen.js', name => {
++    if (name === 'react') return {
++      useState: initial => { const i=cursor++; if (!(i in hooks)) hooks[i]={value:initial}; return [hooks[i].value, next => { hooks[i].value = typeof next === 'function' ? next(hooks[i].value) : next; }]; },
++      useRef: initial => { const i=cursor++; if (!(i in hooks)) hooks[i]={current:initial}; return hooks[i]; },
++      useCallback: (fn,deps) => memo(() => fn,deps), useMemo: memo,
++      useEffect: (fn,deps) => { const i=cursor++; if (!hooks[i] || deps.some((d,j) => !Object.is(d,hooks[i].deps[j]))) effects.push(() => { hooks[i]?.cleanup?.(); hooks[i]={deps,cleanup:fn()}; }); },
++    };
++    if (name === '@react-navigation/native') return { useFocusEffect() {} };
++    if (name === 'react-native') return { StyleSheet: { create: s => s }, View:'View',Text:'Text',ScrollView:'ScrollView', ActivityIndicator:'ActivityIndicator',AppState:{currentState:'active',addEventListener:()=>({remove(){}})} };
++    if (name === 'expo-status-bar') return { StatusBar:'StatusBar' };
++    if (name === 'expo-crypto') return {randomUUID:()=>B};
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../theme') return createParticipantThemeStub();
++    if (name === '../../context/AuthContext') return {useAuth:()=>auth};
++    if (name === '../../services/participationHistoryService') return history;
++    if (name === '../../services/arenaQueueService') return {createArenaQueueCoordinator:()=>({}),describeArenaError:()=>''};
++    if (name === '../../services/participationActionService') return {createParticipationActionCoordinator:()=>({})};
++    if (name === '../../services/arenaQueueIntentStorage') return {defaultArenaQueueIntentStorage:{}};
++    if (name === '../../services/queueAlertService') return {createQueueAlertManager:()=>({})};
++    if (name === '../../utils/arenaQueuePresentation') return loadModule('utils/arenaQueuePresentation.js', require).exports;
++    return require(name);
++  }).exports.default;
++  const render = () => { cursor=0; tree=screen(props); while(effects.length) effects.shift()(); return nodes(tree); };
++  render();
++  return { auth, render, title: () => textOf(render().find(n=>n.props?.testID==='arena-header')),
++    setEvent: eventId => {props={...props,participation:{id:P,eventId}};render();},
++    flush: async () => {await new Promise(r=>setImmediate(r));render();},
++    unmount: () => hooks.forEach(h=>h?.cleanup?.()),
++  };
++}
++test('02A-R01: nome oficial autenticado é consultado novamente após reabrir a tela', async () => {
++  const requests=[];
++  for(let restart=0;restart<2;restart++) {
++    const h=rig(async (url,options)=>{requests.push([url,options]);return page('Evento oficial restaurado');});
++    await h.flush(); assert.match(h.title(),/Evento oficial restaurado/); h.unmount();
++  }
++  assert.deepEqual(structuredClone(requests),Array.from({length:2},()=>['/participations/history?limit=50',{auth:true}]));
++});
++test('02A-R01: nome extenso completo e respostas atrasadas de conta/evento são isolados', async () => {
++  const old=defer(), next=defer(); let count=0;
++  const h=rig(()=>count++===0?old.promise:next.promise);
++  assert.match(h.title(),/Carregando evento/);
++  h.auth.user={id:'B'}; h.auth.getSessionEpoch=()=>2; h.setEvent(B);
++  old.resolve(page('Nome antigo')); await h.flush(); assert.doesNotMatch(h.title(),/Nome antigo/);
++  const long='Evento oficial com nome muito extenso para demonstrar a quebra natural do título';
++  next.resolve(page(long,B)); await h.flush(); assert.ok(h.title().includes(long)); h.unmount();
++});
++test('02A-R01: indisponibilidade oferece recuperação contextual e preserva ações restantes', async () => {
++  let failed=true;
++  const h=rig(async()=>{if(failed)throw Error('offline');return page('Evento recuperado');});
++  await h.flush(); assert.match(h.title(),/Evento indisponível/);
++  const buttons=()=>h.render().filter(n=>n.props?.title);
++  assert.equal(buttons().some(n=>n.props.title==='Atualizar fila e experiências'),false);
++  assert.equal(buttons().some(n=>n.props.title==='Atualizar situação da participação'),false);
++  assert.ok(buttons().some(n=>n.props.title==='Sair da Arena'));
++  failed=false; buttons().find(n=>n.props.title==='Tentar novamente').props.onPress(); h.render(); await h.flush();
++  assert.match(h.title(),/Evento recuperado/); h.unmount();
++});
++test('02A-R01: busca paginada valida participação/evento e descarta resposta invalidada', async () => {
++  const requests=[];
++  const client={get:async url=>{requests.push(url);return requests.length===1?{items:[],nextCursor:'next'}:page('Nome oficial');}};
++  assert.equal(await history.fetchCurrentArenaEventName(client,P,E),'Nome oficial');
++  assert.match(requests[1],/cursor=next/);
++  await assert.rejects(history.fetchCurrentArenaEventName({get:async()=>page('Outro evento',B)},P,E),/não confirmado/);
++  let current=true; const pending=defer(); const result=history.fetchCurrentArenaEventName({get:()=>pending.promise},P,E,{isCurrent:()=>current});
++  current=false; pending.resolve(page('Atrasado')); assert.equal(await result,null);
++});

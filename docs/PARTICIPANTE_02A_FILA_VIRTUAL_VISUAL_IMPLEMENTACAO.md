@@ -144,3 +144,123 @@ Não há aparelho, emulador nem backend com banco neste ambiente. Para obter a c
 - Push sem force em `feature/heliom-participante-ux`, com a conta `heliom13` (a mesma das entregas anteriores). Sem merge na `develop`. PARTICIPANTE-01 e o restante da PARTICIPANTE-02 não foram retomados.
 
 **Estado da task:** PARTICIPANTE-02A entregue para validação. A captura real e a comparação com o mockup ficam pendentes com o responsável.
+
+## Revisão 01 — Refinamento visual após validação em aparelho
+
+### Diagnóstico e estratégia antes da implementação
+
+Base efetiva: `52dfe6309e6f9ed6898164796427e4638c482b18`, branch `feature/heliom-participante-ux`, working tree inicialmente limpo. Consulta remota tentada, indisponível por falha de conexão ao GitHub. O pedido relata capturas reais em iPhone; as imagens não acompanham este anexo acessível, portanto o diagnóstico foi confrontado com os componentes reais, sem alegar inspeção dessas capturas.
+
+O cabeçalho centralizado, o padding padrão dos cards e os divisores repetidos consomem área vertical. A revisão utilizará cabeçalho local alinhado à esquerda, posição oficial em painel roxo compacto, experiências com menos separadores e ações de recuperação com menor ênfase. Preservará estados, handlers, polling, regras de ingresso e encerramento. Nomes longos e fontes ampliadas continuarão com rolagem e expansão natural. Não será criado dado ou fluxo para captura.
+
+### Implementação e revisão estática
+
+- Cabeçalho local com título à esquerda, subtítulo discreto e ATIVA à direita, sem alteração global do ScreenHeader.
+- Card de fila com padding de 12 dp, menos divisores e painel roxo mais compacto; posição oficial continua em 44 dp/800. SUA VEZ mantém a estação do servidor sem posição antiga. Aviso de ingresso mantém seu ciclo de vida.
+- Experiências com ícone genérico de bandeira, padding de 12 dp (8 dp vertical durante participação em fila), sem divisores redundantes e sem truncar nomes. Disponibilidade não é repetida quando já há fila; SUA FILA permanece.
+- Ingresso usa Button sm, cujo componente real garante toque mínimo de 48 dp. Atualizações usam ghost, com handlers distintos preservados; saída continua separada, com confirmação original. Nenhuma alteração na lógica acima das derivações de apresentação.
+- Testes existentes adaptados ao cabeçalho local e nomes sem truncamento; acrescentada verificação da compactação e da hierarquia das ações. Cenários prévios de espera/chamada, posição, polling, pendência, aviso e recuperação preservados.
+- Inspeção sintática estática e Git realizadas; testes não executados nesta etapa de implementação (AGENTS.md exige Luna Medium para a execução). Não há nova contagem de aprovados. A campanha anterior não é evidência desta revisão.
+- Renderização nativa, dimensões de 375–430 dp, fontes ampliadas e capturas reais no backend continuam pendentes no Expo. Nenhuma imagem ilustrativa foi criada como evidência do paper.
+
+### Engrenagem e limites
+
+A busca estática em screens/components/navigation não encontrou um controle circular flutuante de engrenagem nestas telas. O botão Abrir configurações de EventEntryScreen abre os ajustes de permissão de câmera e não tem a composição relatada. A origem do controle sobreposto não pode ser confirmada pelo código nem pelas imagens deste anexo, que não estão disponíveis. Pode ser overlay externo ou de desenvolvimento, mas isso não está comprovado. Nenhum controle global foi removido. Antes da captura, verificar os overlays ativos do dispositivo/Expo e ocultar somente a ferramenta identificada pelo responsável.
+
+### Validação preparada para Luna Medium
+
+Após inspecionar scripts e configurar NODE_ENV=test em ambiente isolado, executar separadamente, na raiz:
+
+```powershell
+node --test app/tests/participante02aFilaVisual.test.cjs
+node --test app/tests/autoQueueSync.test.cjs
+node --test app/tests/participationActionScreens.test.cjs
+```
+
+Confirmar também os nomes das demais suítes afetadas no inventário local antes da campanha. A regressão geral autorizada é `npm.cmd --prefix app test`, após aprovação dos testes focados. Sem PostgreSQL, migrations, seeds ou publicação Git. Evidência única da task atualizada em `qa-evidence/PARTICIPANTE_02A-changes.diff`, preservando a base acumulada `94766a13c80bc3c91f0963c9db9acea35efac488` e o escopo original de cinco arquivos, sem o próprio patch.
+
+Estado: refinamento implementado localmente, aguardando execução automatizada e validação visual pelo responsável. Não conclui a Task 02.
+
+Conferência final: análise sintática dos JS/CJS alterados aprovada; comparação estática confirmou o corpo dos handlers de RealArenaScreen idêntico ao SHA de origem. `git diff --check -- app docs` passou. A verificação global inclui um aviso de espaço final numa linha de contexto vazia do patch acumulado (o prefixo de contexto do formato diff); o conteúdo fonte está limpo. O patch passou em `git apply --reverse --check`. Nenhuma validação funcional foi executada.
+
+### Correção complementar — identidade visual e paleta
+
+Revisada a paleta oficial de `app/theme/colors.js` antes da campanha automatizada. A aplicação anterior herdava `background.surface`/`background.elevated` dos cards, cuja composição tem tom azulado. Os estilos locais da Minha Arena agora usam `background.base` como superfície neutra, contornos suaves derivados de `primaryLight` com alfa 40 hexadecimal e `primary` nos destaques. SUA FILA e fundos de ícones usam `primaryDim`; posição e rótulos de recuperação usam `primaryLight`. Os botões primários mantêm primary/primaryHover do componente compartilhado. Experiências encerradas ficam neutras; sucesso/ATIVA/ABERTA e chamada permanecem verdes, erros/saída vermelhos e instabilidade/pendência amarelas.
+
+O AuthBackground e seus parâmetros foram preservados, assim como os tokens globais, handlers, polling e regras. A modificação complementar ficou restrita a cores/estilos das duas telas e a esta documentação/evidências. Inspeção estática de sintaxe e diff realizada; não foram executados testes, lint, typecheck ou build. A campanha continua condicionada à confirmação manual de GPT-6 Luna Medium. A percepção final das cores deve ser conferida pelo responsável no iPhone, incluindo contraste, estados semânticos e interação pressionada, antes das capturas do paper.
+
+### Ajustes complementares após conferência Android — nome oficial e recuperação contextual
+
+O título passa a usar o nome oficial do evento. Fonte existente: `GET /participations/history?limit=50`, autenticado, com paginação quando necessária. `EvaluationReadController` exige autenticação; `EvaluationReadService.getHistory` seleciona participações da própria conta, inclui status active e obtém `event.name` de `events` por JOIN. O frontend confere simultaneamente participationId, event.id igual ao eventId corrente e status active. Não usa o nome salvo no ingresso. Não houve extensão de contrato nem modificação de backend.
+
+`fetchCurrentArenaEventName` foi acrescentado ao serviço de histórico como leitura dedicada. A tela busca novamente ao montar/restaurar, ao trocar participação/evento/conta/sessão e ao tentar recuperar uma falha. Não há cache persistente ou global de nomes. Chave local inclui conta, epoch, participação e evento; cleanup e guarda de identidade descartam respostas antigas. Antes de uma resposta válida, mostra Carregando evento...; na indisponibilidade, Evento indisponível. O título permite quebra natural sem número fixo de linhas, com espaço flexível ao lado de ATIVA. O subtítulo, background e paleta anteriores foram preservados.
+
+Removido o botão permanente Atualizar fila e experiências. A função interna refresh permanece; não foi alterado o intervalo de 5000 ms, a atualização de posição/disponibilidade/chamadas nem o tratamento de foco e primeiro plano. Tentar novamente aparece contextualmente para erro de ação/leitura, conexão instável ou nome indisponível, acionando a leitura da fila e uma nova consulta do título. Atualizar situação da participação e Sair da Arena preservam os handlers e regras. O nome não é incluído no polling de cinco segundos, evitando uma consulta de histórico por ciclo; uma renomeação no servidor será refletida na próxima montagem, troca de contexto ou tentativa contextual, e não necessariamente em tempo real.
+
+Testes preparados/adaptados: `participante02aEventHeader.test.cjs` cobre consulta autenticada, nova montagem, nome extenso, descarte de resposta antiga após troca de conta/evento, paginação, incompatibilidade de evento e recuperação de falha. `participante02aFilaVisual.test.cjs` verifica o título e ausência do botão normal; `autoQueueSync.test.cjs` mantém os cenários de polling/primeiro plano, com expectativas ajustadas à recuperação contextual. A campanha deve começar por esses três arquivos, seguida das regressões relacionadas e da suíte completa já documentada. Nenhum teste executado nesta implementação: aguarda confirmação manual de Luna Medium conforme AGENTS.md.
+
+Inspeção estática de sintaxe e Git/evidência realizada. O patch único 02A mantém a base `94766a13c80bc3c91f0963c9db9acea35efac488`; seu escopo foi ampliado apenas para incluir o serviço de histórico, o teste do cabeçalho e a adaptação da regressão de polling. Exclui o próprio patch. A tela de detalhes e sua evidência 05A não foram modificadas nesta correção. A próxima conferência visual permanece necessária no emulador e no celular real.
+
+### Segunda validação física — revisão da composição e legibilidade
+
+As duas imagens foram analisadas diretamente no chat antes da alteração: referência com card violeta/posição dominante e captura real iOS com número ilegível como retângulo, bandeiras nas experiências, superfície quase preta, texto auxiliar apagado e saída parcialmente fora do viewport. A referência orienta hierarquia e contraste; suas proporções distorcidas e contadores de conclusões não foram reproduzidos.
+
+**Diagnóstico da posição:** formatQueuePosition continua produzindo uma string numérica seguida de U+00BA (`º`), exclusivamente a partir da posição inteira validada do servidor. A fonte configurada no iOS é System (Android sans-serif); não há fonte de ícones no texto. O componente anterior encaixava rótulo de 16 dp/lineHeight 22 e número de 44 dp/lineHeight 52 num Text pai sem métricas explícitas. A captura comprova a falha visual, e a inspeção identifica mistura de métricas de texto aninhado como hipótese concreta de clipping/fragmentação da linha nativa. Não foi reproduzida instrumentadamente no iOS, portanto não se afirma causa raiz confirmada, falha de glyph ou bug específico de fonte/React Native.
+
+A composição foi alterada para dois Texts irmãos dentro de View flexível: rótulo em 22 dp/700, ordinal em 44 dp/800, altura intrínseca, sem lineHeight forçado, sem limite de linhas nem tamanho fixo do número. O painel mantém rótulo acessível único com a posição completa; aceita quebra natural para valores longos e fontes ampliadas. O estado chamado continua substituindo a posição pela estação oficial. A instabilidade mantém identificação de última posição confirmada e amarelo semântico.
+
+**Direção visual aplicada localmente:** superfície principal #191326, secundária #181626, seleção #241632, painel #503078, borda #A855F7 e destaques #B56CFF. Painel com pessoas, separador vertical e textos brancos; isso reforça contraste em vez de copiar o texto violeta de baixo contraste da referência. O ícone duplicado no canto do card foi retirado. O gamepad existente em LineIcon é desenhado por Views/bordas nativas e foi reutilizado, sem alterar seus desenhos globais ou inferir categorias específicas. As bandeiras eram a seleção explícita de `name="flag"`, e não um defeito comprovado do desenho gamepad. O selo SUA FILA acompanha o conteúdo da experiência, sem footer extra. Disponibilidade e ingresso são mantidos onde cabíveis.
+
+O subtítulo e a nota automática ganharam contraste. Mantido nome oficial do evento e ATIVA; optou-se por não acrescentar logo/barra para preservar espaço e prioridade do nome. Aviso verde e seu ciclo de vida não foram alterados. As ações inferiores têm margens menores; ScrollView recebe flex:1/minHeight:0 para ter viewport limitado, conteúdo natural e padding inferior de 32 dp. As áreas seguras existentes de AuthBackground e a barra inferior não foram modificadas. A saída permanece rolável e exige conferência real no dispositivo.
+
+**Validações e limites:** preparados testes de Texts irmãos, posições 1/12/1234, rótulo acessível, ausência de clipping por lineHeight herdado, superfícies, iconografia e estrutura rolável. A regressão automática mantém as demais verificações e passa a ler a posição no grupo de apresentação. Análise sintática estática e conferência Git/evidência realizadas; não equivalem à renderização nativa. Nenhum teste, build, lint ou typecheck executado pelo implementador. A execução continua reservada a Luna Medium com confirmação manual. A única renderização real examinada é a captura anterior fornecida pelo responsável; não foi produzida captura posterior à correção. Portanto a resolução visual no iOS permanece pendente de nova execução física, principalmente para ordinal, um/múltiplos dígitos, nomes longos, escala de fonte, sem fila/chamado/instabilidade e rolagem até Sair da Arena. Não há nova contagem de testes aprovados.
+
+Campanha preparada: participante02aFilaVisual, participante02aEventHeader, autoQueueSync, arenaQueueService.integration e participationActionScreens, seguida da regressão app quando aprovadas as focadas. Backend, dados, contratos, polling, autenticação e detalhes da participação foram preservados. Evidência acumulada única 02A regenerada com a mesma base e escopo da correção anterior.
+
+### Ajuste final — compactação do painel da posição
+
+Reduzida a altura mínima do painel de 80 para 56 dp (30%), com padding vertical de 12 para 4 dp, ícone de 28 para 22 dp, divisor de altura mínima esticada de 36 dp para altura decorativa de 28 dp e número de 44 para 34 dp/800. O rótulo permanece em 22 dp; o número continua sendo o principal destaque. O espaço até a informação de atualização automática caiu de 8 para 4 dp. Cores, bordas e o restante da composição foram preservados.
+
+Ícone, divisor e textos continuam em composição horizontal com alinhamento vertical central. Rótulo e número permanecem Texts irmãos, sem Text pai, sem lineHeight forçado ou altura fixa para o conteúdo. A altura mínima permite crescimento para fontes ampliadas, nomes/valores extensos e instabilidade, em vez de recortar o texto; portanto a redução visual exata depende da escala de fonte no aparelho. Mantidos os testes de ordinal com um e múltiplos dígitos; ajustado apenas o limite tipográfico anterior de 40 dp, incompatível com a redução solicitada, preservando a verificação de maior destaque que os demais textos.
+
+Rodada restrita à apresentação: nenhuma regra funcional alterada. Inspeção sintática, diff de código/documentação e consistência reversa da evidência realizadas; não foram executados testes ou renderização nativa. A confirmação visual final no iPhone continua necessária e a campanha automatizada permanece condicionada à seleção manual de Luna Medium. Patch acumulado 02A atualizado com a mesma base e escopo.
+
+### Fechamento da interface — somente saída no estado normal
+
+A compactação de aproximadamente 30% já estava aplicada: painel com minHeight 56 dp (antes 80), padding vertical 4 dp, ícone 22 dp, divisor 28 dp, número 34 dp e intervalo de 4 dp até o texto de atualização. Essas medidas foram preservadas, sem aplicar outra redução cumulativa. Permanecem Texts irmãos, altura intrínseca do número, composição horizontal e alinhamento central, com expansão para acessibilidade.
+
+Removido Atualizar situação da participação do estado normal. A área abaixo das experiências mantém apenas Sair da Arena como botão permanente; foi retirado o divisor e zerada a margem superior do botão de saída. Tentar novamente permanece contextual em falhas da fila/sincronização/nome do evento. Não houve remoção de refresh interno, da sincronização automática de participação, do polling de cinco segundos ou da recuperação de HomeFlowScreen (onRetry=refreshParticipation). O refreshParticipation após finalização continua presente. Nenhuma alteração de contrato, negócio ou tela de detalhes.
+
+Adaptadas as expectativas dos testes visuais e de cabeçalho para ausência de ambos os botões de atualização, preservando verificações da ação de saída e recuperação contextual. Feitas apenas inspeção sintática e verificações estáticas de diff/evidência; nenhum teste, lint, build ou typecheck executado. Conferência física final e campanha com Luna Medium continuam pendentes. Markdown e patch acumulado atualizados, sem staging, commit ou push.
+
+### Refinamento exclusivo da chamada — É a sua vez!
+
+No estado confirmado `called`, o card mantém #191326 e passa a borda externa para verde semântico. Sino no canto superior direito e mensagem O Staff está aguardando você. abaixo do título reforçam a chamada. O painel da estação usa localização, divisor e dois Texts independentes: Dirija-se à estação e o stationLabel oficial, sem truncamento ou altura fixa. Rodapé substituído por Apresente-se ao Staff para iniciar sua experiência. A experiência correspondente troca SUA FILA por CHAMADO em verde apenas durante called; as outras experiências não recebem o selo.
+
+Adicionados desenhos opt-in bell/location ao LineIcon, com Views/bordas nativas, sem dependências, emojis ou alteração dos ícones existentes. Estado waiting permanece com borda/painel violeta e texto automático; a chamada não exibe posição anterior. O aviso superior de conexão instável continua disponível quando necessário, mesmo durante a chamada. A mudança do rodapé não altera polling, vibração, sincronização, fonte do nome da estação ou qualquer ação operacional. Não foram criados cronômetros ou novas ações.
+
+Expectativas dos testes de apresentação e retomada ajustadas para rótulo/estação separados, nome oficial acessível, borda/superfície, ícones e selo exclusivo. Executadas somente inspeção sintática, diff e consistência do patch; nenhuma execução automatizada ou renderização nativa nesta rodada. Campanha continua pendente com Luna Medium e conferência física necessária para estação longa, fontes ampliadas e instabilidade. Patch único 02A regenerado na base acumulada existente; alterações locais preservadas, sem staging/commit/push.
+
+### Harmonização cromática do chamado — estrutura aprovada preservada
+
+Ajuste exclusivamente local de cores: borda externa volta a #A855F7; sino/localização e divisor usam #B56CFF. Painel da estação passa a #241632 com contorno violeta discreto (#A855F7 a 50%); nome oficial da estação permanece branco com a mesma tipografia. Ícone e texto da orientação inferior usam cinza claro #C4BBD2. CHAMADO passa à variante brand roxa; SUA VEZ, ATIVA e ABERTA permanecem verdes. Superfície externa, composição, hierarquia, textos, medidas e handlers não foram alterados.
+
+A saída mantém variante dangerOutline e confirmação destrutiva, com substituições locais da borda por #A84E66 e texto #E58A9D, reduzindo a saturação/intensidade do vermelho sem transformá-la numa ação da marca. O componente mantém os estados pressionado e desabilitado existentes. Nenhum token global foi modificado. Espera continua roxa e instabilidade mantém seu aviso semântico.
+
+A expectativa de borda no teste visual foi adaptada à cor solicitada; as verificações de chamada, estação e texto permanecem. Inspeção estática de sintaxe, diff e integridade do patch realizada. Nenhum teste ou renderização nativa executado; conferir as cores finais e os estados de interação no aparelho. Mantida a exigência de confirmação Luna Medium para a campanha, sem staging, commit ou push.
+
+### Cabeçalho final — logo oficial e ATIVA em coluna
+
+Reutilizado diretamente `app/assets/images/Logo ArenaGO render (admin-staff).png`, PNG RGBA existente de 2048 × 682. A inspeção visual confirmou a arte branca/roxa e o SHA-256 é idêntico ao asset logo-arenago-admin.png já utilizado pelo módulo Admin (28181211CB703993F6031EC3521F879534418C4FD3E6534ECFA64DC771A9F8CE). Nenhum asset foi criado, editado ou substituído; não há texto redesenhando o logo, tintColor ou imagem externa.
+
+No único cabeçalho da RealArenaScreen, coluna à direita com Image de 96 × 32 dp, resizeMode contain, rótulo acessível ArenaGO e ATIVA abaixo, com intervalo de 4 dp. Nome oficial e subtítulo seguem à esquerda, em contêiner flexível com minWidth:0; a coluna da marca não encolhe, e o nome pode quebrar sem sobreposição. O mesmo cabeçalho antecede todos os estados: carga, indisponibilidade, sem fila, espera, chamado e falhas. Conteúdo dos cards, textos, paleta, fluxo e fontes de dados foram preservados.
+
+A expectativa de cabeçalho verifica o Image e contain. O helper Node recebeu apenas o mapeamento explícito desse PNG nessa tela, confirmando a existência do arquivo antes de retornar recurso simulado; não houve fallback genérico para imports desconhecidos. Isso permite preparar a campanha sem interpretar bytes PNG como JavaScript. A evidência 02A inclui essa pequena adaptação do helper, sem outras mudanças preexistentes nesse arquivo desde a base.
+
+Inspeção sintática e integridade Git/patch realizadas; nenhum teste ou build executado. Conferir no emulador/celular a legibilidade do logo e a quebra de nomes longos/fontes ampliadas antes das capturas. Campanha permanece condicionada à confirmação manual de Luna Medium. Mantida a branch feature/heliom-participante-ux e as alterações locais, sem staging/commit/push.
+
+### Último ajuste do cabeçalho — título e logo alinhados, sem ATIVA
+
+Removido integralmente o selo ATIVA da apresentação da RealArenaScreen, sem modificar o status da participação. Nome oficial e logo compartilham agora a primeira linha, com alinhamento vertical central; o subtítulo Sua participação em tempo real permanece à esquerda abaixo dessa linha. A imagem oficial existente continua em 96 × 32 dp, contain e sem tintColor/recorte/distorção. A altura do logo e os paddings existentes foram mantidos; eliminar a coluna logo+selo evita crescimento desnecessário do cabeçalho. Nome longo ocupa espaço flexível (minWidth:0) e pode quebrar, enquanto o logo não encolhe nem se sobrepõe. Fontes ampliadas e nomes extensos mantêm expansão natural para legibilidade, sem altura fixa limitante.
+
+O cabeçalho único permanece em todos os estados ativos e preserva a leitura autenticada do nome, fallback e subtítulo. Nenhum elemento restante da tela, cor ou regra operacional foi alterado. Adaptada a expectativa existente de teste para ausência do selo. Inspeção sintática, diff de código/documentação e consistência reversa do patch realizadas; nenhum teste ou build executado. Conferência visual com nome longo/fonte ampliada pendente no aparelho. Evidência única 02A atualizada na base e escopo acumulados, sem staging, commit ou push.

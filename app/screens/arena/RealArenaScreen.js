@@ -2,17 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
 import * as Crypto from 'expo-crypto';
-import { ActivityIndicator, Alert, AppState, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Image, ScrollView, StyleSheet, Text, Vibration, View } from 'react-native';
 
-import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
+import { AuthBackground, Badge, Button, Card, LineIcon } from '../../components/ui';
 import { useAuth } from '../../context/AuthContext';
 import { createArenaQueueCoordinator, describeArenaError } from '../../services/arenaQueueService';
 import { defaultArenaQueueIntentStorage } from '../../services/arenaQueueIntentStorage';
 import { createParticipationActionCoordinator, describeParticipationActionError } from '../../services/participationActionService';
-import { fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
+import { fetchCurrentArenaEventName, fetchPendingEvaluationHistoryItem } from '../../services/participationHistoryService';
 import { createQueueAlertManager } from '../../services/queueAlertService';
 import { colors, radii, spacing, typography } from '../../theme';
 import { formatExperienceCount, formatQueuePosition, formatWaitingCount } from '../../utils/arenaQueuePresentation';
+
+// Variações locais violeta da R01; não alteram o tema dos demais módulos.
+const arenaPalette = { surface: '#191326', secondary: '#181626', selected: '#241632',
+  position: '#503078', border: '#A855F7', accent: '#B56CFF', support: '#C4BBD2' };
 
 /** Tela real de participação ativa. Sem alterações de domínio feitas em estado React. */
 export default function RealArenaScreen({ participation, refreshParticipation, onOpenEvaluation }) {
@@ -44,6 +48,11 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const [syncStale, setSyncStale] = useState(false);
   const [finished, setFinished] = useState(false);
   const [readError, setReadError] = useState(null);
+  const [eventNameState, setEventNameState] = useState(null);
+  const [eventNameAttempt, setEventNameAttempt] = useState(0);
+  const eventNameKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}:${eventId}`;
+  const eventNameKeyRef = useRef(eventNameKey);
+  eventNameKeyRef.current = eventNameKey;
   const busyRef = useRef(false);
   const alertManagerRef = useRef(null);
   const mountedRef = useRef(false);
@@ -51,6 +60,22 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const appStateRef = useRef(AppState?.currentState || 'active');
 
   const sessionKey = `${userId ?? ''}:${epoch ?? ''}:${participationId}`;
+  useEffect(() => {
+    let current = true;
+    const isCurrent = () => current && eventNameKeyRef.current === eventNameKey
+      && authRef.current?.isAuthenticated === true && authRef.current?.user?.id === userId
+      && typeof getEpoch === 'function' && getEpoch() === epoch;
+    setEventNameState({ key: eventNameKey, loading: true, name: null, error: false });
+    (async () => {
+      try {
+        const name = await fetchCurrentArenaEventName(client, participationId, eventId, { isCurrent });
+        if (isCurrent()) setEventNameState({ key: eventNameKey, loading: false, name, error: !name });
+      } catch {
+        if (isCurrent()) setEventNameState({ key: eventNameKey, loading: false, name: null, error: true });
+      }
+    })();
+    return () => { current = false; };
+  }, [client, userId, getEpoch, epoch, participationId, eventId, eventNameKey, eventNameAttempt]);
   if (lastSessionKeyRef.current !== sessionKey) {
     lastSessionKeyRef.current = sessionKey;
     initialReadDoneRef.current = false;
@@ -404,20 +429,25 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
   const lockActions = busy || loading || Boolean(entry) || Boolean(pending);
   // PARTICIPANTE-02A: derivações somente de apresentação; os dados continuam vindo do servidor.
   const waiting = entry?.status === 'waiting';
+  const called = entry?.status === 'called';
   const positionText = waiting ? formatQueuePosition(entry.position) : null;
   const positionLabel = syncStale ? 'Última posição confirmada' : 'Posição';
   const experienceCount = state ? formatExperienceCount(state.experiences.length) : null;
+  const currentEventName = eventNameState?.key === eventNameKey ? eventNameState : null;
 
   return (
     <AuthBackground variant="login" overlayOpacity={0.7} testID="active-arena-background">
       <StatusBar style="light" />
-      <ScreenHeader
-        title="Minha Arena"
-        subtitle="Participação ativa · dados do servidor"
-        showBack={false}
-        rightAction={<Badge label="ATIVA" variant="success" />}
-      />
-      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+      <View style={styles.header} testID="arena-header">
+        <View style={styles.headerRow}>
+          <Text style={[styles.heading, styles.headerTitle]} accessibilityRole="header">{currentEventName?.name || (currentEventName?.error ? 'Evento indisponível' : 'Carregando evento...')}</Text>
+          <Image source={require('../../assets/images/Logo ArenaGO render (admin-staff).png')}
+            resizeMode="contain" style={styles.headerLogo} accessible accessibilityRole="image"
+            accessibilityLabel="ArenaGO" testID="arena-header-logo" />
+        </View>
+        <Text style={styles.headerSubtitle}>Sua participação em tempo real</Text>
+      </View>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
         {loading && !state ? (
           <Card variant="elevated" style={styles.stateCard}>
             <ActivityIndicator accessibilityLabel="Consultando a Arena" color={colors.brand.primaryLight} />
@@ -448,21 +478,18 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         ) : null}
 
         {entry ? (
-          <Card variant="highlight" style={styles.queueCard} testID="arena-queue-entry-card">
+          <Card variant="highlight" style={[styles.queueCard, called && styles.calledCard]} testID="arena-queue-entry-card">
             <View style={styles.cardTopRow}>
               <Badge label={waiting ? 'NA FILA' : 'SUA VEZ'} variant={waiting ? 'brand' : 'success'} />
-              <LineIcon
-                name={waiting ? 'queue' : 'door'}
-                color={waiting ? colors.brand.primaryLight : colors.semantic.success}
-                size={22}
-              />
+              {called ? <LineIcon name="bell" color={arenaPalette.accent} size={22} /> : null}
             </View>
             <Text style={styles.queueTitle} accessibilityRole="header">
               {waiting ? 'Você está na fila' : 'É a sua vez!'}
             </Text>
+            {called ? <Text style={styles.calledMessage}>O Staff está aguardando você.</Text> : null}
             <View style={styles.queueExperienceRow}>
-              <LineIcon name="gamepad" color={colors.text.secondary} size={18} />
-              <Text style={styles.queueExperience} numberOfLines={2}>{entry.experienceName}</Text>
+              <LineIcon name="gamepad" color={arenaPalette.accent} size={22} />
+              <Text style={styles.queueExperience}>{entry.experienceName}</Text>
             </View>
             {waiting ? (
               <View
@@ -471,25 +498,31 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
                 accessibilityLabel={`${positionLabel} na fila: ${positionText}`}
                 testID="arena-queue-position"
               >
-                <Text style={styles.positionLine}>
+                <LineIcon name="queue" color={colors.text.primary} size={22} />
+                <View style={styles.positionDivider} />
+                <View style={styles.positionLine} testID="arena-position-text">
                   <Text style={styles.positionLabel}>{`${positionLabel} `}</Text>
-                  <Text style={[styles.positionNumber, syncStale && styles.positionNumberStale]}>{positionText}</Text>
-                </Text>
+                  <Text style={[styles.positionNumber, syncStale && styles.positionNumberStale]} testID="arena-position-number">{positionText}</Text>
+                </View>
               </View>
             ) : (
-              <View style={styles.stationPanel} testID="arena-queue-station">
-                <Text style={styles.stationText}>Dirija-se à estação: {entry.stationLabel}</Text>
+              <View style={styles.stationPanel} testID="arena-queue-station" accessible accessibilityLabel={`Dirija-se à estação: ${entry.stationLabel}`}>
+                <LineIcon name="location" color={arenaPalette.accent} size={24} />
+                <View style={styles.stationDivider} />
+                <View style={styles.stationInfo}>
+                  <Text style={styles.stationLabel}>Dirija-se à estação</Text>
+                  <Text style={styles.stationText}>{entry.stationLabel}</Text>
+                </View>
               </View>
             )}
-            <View style={styles.divider} />
             <View style={styles.autoUpdateRow}>
               <LineIcon
-                name={syncStale ? 'alert' : 'refresh'}
-                color={syncStale ? colors.semantic.warning : colors.text.muted}
+                name={called ? 'door' : syncStale ? 'alert' : 'refresh'}
+                color={called ? arenaPalette.support : syncStale ? colors.semantic.warning : arenaPalette.support}
                 size={14}
               />
-              <Text style={[styles.autoUpdateText, syncStale && styles.autoUpdateTextStale]}>
-                {syncStale
+              <Text style={[styles.autoUpdateText, !called && syncStale && styles.autoUpdateTextStale]}>
+                {called ? 'Apresente-se ao Staff para iniciar sua experiência.' : syncStale
                   ? 'A conexão com o servidor oscilou. Exibindo as últimas informações confirmadas; reconectando automaticamente...'
                   : 'A posição e a chamada são atualizadas automaticamente a cada 5 segundos.'}
               </Text>
@@ -513,6 +546,7 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
               <Button
                 title="Conferir / repetir a mesma tentativa"
                 variant="outline"
+                textStyle={styles.secondaryActionText}
                 disabled={busy || loading}
                 onPress={() => join(pending.experienceId)}
                 style={styles.actionButton}
@@ -537,32 +571,32 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
             <Card
               key={experience.id}
               variant="default"
-              style={[styles.card, mine && styles.cardMine]}
+              padding={spacing.md}
+              style={[styles.card, Boolean(entry) && styles.cardCompact, mine && styles.cardMine]}
               testID={`arena-experience-${experience.id}`}
             >
               <View style={styles.experienceHeader}>
                 <View style={[styles.experienceIcon, !permitted && styles.experienceIconClosed]}>
-                  <LineIcon name="gamepad" color={permitted ? colors.brand.primaryLight : colors.text.muted} size={22} />
+                  <LineIcon name="gamepad" color={permitted ? arenaPalette.accent : colors.text.secondary} size={24} />
                 </View>
                 <View style={styles.experienceInfo}>
-                  <Text style={styles.cardTitle} numberOfLines={2}>{experience.name}</Text>
+                  <Text style={styles.cardTitle}>{experience.name}</Text>
                   <View style={styles.waitingRow}>
                     <LineIcon name="queue" color={colors.text.secondary} size={14} />
                     <Text style={styles.waitingText}>{formatWaitingCount(experience.waitingCount)}</Text>
                   </View>
+                  {mine ? <View style={styles.mineLabel}><Badge label={called ? 'CHAMADO' : 'SUA FILA'} variant="brand" size="sm" /></View> : null}
                 </View>
-                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" />
+                <Badge label={permitted ? 'ABERTA' : 'ENCERRADA'} variant={permitted ? 'success' : 'default'} size="sm" style={!permitted ? styles.closedBadge : undefined} />
               </View>
-              <View style={styles.divider} />
-              <View style={styles.experienceFooter}>
-                <View style={[styles.statusDot, permitted ? styles.statusDotOpen : styles.statusDotClosed]} />
-                <Text style={styles.experienceStatus}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text>
-                {mine ? <Badge label="SUA FILA" variant="brand" size="sm" /> : null}
-              </View>
+              {!entry ? <View style={styles.experienceFooter}>
+                {!entry ? <Text style={styles.experienceStatus}>{permitted ? 'Recebendo entradas' : 'Entrada na fila encerrada'}</Text> : null}
+              </View> : null}
               {!entry && !pending && permitted ? (
                 <Button
                   title={busy ? 'Verificando...' : 'Entrar na fila'}
                   variant="primary"
+                  size="sm"
                   disabled={lockActions}
                   onPress={() => join(experience.id)}
                   style={styles.actionButton}
@@ -573,35 +607,28 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
         })}
 
         <View style={styles.actionsSection}>
-          <Button
-            title={loading ? 'Consultando...' : 'Atualizar fila e experiências'}
-            variant="secondary"
-            size="md"
+          {error || readError || syncStale || currentEventName?.error ? <Button
+            title="Tentar novamente"
+            variant="ghost"
+            size="sm"
+            textStyle={styles.secondaryActionText}
             disabled={busy || loading}
-            onPress={refresh}
+            onPress={() => { void refresh(); setEventNameAttempt(value => value + 1); }}
             style={styles.actionButton}
-          />
-          <Button
-            title="Atualizar situação da participação"
-            variant="outline"
-            size="md"
-            onPress={refreshParticipation}
-            style={styles.actionButton}
-          />
-          <View style={styles.actionsDivider} />
+          /> : null}
           <Button
             title={busy ? 'Aguarde...' : 'Sair da Arena'}
             variant="dangerOutline"
             size="md"
             disabled={busy || loading || finished || Boolean(pending)}
             onPress={finish}
-            style={styles.actionButton}
+            style={styles.leaveAction}
+            textStyle={styles.leaveActionText}
           />
           <View style={styles.staffNoteRow}>
             <LineIcon name="alert" color={colors.text.muted} size={14} />
             <Text style={styles.staffNote}>
-              Chamada e conclusão são realizadas pelo Staff. Este aplicativo não simula atendimento
-              nem permite cancelar somente a fila.
+              O Staff realiza a chamada e o atendimento. A saída encerra sua participação na Arena.
             </Text>
           </View>
         </View>
@@ -611,10 +638,18 @@ export default function RealArenaScreen({ participation, refreshParticipation, o
 }
 
 const styles = StyleSheet.create({
-  body: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.md, paddingBottom: 40 },
-  stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg },
+  header: { paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingVertical: spacing.sm },
+  headerRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  headerTitle: { flex: 1, minWidth: 0 },
+  headerLogo: { width: 96, height: 32, flexShrink: 0 },
+  heading: { ...typography.titleLarge, color: colors.text.primary },
+  headerSubtitle: { ...typography.bodySmall, color: arenaPalette.support, marginTop: spacing.xxs },
+  scroll: { flex: 1, minHeight: 0 },
+  body: { paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.sm, paddingBottom: spacing.xxxl },
+  stateCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg, backgroundColor: colors.background.base, borderColor: `${colors.brand.primaryLight}40` },
   line: { ...typography.body, color: colors.text.secondary, marginTop: spacing.sm },
   actionButton: { marginTop: spacing.md },
+  secondaryActionText: { color: colors.brand.primaryLight },
   divider: { height: 1, alignSelf: 'stretch', backgroundColor: colors.border.subtle, marginTop: spacing.md },
 
   // Avisos
@@ -656,60 +691,71 @@ const styles = StyleSheet.create({
   syncWarningText: { ...typography.bodySmall, color: colors.semantic.warning, flex: 1 },
 
   // Card principal da fila
-  queueCard: { marginBottom: spacing.lg, alignItems: 'stretch' },
+  queueCard: { marginBottom: spacing.sm, alignItems: 'stretch', padding: spacing.lg, backgroundColor: arenaPalette.surface, borderColor: arenaPalette.border },
+  calledCard: { borderColor: arenaPalette.border },
+  calledMessage: { ...typography.bodySmall, color: arenaPalette.support, marginTop: spacing.xs },
   cardTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
-  queueTitle: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.md },
+  queueTitle: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.sm },
   queueExperienceRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs },
   queueExperience: { ...typography.bodyLarge, color: colors.text.primary, flex: 1 },
   positionPanel: {
-    marginTop: spacing.lg,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
     borderRadius: radii.lg,
     borderWidth: 1,
-    borderColor: colors.brand.primary,
-    backgroundColor: colors.brand.primaryDim,
+    borderColor: arenaPalette.accent,
+    backgroundColor: arenaPalette.position,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md, minHeight: 56,
   },
   positionPanelStale: { borderColor: colors.semantic.warning, backgroundColor: colors.semantic.warningBg },
-  positionLine: { color: colors.text.primary },
-  positionLabel: { ...typography.bodyLarge, color: colors.text.secondary },
-  positionNumber: { fontFamily: typography.fontFamily, fontSize: 44, lineHeight: 52, fontWeight: '800', letterSpacing: -0.5, color: colors.text.primary },
-  positionNumberStale: { color: colors.text.secondary },
+  positionDivider: { width: 1, height: 28, backgroundColor: arenaPalette.accent },
+  positionLine: { flex: 1, minWidth: 0, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: spacing.xs },
+  positionLabel: { fontFamily: typography.fontFamily, fontSize: 22, fontWeight: '700', color: colors.text.primary, flexShrink: 1 },
+  // Text nativo independente: métricas próprias, sem herdar a linha pequena de um Text pai.
+  positionNumber: { fontFamily: typography.fontFamily, fontSize: 34, fontWeight: '800', color: colors.text.primary, flexShrink: 1 },
+  positionNumberStale: { color: colors.semantic.warning },
   stationPanel: {
-    marginTop: spacing.lg,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
+    marginTop: spacing.md,
+    padding: spacing.md,
     borderRadius: radii.lg,
     borderWidth: 1,
-    borderColor: colors.semantic.success,
-    backgroundColor: colors.semantic.successBg,
+    borderColor: `${arenaPalette.border}80`,
+    backgroundColor: arenaPalette.selected,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
   },
-  stationText: { ...typography.titleSmall, color: colors.text.primary },
-  autoUpdateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
-  autoUpdateText: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
+  stationDivider: { width: 1, height: 28, backgroundColor: arenaPalette.accent },
+  stationInfo: { flex: 1, minWidth: 0 },
+  stationLabel: { ...typography.bodySmall, color: colors.text.secondary },
+  stationText: { ...typography.titleMedium, color: colors.text.primary, marginTop: spacing.xxs },
+  autoUpdateRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.xs },
+  autoUpdateText: { ...typography.bodySmall, color: arenaPalette.support, flex: 1 },
   autoUpdateTextStale: { color: colors.semantic.warning },
 
   // Experiências
-  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.lg, marginBottom: spacing.md },
+  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.sm, marginBottom: spacing.sm },
   sectionTitle: { ...typography.titleSmall, color: colors.text.primary, flexShrink: 1 },
-  sectionMeta: { ...typography.bodySmall, color: colors.text.muted },
-  card: { marginBottom: spacing.md, alignItems: 'stretch' },
-  cardMine: { borderColor: colors.brand.primary },
+  sectionMeta: { ...typography.bodySmall, color: colors.text.secondary },
+  card: { marginBottom: spacing.sm, alignItems: 'stretch', backgroundColor: arenaPalette.secondary, borderColor: `${arenaPalette.border}80` },
+  cardCompact: { paddingVertical: spacing.sm },
+  cardMine: { borderColor: arenaPalette.border, backgroundColor: arenaPalette.selected },
+  mineLabel: { alignSelf: 'flex-start', marginTop: spacing.xs },
   experienceHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   experienceIcon: {
-    width: 44,
-    height: 44,
+    width: 36,
+    height: 36,
     borderRadius: radii.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.brand.primaryDim,
+    backgroundColor: `${arenaPalette.border}20`,
   },
-  experienceIconClosed: { backgroundColor: colors.background.elevated },
+  experienceIconClosed: { backgroundColor: colors.background.base },
+  closedBadge: { backgroundColor: colors.background.base },
   experienceInfo: { flex: 1, minWidth: 0 },
   cardTitle: { ...typography.titleSmall, color: colors.text.primary },
   waitingRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs },
   waitingText: { ...typography.bodySmall, color: colors.text.secondary },
-  experienceFooter: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.md },
+  experienceFooter: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flexWrap: 'wrap', marginTop: spacing.xs },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusDotOpen: { backgroundColor: colors.semantic.success },
   statusDotClosed: { backgroundColor: colors.text.disabled },
@@ -717,7 +763,8 @@ const styles = StyleSheet.create({
 
   // Ações
   actionsSection: { marginTop: spacing.sm },
-  actionsDivider: { height: 1, backgroundColor: colors.border.subtle, marginTop: spacing.lg },
+  leaveAction: { marginTop: 0, borderColor: '#A84E66' },
+  leaveActionText: { color: '#E58A9D' },
   staffNoteRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginTop: spacing.lg },
   staffNote: { ...typography.bodySmall, color: colors.text.muted, flex: 1, lineHeight: 20 },
 });

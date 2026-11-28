@@ -9,6 +9,19 @@ const BASE = 20;
 const STROKE = 1.8;
 
 const DRAWINGS = {
+  bell: (color) => (
+    <>
+      <View style={[styles.bellHandle, { backgroundColor: color }]} />
+      <View style={[styles.bellBody, { borderColor: color }]} />
+      <View style={[styles.bellBase, { backgroundColor: color }]} />
+      <View style={[styles.bellClapper, { backgroundColor: color }]} />
+    </>
+  ),
+  location: (color) => (
+    <View style={[styles.locationPin, { borderColor: color }]}>
+      <View style={[styles.locationDot, { borderColor: color }]} />
+    </View>
+  ),
   qr: (color) => (
     <>
       {[[1, 1], [11, 1], [1, 11]].map(([left, top]) => (
@@ -117,6 +130,12 @@ export function LineIcon({ name, color = '#FFFFFF', size = BASE, style, testID }
 }
 
 const styles = StyleSheet.create({
+  bellHandle: { position: 'absolute', top: 1, width: 2, height: 3, borderRadius: 1 },
+  bellBody: { position: 'absolute', top: 3, width: 12, height: 11, borderWidth: STROKE, borderTopLeftRadius: 7, borderTopRightRadius: 7 },
+  bellBase: { position: 'absolute', top: 13, width: 16, height: STROKE, borderRadius: 1 },
+  bellClapper: { position: 'absolute', top: 16, width: 4, height: 2.5, borderRadius: 2 },
+  locationPin: { width: 13, height: 13, borderWidth: STROKE, borderRadius: 7, borderBottomRightRadius: 1, transform: [{ rotate: '45deg' }], alignItems: 'center', justifyContent: 'center', marginTop: -3 },
+  locationDot: { width: 4, height: 4, borderWidth: STROKE - 0.3, borderRadius: 2 },
   canvas: {
     position: 'absolute',
     left: 0,

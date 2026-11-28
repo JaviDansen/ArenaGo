@@ -31,6 +31,12 @@ function loadModule(relativePath, requireModule, exposeFields = [], sourceOverri
   });
   const module = { exports: {} };
   const wrappedRequire = (id) => {
+    // Metro resolve este asset como recurso nativo; Node não deve interpretar PNG como JS.
+    if (relativePath.replace(/\\/g, '/') === 'screens/arena/RealArenaScreen.js'
+      && id === '../../assets/images/Logo ArenaGO render (admin-staff).png') {
+      readFileSync(path.resolve(path.dirname(filename), id));
+      return { uri: id };
+    }
     try {
       return requireModule ? requireModule(id) : require(id);
     } catch (err) {

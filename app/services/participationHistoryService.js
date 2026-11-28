@@ -65,6 +65,27 @@ export async function fetchParticipationHistory(client, { limit = 20, cursor = n
   return parseHistoryResponse(await client.get(`/participations/history${query}`, { auth: true }));
 }
 
+/** Nome oficial da participação corrente, sem cache entre contas/sessões/eventos. */
+export async function fetchCurrentArenaEventName(client, participationId, eventId, { isCurrent = () => true } = {}) {
+  if (!UUID.test(participationId) || !UUID.test(eventId)) throw new Error('Identidade da participação inválida.');
+  let cursor = null;
+  const seen = new Set();
+  do {
+    if (!isCurrent()) return null;
+    const page = await fetchParticipationHistory(client, { limit: 50, cursor });
+    if (!isCurrent()) return null;
+    const item = page.items.find(value => value.participationId === participationId);
+    if (item) {
+      if (item.event.id !== eventId || item.status !== 'active') throw new Error('Evento da participação não confirmado.');
+      return item.event.name;
+    }
+    cursor = page.nextCursor;
+    if (cursor && seen.has(cursor)) throw new Error('Cursor de histórico repetido.');
+    if (cursor) seen.add(cursor);
+  } while (cursor);
+  throw new Error('Nome do evento indisponível.');
+}
+
 /** Só devolve o item real quando ambas as leituras confirmam avaliação pendente. */
 export async function fetchPendingEvaluationHistoryItem(client, participationId, { isCurrent = () => true } = {}) {
   if (!UUID.test(participationId)) throw new Error('Identificador de participação inválido.');

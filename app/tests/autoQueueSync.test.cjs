@@ -512,7 +512,7 @@ test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos
       };
     }
     if (name === '../../services/participationHistoryService') {
-      return { fetchPendingEvaluationHistoryItem: async () => null };
+      return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
     }
     if (name === '../../services/queueAlertService') {
       return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
@@ -531,7 +531,7 @@ test('RealArenaScreen: exibe nota de atualização automática a cada 5 segundos
     'deve exibir a nota de atualização automática a cada 5 segundos'
   );
   assert.ok(
-    texts.some((t) => t.includes('Posição 3º')),
+    nodes(tree).some(n => n.props?.testID === 'arena-position-text' && textOf(n) === 'Posição 3º'),
     'deve exibir a posição do participante na fila interna'
   );
 });
@@ -600,7 +600,7 @@ test('RealArenaScreen (Cenário 8): useFocusEffect inicializa timer de 5s e limp
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -718,7 +718,7 @@ test('RealArenaScreen (Cenário 1): respostas fora de ordem entre gerações de 
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -824,7 +824,7 @@ test('RealArenaScreen (Cenário 2): atualização manual não sobrepõe com poll
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -940,7 +940,7 @@ test('RealArenaScreen (Cenário 3): resposta tardia após logout ou troca de par
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -1051,7 +1051,7 @@ test('RealArenaScreen (Cenários 9 e 10): falha temporária no polling preserva 
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -1400,7 +1400,7 @@ test('RealArenaScreen: atualizações sucessivas de posição NÃO recriam o tim
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return {
           createQueueAlertManager: () => ({
@@ -1714,7 +1714,7 @@ test('RealArenaScreen (P1 - Concorrência join vs syncSilent): consulta antiga p
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager: () => ({ checkAndAlert: () => false, reset: () => {} }) };
       }
@@ -1882,7 +1882,7 @@ test('RealArenaScreen (P2 - Vibração em Atualização Manual): chamada nova id
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return { createQueueAlertManager };
       }
@@ -2017,7 +2017,7 @@ test('RealArenaScreen (Regressão - Foco com Consulta Pendente): perda e recuper
       if (name === '../../services/participationActionService') {
         return { createParticipationActionCoordinator: () => ({ finish: async () => {} }), describeParticipationActionError: () => 'erro' };
       }
-      if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+      if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
       if (name === '../../services/queueAlertService') {
         return {
           createQueueAlertManager: () => ({
@@ -2164,7 +2164,7 @@ function createArenaAuditRig({ initialRead } = {}) {
       createParticipationActionCoordinator: () => ({ finish: (...args) => finish(...args) }),
       describeParticipationActionError: error => error.message,
     };
-    if (name === '../../services/participationHistoryService') return { fetchPendingEvaluationHistoryItem: async () => null };
+    if (name === '../../services/participationHistoryService') return { fetchCurrentArenaEventName: async () => 'Evento oficial', fetchPendingEvaluationHistoryItem: async () => null };
     if (name === '../../services/queueAlertService') return { createQueueAlertManager };
     return require(name);
   });
@@ -2320,7 +2320,8 @@ test('auditoria P2: leitura anterior à suspensão não consome referência vál
     assert.equal(h.vibrations, 0);
     resumed.resolve(auditArena(auditCalled()));
     await h.flush();
-    assert.match(h.text(), /Dirija-se à estação: Estação 1/);
+    assert.match(h.text(), /Dirija-se à estação/);
+    assert.match(h.text(), /Estação 1/);
     assert.equal(h.vibrations, 0);
     h.read(() => Promise.resolve(auditArena(auditCalled(auditIds.nextCall))));
     h.tick(); await h.flush(); h.tick(); await h.flush();
