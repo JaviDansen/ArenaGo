@@ -31,8 +31,21 @@ const calls:Array<{ mode:string; input:Record<string,unknown> }>=[];
     editAuthenticated:(input:Record<string,unknown>, context: MutationSession) => { authenticatedInput(context, undefined); calls.push({mode:"edit",input});if(failure)throw failure;return result;} } },
 ] })class HttpModule{}
 let app:INestApplication;
-before(async()=>{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");});
-after(async()=>{await app?.close();});
+let originalEvaluationTtl:string|undefined;
+before(async()=>{
+  originalEvaluationTtl=process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS;
+  process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS="60";
+  try{app=await NestFactory.create(HttpModule,{logger:false});app.setGlobalPrefix("api/v1");app.useGlobalFilters(new ProblemDetailsExceptionFilter());await app.listen(0,"127.0.0.1");}
+  catch(error){
+    try{await app?.close();}
+    finally{if(originalEvaluationTtl===undefined)delete process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS;else process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS=originalEvaluationTtl;}
+    throw error;
+  }
+});
+after(async()=>{
+  try{await app?.close();}
+  finally{if(originalEvaluationTtl===undefined)delete process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS;else process.env.EVALUATION_IDEMPOTENCY_TTL_SECONDS=originalEvaluationTtl;}
+});
 function request(mode:"submit"|"edit",token="participant",key="opaque,key"){
   const r=mode==="submit"?supertest(app.getHttpServer()).post(`/api/v1/participations/${pid}/evaluation`):supertest(app.getHttpServer()).patch(`/api/v1/evaluations/${eid}`);
   return r.set("Authorization",`Bearer ${token}`).set("Idempotency-Key",key);

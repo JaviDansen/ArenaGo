@@ -9,7 +9,7 @@
 - **Branch obrigatória:** `feature/staff-operacional-v2`
 - **Commit-base de referência (`HEAD` original):** `efe21a8492a056d08a8c61799f7a66636c830a63` (`docs(staff): registra encerramento formal da STAFF-02`)
 - **Commits auditados:** `29029f0328ecb02bf6e016abda1b2c4ed371dffe` (Rodada 1) e `330cc28548234072891a4321be27f939ef8ab2eb` (Rodada 2)
-- **Status atual:** Correções pontuais da Auditoria Independente — Rodada 2 (`STAFF03-AUD-06` e `STAFF03-AUD-08`) aplicadas na branch `feature/staff-operacional-v2` (base acumulada `efe21a8492a056d08a8c61799f7a66636c830a63`). **Ainda não aprovada, testada nem homologada**; aguardando publicação para nova auditoria independente, execução da campanha automatizada por **GPT-6 Luna — Medium** conforme [AGENTS.md](../AGENTS.md), integração visual pelo Heliom e homologação no Expo Go.
+- **Status atual (27/11/2026):** campanha automatizada local conjunta STAFF-03/STAFF-04 aprovada conforme resultados finais registrados ao fim deste documento: Backend 1.299/1.299, App 995/995 e QA independente 51/51. Correções de VAL-09/VAL-10 e o bloqueio ambiental ENV-VAL-01 foram revalidados ou superados conforme a atribuição de cada resultado. Homologação Expo, validação PostgreSQL dedicada e aprovação formal permanecem pendentes.
 
 ### Objetivos principais
 1. **Entrega A — Reformulação do Controle de Entrada (App Staff):** modernizar visualmente e funcionalmente [StaffEntryControlRealScreen.js](../app/screens/staff/StaffEntryControlRealScreen.js) na identidade aprovada nas STAFF-01 e STAFF-02, preservando integralmente contratos HTTP, polling, autorização por evento, fila FIFO do servidor, modais responsivos e persistência de intenções no `SecureStore`.
@@ -272,7 +272,7 @@ Quando `participation` estiver presente no payload:
 - Conferência de integridade de patch via `git diff --check -- app backend docs`, `git apply --stat qa-evidence/STAFF-03-changes.diff` e `git apply --check --reverse qa-evidence/STAFF-03-changes.diff`.
 - Validação de inventário Staff (`realStaffScreens` + ausência de imports de demonstração) e uso exclusivo de links relativos na documentação.
 
-### 9.2. Campanha automatizada pendente para **GPT-6 Luna — Medium** (NÃO EXECUTADA nesta rodada)
+### 9.2. Plano original de campanha (historico; resultados atuais na secao Revalidacao conjunta de 27/11/2026)
 Conforme [AGENTS.md](../AGENTS.md), o modelo de implementação **não** executou testes automatizados, lint, typecheck, build ou acesso ao PostgreSQL. Comandos ordenados a partir dos diretórios corretos (garantindo resolução Babel a partir de `app/` e scripts isolados em `backend/` e `qa/regression/`):
 
 1. **Testes focados da STAFF-03 no App (executar a partir de `app/`):**
@@ -461,3 +461,512 @@ Segunda auditoria estática independente realizada sobre o commit `330cc28548234
   - **Testes atualizados:** [staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs) atualizado (`STAFF03-AUD-05 + STAFF03-AUD-08`) cobrindo operação normal, janela residual, todas as ações bloqueadas, dados desatualizados (`stale`), fila inativa e indisponibilidade operacional (`503`), validando explicitamente a ausência da redação contraditória anterior.
 - **Verificações estáticas e limitações remanescentes:** executadas apenas verificações estáticas permitidas pelo [AGENTS.md](../AGENTS.md) (`git diff --check`, `git apply --stat`, `git apply --check --reverse`, `node --check` nos `.cjs`, conferência de links relativos e ausência de auto-referência no patch). Nenhuma suíte automatizada (`node --test`, `npm test`, `typecheck`, `lint`, `build`, `qa/regression` ou PostgreSQL) foi executada nesta rodada; campanha completa pendente com **GPT-6 Luna — Medium** e posterior homologação no Expo Go.
 - **25/11/2026 (Rodada 2 concluída para nova auditoria):** Correções de `STAFF03-AUD-06` e `STAFF03-AUD-08` aplicadas sem reabrir os seis achados aprovados na Rodada 1; [STAFF-03-changes.diff](../qa-evidence/STAFF-03-changes.diff) regenerado desde `efe21a8492a056d08a8c61799f7a66636c830a63`. Aguardando publicação por Kaled e nova auditoria independente.
+
+## Campanha de Validação Automatizada Conjunta — STAFF-03 + STAFF-04
+
+**Execução parcial — 27/11/2026 — GPT-6 Luna Medium.** O HEAD validado foi `9ee8789fdf22fd38b4f1d8303d2012706b4586d4` na branch `feature/staff-operacional-v2`.
+
+O cenário `STAFF04-AUD-06 + AUD-04 (integrado)` falhou duas vezes antes da correção textual. A primeira execução isolada (0 aprovados, 1 falho) revelou que a fixture capturava `slowPhase` antes da Promise pendente ser resolvida. O resolvedor foi alterado para receber explicitamente `closing`; a asserção permaneceu forte, mas inicialmente esperava o texto incorreto `Status: Encerrando`. Após inspeção do `STATUS_LABELS`, a expectativa foi corrigida para `Status: Em encerramento`, com verificação inicial de `Status: Aberto`.
+
+A revalidação isolada passou: 1 aprovado, 0 falhos, 0 ignorados ou cancelados, código 0. A suíte integral `roleRoutingIntegration.test.cjs` terminou sem travar, com 63 aprovados, 1 falho, 0 ignorados e 0 cancelados, código 1 (42.944 ms). A falha remanescente é em `STAFF04-AUD-01/02/04/05`, linha 4178: o teste esperava encontrar o botão `Cancelar` depois de abrir o modal de conclusão, mas o harness encontrou zero botões. Classificação inicial: fixture ou contrato visual do modal, ainda não determinada. A campanha foi interrompida conforme o critério de falha; backend, demais suítes focadas e regressões completas não foram executados.
+
+PostgreSQL/Neon, migrations, seeds e homologação Expo não foram executados. STAFF-03 e STAFF-04 permanecem sem parecer de aprovação automatizada conjunta e sem aprovação formal nesta campanha.
+
+### Retomada da campanha conjunta — 27/11/2026
+
+Após a correção `STAFF04-VAL-02`, o teste isolado do cancelamento do modal passou (1/1, código 0). A suíte completa `roleRoutingIntegration.test.cjs` também passou integralmente: 64 aprovados, zero falhas, ignorados ou cancelados, código 0 (33.458 ms).
+
+Na retomada das demais suítes focadas, `staffPolling.test.cjs` passou com 6/6 (código 0). A suíte seguinte, `staffEventDiscovery.test.cjs`, falhou com 13 aprovados e 1 falho, zero ignorados/cancelados, código 1 (2.551 ms). A falha é `STAFF04-AUD-02`, linha 1396: após a fixture receber 403 no polling de eventos e o teste confirmar a limpeza de experiências, estações e Controle de Entrada, `latestEventsPolling()?.enabled` continuou `true` quando se esperava `false`. Diagnóstico inicial inconclusivo entre comportamento do hook/polling e sincronização da fixture; nenhuma correção foi aplicada. As demais suítes focadas e todas as validações de backend/regressão permanecem pendentes por interrupção no primeiro erro.
+
+### Retomada da campanha conjunta — STAFF04-VAL-03
+
+O harness `createStaffUiHarness` agora mantém `pollingRegistrations` como histórico e um mapa separado de registros ativos associados a instâncias React via `useRef`/`useEffect`; o cleanup remove cada registro ativo no unmount ou na troca de configuração. Os helpers de polling atual consultam registros ativos, priorizando o escopo `:events:` do evento selecionado. O teste STAFF04-AUD-02 confirma um único polling atual habilitado no Painel antes do 403 e ausência de registros acionáveis após o bloqueio/desmontagem.
+
+Revalidações: cenário isolado STAFF04-AUD-02, 1/1 aprovado; `staffEventDiscovery.test.cjs`, 14/14; `staffDashboard.test.cjs`, 25/25. A suíte `staffOperationsService.integration.test.cjs` retornou código 1, com 68 aprovados, 1 falho e nenhum ignorado/cancelado. O caso `STAFF04-AUD-04 (coordenador)` falhou na linha 1114: esperava `['post:401', 'onAuthError:session', 'recordTerminal:start']`, mas recebeu `[]`. A campanha foi interrompida; esta falha ainda requer diagnóstico e nenhuma alteração foi aplicada a ela. Entry Control, telas, Estação, navegação, background, demo, participação, backend e regressões completas seguem pendentes.
+
+### Retomada da campanha conjunta — STAFF04-VAL-04
+
+**Correção da sincronização:** o teste `STAFF04-AUD-04 (coordenador)` passou a aguardar sinais explícitos de início de `recordTerminal()`, `clear()`, `reserve()` e `dispatch()`, com timeout diagnóstico limitado e liberação dos gates em `finally`. Isso preserva as verificações intermediárias da ordem entre POST, `onAuthError`, gravação do recibo e limpeza. A hipótese para a falha anterior foi confirmada pela aprovação do cenário isolado e da suíte completa após a troca das esperas arbitrárias.
+
+**Resultados desta retomada:** teste isolado STAFF04-AUD-04: 1 aprovado, 0 falhos, 0 ignorados/cancelados, código 0 (627 ms). `staffOperationsService.integration.test.cjs`: 69 aprovados, 0 falhos, 0 ignorados/cancelados, código 0 (1.607 ms). `staffEntryControl.test.cjs`: 35 aprovados, 1 falho, 0 ignorados/cancelados, código 1 (906 ms). A campanha foi interrompida nessa primeira falha posterior.
+
+**Diagnóstico da falha seguinte:** `STAFF04-AUD-04` em `staffEntryControl.test.cjs:536` recebeu `blocked` em vez de `rejected`/404. A fixture `stateWithCall` mantém a participação `id(4)` na lista `waiting` herdada de `body()` e também a coloca em `pendingCall`. O parser real rejeita esse estado inconsistente (participação duplicada entre chamada pendente e fila), então o store não fica pronto para mutação e retorna `blocked`. Diagnóstico estático aponta fixture incompatível com o contrato; nenhuma alteração foi feita nessa suíte ou em produção. As demais suítes focadas, backend e regressões App/QA não foram executadas.
+### Retomada da campanha conjunta — STAFF04-VAL-05
+
+A fixture do teste STAFF04-AUD-04 de recusa 404 foi corrigida exclusivamente em `app/tests/staffEntryControl.test.cjs`: a chamada pendente agora não duplica a participante na fila, com `waitingCount`/FIFO coerentes; foi acrescentada cobertura explícita para rejeitar a duplicidade no parser. O código HTTP e `RESOURCE_NOT_FOUND` são conferidos no resultado e no recibo terminal persistido; o teste usa chaves sequenciais distintas (`id(30)`, `id(31)` e `id(32)`) e controla o GET de revalidação efetivamente acionado após cada POST para os resultados 200, 403 e 404.
+
+Resultados desta retomada: o cenário isolado passou 1/1 (código 0; 528 ms) e `staffEntryControl.test.cjs` passou 36/36 (código 0; 1.152 ms). A suíte seguinte, `staffEntryControlScreen.test.cjs`, falhou com 10 aprovados, 3 falhos, zero ignorados/cancelados, código 1 (4.221 ms). Falhas: (1) linha 1004 espera trecho de acesso ao evento, mas `describeStationFeedback()` retorna texto específico de indisponibilidade da operação; (2) linha 1152 e (3) linha 1324 tentam resolver `postDeferred` após `onPost` já capturar o deferred e definir a variável compartilhada como `null`. Diagnóstico estático aponta expectativa incompatível e sincronização/fixture dos testes, respectivamente. Nenhuma alteração foi feita em `staffEntryControlScreen.test.cjs` ou produção. A campanha foi interrompida: `staffStationOperational`, `staffRealNavigation`, `staffBackground`, `staffDemoState`, `participationService`, backend e regressões completas seguem pendentes.
+### Retomada da campanha conjunta — STAFF04-VAL-06
+
+Em `app/tests/staffEntryControlScreen.test.cjs`, as expectativas de pré-condição 401/403/404/409 foram alinhadas às mensagens e ao tom `warning` de `StaffSyncFeedback`, mantendo separados os textos de recusa de mutação. Os cenários de ausência e confirmação usam referências estáveis aos deferreds de POST, sinais de início com timeout e gates liberados no `finally`; operações pendentes são aguardadas e os renderers alterados são desmontados dentro de `act()`.
+
+O filtro efetivamente selecionou os três testes solicitados. Primeira execução: `StaffSyncFeedback` e recuperação do Controle de Entrada passaram; STAFF04-AUD-03 falhou inicialmente por timeout esperando o início do reconhecimento. Após separar a resolução do POST da espera pelo efeito de reconhecimento, a segunda execução passou os mesmos dois primeiros cenários, mas STAFF04-AUD-03 avançou e falhou em `staffEntryControlScreen.test.cjs:1434`: a mensagem de erro de armazenamento esperada não estava presente após a falha de persistência simulada. A suíte completa terminou com 12 aprovados e 1 falho, código 1, 3.913 ms, na mesma asserção. Avisos React de updates fora de `act()` e depreciação de `react-test-renderer` persistiram na suíte.
+
+As suítes restantes foram consolidadas mesmo com essa falha. `staffStationOperational.test.cjs` não finalizou em 30 s; o processo foi encerrado após observar 5 aprovações e 3 falhas (sem resumo final/exit code). A execução ficou sem saída após STAFF04-AUD-04/AUD-07; o próximo caso declarado é AUD-08. A execução diagnóstica isolada dos três testes já marcados falhos confirmou: `STAFF-04 tela Estação` falha com `postDeferred` nulo em `staffStationOperational.test.cjs:869`; `STAFF04-AUD-01` espera o botão acessível `Cancelar`, que não foi encontrado (`:1030`); `STAFF04-AUD-03` falha com `postDeferred` nulo (`:1149`). A inspeção de `StaffStationSections.js` encontrou o rótulo real `CANCELAR OPERAÇÃO`. O provável cenário do travamento é o primeiro caso AUD-08, que aguarda a chamada enquanto o GET de `/stations` permanece pendente; causa do travamento não confirmada.
+
+As demais suítes restantes passaram: `staffRealNavigation` 2/2, `staffBackground` 1/1, `staffDemoState` 22/22 e `participationService` 13/13 (todas código 0, sem ignorados/cancelados). Não foram executados backend, regressão completa App ou QA independente devido às falhas focadas. STAFF-03/04 permanecem sem aprovação formal ou homologação.
+
+### Implementação final e preparação pré-merge — 27/11/2026
+
+**Somente implementação e inspeção estática, sem execução de validações.** Referência: `9ee8789fdf22fd38b4f1d8303d2012706b4586d4`. Resultados anteriores preservados (275/276 focados); não validam estas mudanças.
+
+**STAFF03-VAL-01:** removido `ConstructorParameters<typeof drizzle>`, incorreto para uma função. A chamada agora é `drizzle(client, { schema })`; o driver instalado declara NodePgClient como união incluindo pg.Client. Mantida a mesma conexão transacional, sem pool substituto, preservando BEGIN/ROLLBACK, savepoints, observer, relógio, guards e projeções. Evidência complementar `qa-evidence/STAFF-03-typecheck-fix.diff` desde o HEAD de referência. O patch histórico original STAFF-03 não foi regenerado. Typecheck e PostgreSQL não executados.
+
+**STAFF04-VAL-09:** renderização passa a preservar o aviso da tentativa anterior usando feedback storage existente, mesmo após storageError recuperar; sem mudança de store, formato, permissões ou idempotência. Aviso de disponibilidade atual e aviso histórico são distinguíveis; knownOutcome mantém feedback específico e autorização tem prioridade. Refresh/polling preservam histórico; nova operação válida/resolução local verificada/troca de contexto limpam ou substituem. Testes preparados de reserve/dispatch antes/depois de escrita, sem POST/PATCH, persistência do aviso, bloqueio conservador, nova chave e troca de sessão; a asserção originalmente falha foi mantida. Não executados. Detalhamento e matriz A–I no documento STAFF-04.
+
+**PREMERGE-VAL-01:** correções mínimas nos três arquivos reportados: predicado por caracteres substitui regex de controles mantendo normalização, limites e surrogates inválidos; fixtures usam createRequire(__filename) para os mesmos módulos CommonJS, mantendo os exports dinâmicos existentes e guards dos scripts intactos. Evidência separada `qa-evidence/PREMERGE-VAL-01-changes.diff`; não misturada ao patch funcional STAFF-04. Lint não executado.
+
+**ENV-VAL-01:** log anterior aponta os.userInfo chamado pelo tsx na escolha do temp no Windows, antes de qualquer teste. Node 24.15.0 do log atende engines >=24.15.0. Não concluir falta de memória física a partir de ENOMEM. Preparado plano para Luna conferir versão, chamadas os.userInfo/os.tmpdir com saída sanitizada, diretório temporário e permissão de escrita em arquivo exclusivo, presença (sem valores) das variáveis relevantes, recursos e inicialização do tsx. Nenhuma instalação ou configuração permanente alterada.
+
+**Estação, cobertura complementar:** preparado teste de troca de estação durante POST não-auth, verificando ausência de busy herdado, intenção original protegida e callbacks tardios. Inspeção identificou que refresh espalha previous sem limpar busy/busyKind para novo contexto e retorno antigo é descartado; potencial trava permanece sem correção de produção nesta rodada. Proposta mínima: limpar busy/busyKind apenas na nova visita/contexto sem liberar a intenção persistida. AUD-09 passou a verificar o texto real de recusa com reconhecimento local pendente. Nova campanha deve começar por essa reprodução e por VAL-09; não presumir os totais anteriores.
+
+Plano registrado antes da campanha desta rodada: filtros VAL-09/VAL-10, suites afetadas, backend e regressao condicionada a ausencia de bloqueios. A execucao e os bloqueios atuais estao registrados na secao Revalidacao conjunta de 27/11/2026 abaixo.
+
+Inspeções estáticas realizadas: sintaxe CJS/JSX dos arquivos alterados, `git diff --check -- app backend docs`, leitura dos contratos instalados e dos diffs; três evidências passaram em `git apply --stat` e `git apply --reverse --check`. Patch histórico STAFF-03 idêntico ao HEAD (SHA-256 `9CB0BEE61A0CC5037A4F793E7E3FEECC13EE58EE2C72C2F9E5EB74E6B598B183`). Nenhuma aprovação automatizada foi inferida dessas inspeções. Avisos Git LF/CRLF permanecem não bloqueantes.
+
+### Escopo da rodada final de implementação — 27/11/2026
+
+Rodada aberta antes da implementação: corrigir o feedback histórico de armazenamento (STAFF04-VAL-09), corrigir a tipagem transacional do teste SQL (STAFF03-VAL-01), aplicar ajustes mínimos de lint nos três arquivos reportados (PREMERGE-VAL-01) e preparar diagnóstico de infraestrutura (ENV-VAL-01). Preservar VAL-01 a VAL-08. Somente implementação e inspeção estática; testes, lint, typecheck, build e banco não serão executados nesta rodada. As evidências complementares de STAFF-03 e pré-merge serão separadas do patch STAFF-04.
+
+### STAFF04-VAL-07/08/09 — Retomada em 27/11/2026
+
+VAL-07 corrigiu apenas as fixtures da Estação: referências estáveis para gates de POST e estações, sinais explícitos de início, e cancelamento acessível com CANCELAR OPERAÇÃO. O modal permanece montado e muda visible de true para false; polling e ausência de mutação no cancelamento continuam cobertos.
+
+VAL-08 alterou a sincronização do AUD-08. O teste sinaliza o início de /queue, /stations e do GET operacional após 503, mantém esse GET pendente enquanto o 403 revoga acesso e remove os dados, e só então resolve a resposta 200 atrasada. O cenário paralelo de 401 com a consulta irmã pendente também passou. A sequência anterior era suscetível a espera circular; a correção impediu que o teste aguardasse pCall antes de liberar a leitura de que pCall dependia.
+
+VAL-09 permanece aberta. A falha focada de staffEntryControlScreen.test.cjs:1434 reproduziu: 0 aprovados, 1 falho, código 1. O mutate retornou storage_error e o aviso não estava renderizado após refresh. A instrumentação temporária foi removida. O gate de SecureStore rejeitou antes de gravar a nova reserva; a intenção antiga acknowledged permaneceu, e não houve POST/PATCH durante a tentativa que falhou. O refresh GET/SecureStore foi bem-sucedido, deixou storageError false e feedback storage; a tela renderiza o aviso somente sob storageError. Uma nova reserva pode ser tentada após revalidação GET 200, leitura local bem-sucedida, ausência de intenção ativa e contexto autenticado atual. Isso não se aplica a falhas após despacho ou resultado incerto.
+
+A proposta para futura correção, ainda não autorizada, é manter um aviso de falha anterior separado do indicador atual de disponibilidade do SecureStore. O aviso não deve, sozinho, bloquear nova tentativa quando a revalidação comprovar que ela é segura. Intenções, recibos e knownOutcome devem permanecer preservados; não limpar dados automaticamente.
+
+Resultados desta rodada: os três cenários anteriormente falhos da Estação passaram (3/3, código 0, 1.501 ms); AUD-08 isolado 1/1 (1.146 ms); AUD-09 1/1 (1.710 ms); AUD-10 1/1 (851 ms); a suíte staffStationOperational.test.cjs passou 11/11 (0 falhas, ignorados ou cancelados, código 0, 5.880 ms). Os runners emitiram apenas o aviso não bloqueante de depreciação de react-test-renderer.
+
+As 12 suítes focadas ficam registradas assim: roleRoutingIntegration 64/64; staffPolling 6/6; staffEventDiscovery 14/14; staffDashboard 25/25; staffOperationsService.integration 69/69; staffEntryControl 36/36; staffEntryControlScreen 12/13 na execução completa anterior e 0/1 na revalidação direcionada desta rodada; staffStationOperational 11/11 nesta rodada; staffRealNavigation 2/2; staffBackground 1/1; staffDemoState 22/22; participationService 13/13. Exceto Estação e o teste direcionado de Controle de Entrada, os resultados são anteriores e não foram repetidos.
+
+Validações backend autorizadas: typecheck:test falhou com código 2, TS2344 em test/integration/staff03-external-call-projection.integration.test.ts:67 (typeof drizzle não satisfaz a restrição de construtor); lint falhou com código 1 em src/events/admin-configuration.dto.ts:51 (no-control-regex) e em test/unit/staff-a4-homolog-fixture.test.ts:4 e test/unit/staff-homolog-fixture.test.ts:4 (no-require-imports); build passou com código 0; npm test terminou com código 1 antes de iniciar os unitários por uv_os_get_passwd returned ENOMEM em node:os.userInfo chamado pelo tsx.
+
+As regressões completas do App e QA seguem suspensas enquanto VAL-09 falhar. Nenhum PostgreSQL/Neon, test:integration, migration ou seed foi executado. Não houve homologação nem aprovação formal de STAFF-03/04.
+
+
+## Revalidacao conjunta de 27/11/2026: resultados atuais
+
+Execucao autorizada por GPT-6 Luna Medium, Node v24.15.0 e NODE_ENV=test. Resultados antigos, inclusive 275/276, sao historicos e nao validam esta rodada.
+
+- **STAFF04-VAL-09, store:** filtro de persistencia reserved/dispatching e recibo: 6 aprovados, 0 falhos/ignorados/cancelados, exit 0, 897 ms.
+- **STAFF04-VAL-09, tela:** filtro dos quatro casos novos mais AUD-03: 5 aprovados, 0 falhos/ignorados/cancelados, exit 0, 2.211 ms. Suite staffEntryControl completa: 36/36, exit 0, 1.099 ms; staffEntryControlScreen: 17/17, exit 0, 6.191 ms.
+- **STAFF04-VAL-10 / Estacao:** teste isolado: 0 aprovados, 1 falho, exit 1, 1.228 ms. O POST controlado foi alcancado e a intencao persistida estava em dispatching. Apos trocar ST_1 por ST_2, a fila B aparece, mas permanece Processando operacao no servidor... (app/tests/staffStationOperational.test.cjs:2039). Suite completa: 11 aprovados, 1 falho, exit 1, 7.292 ms, na mesma assercao. Hipotese de heranca de busy/busyKind confirmada. As verificacoes seguintes de intencao bloqueante, zero POST extra e descarte do retorno tardio nao foram alcancadas. A leitura estatica de refresh, que preserva estado anterior ao trocar scope, e consistente com defeito de producao. Nenhuma correcao foi aplicada. Correcao recomendada: limpar busy/busyKind apenas na troca de contexto/visita, preservando intencao e guards.
+- **STAFF03-VAL-01 e PREMERGE-VAL-01:** backend typecheck:test, lint e build passaram, exit 0 (9.779 ms, 6.856 ms, 9.532 ms). Typecheck incluiu tipos do teste PostgreSQL sem executa-lo; lint nao reportou os tres achados; nenhuma conexao a banco ocorreu.
+- **ENV-VAL-01 / unitarios backend:** npm test falhou antes de iniciar testes: 0 casos coletados, exit 1, 662 ms. os.userInfo() e tsx --version reproduziram ERR_SYSTEM_ERROR/uv_os_get_passwd returned ENOMEM; os.tmpdir() e escrita/remocao de arquivo temporario exclusivo passaram. TEMP/TMP/USERPROFILE presentes, NODE_OPTIONS ausente. Sem evidencia de falta de memoria fisica; nenhuma dependencia/configuracao foi alterada.
+- Regressao completa App e QA nao executadas porque VAL-10 falhou. Avisos: depreciacao react-test-renderer e atualizacoes React fora de act() na suite de tela; nao impediram 17/17.
+- Nenhum PostgreSQL/Neon, test:integration, migration, seed ou operacao Git de publicacao foi executado. STAFF-03/04 nao estao homologadas nem formalmente aprovadas.
+
+### STAFF04-VAL-10 — atualização de implementação em 27/11/2026
+
+A falha reproduzida de busy herdado na troca de estação foi corrigida localmente no ciclo de vida da visita da Estação. O novo contexto inicia sem busy/busyKind, dados, pending em memória, feedback ou modal da visita anterior e relê o armazenamento existente; não há remoção de intenções persistidas. Refresh no mesmo contexto preserva o processamento. Acrescentadas guards de visita ao catch de refresh e ao retorno de cancelamento para impedir que callbacks de uma visita anterior afetem o retorno à mesma estação. Dispatch, estágios e reconhecimento mantêm suas guards de visita/operação/escopo/autorização.
+
+Dez casos STAFF04-VAL-10 foram preparados na suíte da Estação para resposta definitiva ou incerta tardia, conta/sessão, nova operação legítima B após término da mutação A no coordenador, refresh no mesmo contexto e 401/403 após retorno à mesma estação. A asserção originalmente falha foi mantida. Detalhes e próximos comandos no documento STAFF-04.
+
+Nenhum teste, lint, typecheck ou build foi executado nesta implementação. Os resultados anteriores (Entrada 36/36 e tela 17/17; Estação 11/12; backend typecheck/lint/build aprovados) permanecem históricos e não validam a alteração atual. ENV-VAL-01 continua aberto: a inspeção do tsx 4.23.15 mostra que CLI e loader importam o módulo que consulta os.userInfo(); node --import tsx não é um desvio comprovado. Preparado procedimento comparativo Codex/PowerShell normal com o mesmo Node, cwd e NODE_ENV=test, priorizando npm.cmd test oficial onde o ambiente funcionar. Equivalência de resolução/decorators/metadados/preflight do loader não foi declarada. Inventário exato dos unitários está registrado na STAFF-04, sem incluir integrações.
+
+Evidências STAFF-03 histórica, STAFF-03-typecheck-fix e PREMERGE-VAL-01 preservadas; a evidência acumulada STAFF-04 inclui esta documentação e exclui backend e o próprio patch. Homologação Expo, execução PostgreSQL autorizada separadamente e aprovação formal seguem pendentes.
+
+### PREMERGE-VAL-02 — fixture HTTP de avaliação
+
+A fixture fixa o TTL em 60 segundos durante a aplicação Nest e restaura EVALUATION_IDEMPOTENCY_TTL_SECONDS após teardown ou falha de inicialização/fechamento, removendo a variável se estava ausente. As duas asserções originais de expiresAt e os testes de política inválida permanecem intactos. Resultados manuais prévios do responsável e bloqueio ambiental do Codex constam no documento STAFF-04; a correção aguarda revalidação manual.
+
+### Consolidação final da campanha local — 27/11/2026
+
+Resultados de backend e das sete suítes App adicionais foram fornecidos pelo responsável e não devem ser atribuídos à execução do Codex. PREMERGE-VAL-02 passou evaluation-write-http 25/25 tanto com TTL externo original quanto com TTL 120 temporário; typecheck, lint, build e regressão unitária backend 1.299/1.299 passaram. O caso TTL ausente após dotenv não foi exercitado. A regressão App informada foi 995/995 e QA independente 51/51. As 12 suítes focadas totalizaram 290/290 (incluindo as quatro executadas pelo Codex e oito fornecidas pelo responsável); VAL-10 isolada 10/10 é cobertura complementar e não é somada novamente. A falha anterior da suíte experiences-http não se reproduziu e sua causa não foi determinada. A causa específica do ENOMEM no Codex permanece desconhecida; o runner oficial funcionou no PowerShell convencional.
+
+A campanha automatizada local está aprovada com base nos resultados registrados, mas não equivale à homologação Expo ou à aprovação formal. Integração PostgreSQL dedicada ainda depende de autorização explícita e verificações do guard. Homologação Expo e aprovação formal permanecem pendentes.
+
+### Estado individual dos achados — fechamento automatizado de 27/11/2026
+
+Este quadro complementa, sem substituir, os históricos de auditoria, falhas e correções acima. “Sem falha na campanha final” descreve os resultados das suítes finais e não significa que cada achado tenha sido executado isoladamente. Os testes físicos PostgreSQL permanecem fora da campanha.
+
+| Registro | Estado documental após a campanha |
+|---|---|
+| STAFF03-AUD-01 | Sem falha reportada nas regressões finais de App/Backend; validação física PostgreSQL permanece pendente. |
+| STAFF03-AUD-02 | Os sete casos identificados como STAFF-03/AUD-02/AUD-07 passaram conforme informação do responsável; regressões finais App/Backend também aprovadas. |
+| STAFF03-AUD-03 | Sem falha reportada nas regressões finais; não foi fornecido resultado isolado por identificador. |
+| STAFF03-AUD-04 | Sem falha reportada nas regressões finais; não foi fornecido resultado isolado por identificador. |
+| STAFF03-AUD-05 | Sem falha reportada nas regressões finais; não foi fornecido resultado isolado por identificador. |
+| STAFF03-AUD-06 | Sem falha reportada nas regressões finais; não foi fornecido resultado isolado por identificador. |
+| STAFF03-AUD-07 | Os sete casos identificados como STAFF-03/AUD-02/AUD-07 passaram conforme informação do responsável; regressões finais App/Backend também aprovadas. |
+| STAFF03-AUD-08 | Sem falha reportada nas regressões finais; não foi fornecido resultado isolado por identificador. |
+| STAFF03-VAL-01 | `typecheck:test`, lint e build aprovados; regressão Backend 1.299/1.299 informada pelo responsável. O teste PostgreSQL incluído para tipagem não foi executado. |
+| STAFF04-AUD-01 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-02 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-03 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-04 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-05 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-06 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-07 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-08 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-09 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-AUD-10 | Sem falha reportada na regressão App final; o resultado isolado por achado permanece conforme o histórico. |
+| STAFF04-VAL-01 | Correção validada no teste isolado (1/1); não houve falha na regressão App final. |
+| STAFF04-VAL-02 | Correção validada isoladamente e na integração completa (64/64); não houve falha na regressão App final. |
+| STAFF04-VAL-03 | Cenário isolado, `staffEventDiscovery` (14/14) e `staffDashboard` (25/25) aprovados; regressão App final sem falhas. |
+| STAFF04-VAL-04 | Cenário isolado e `staffOperationsService.integration` (69/69) aprovados; regressão App final sem falhas. |
+| STAFF04-VAL-05 | Cenário isolado e `staffEntryControl` (36/36) aprovados; regressão App final sem falhas. |
+| STAFF04-VAL-06 | Resultados finais das suítes App e regressão sem falhas; detalhes individuais permanecem no histórico. |
+| STAFF04-VAL-07 | Resultados finais das suítes App e regressão sem falhas; detalhes individuais permanecem no histórico. |
+| STAFF04-VAL-08 | Resultados finais das suítes App e regressão sem falhas; detalhes individuais permanecem no histórico. |
+| STAFF04-VAL-09 | `staffEntryControl` (36/36) e `staffEntryControlScreen` (17/17) aprovados, conforme campanha registrada; regressão App final sem falhas. |
+| STAFF04-VAL-10 | Isolado 10/10 e `staffStationOperational` 21/21 aprovados, conforme campanha registrada; regressão App final sem falhas. |
+| PREMERGE-VAL-01 | Typecheck, lint e build aprovados na campanha Backend final informada pelo responsável. |
+| PREMERGE-VAL-02 | `evaluation-write-http` aprovada 25/25 com TTL externo original e 25/25 com TTL temporário de 120s; o cenário de TTL ausente após dotenv não foi executado. |
+| ENV-VAL-01 | Bloqueio do runner superado no PowerShell convencional; causa específica do `ENOMEM` dentro do Codex permanece indeterminada. |
+
+Homologação funcional/visual no Expo, integração PostgreSQL autorizada em campanha separada e aprovação formal de STAFF-03/04 continuam pendentes.
+
+### Preflight PostgreSQL dedicado — 27/11/2026 — BLOQUEADO
+
+Inspeção local autorizada, sem conexão PostgreSQL e sem consulta a Neon. Branch/HEAD permaneceram `feature/staff-operacional-v2` / `9ee8789fdf22fd38b4f1d8303d2012706b4586d4`; o índice continuou limpo. O teste, o guard, a migration `backend/drizzle/0008_external_entry_calls.sql`, os documentos das duas tasks e as dependências locais (`tsx`, `pg`, `drizzle-orm`) foram inspecionados. A tipagem local usa `drizzle(client, { schema })`, com o mesmo `Client` usado pelos comandos SQL transacionais.
+
+**Destino e ambiente:** o serviço Windows `postgresql-x64-18` aparece como iniciado, mas não havia listener em `127.0.0.1:55432`. O Docker CLI tentou consultar o daemon, mas não conseguiu acesso; nenhum container foi iniciado. As três variáveis não estavam no ambiente do processo. A inspeção sanitizada do `backend/.env` encontrou apenas `DATABASE_URL` e `DATABASE_DIRECT_URL`; elas apontam para destinos não permitidos, não são iguais e não correspondem ao destino autorizado. `EVENTS_TEST_DATABASE_URL` está ausente. Os valores completos e credenciais não foram exibidos. Nenhuma conexão ou consulta foi tentada. Portanto, identidade efetiva (`current_database()`, porta interna), schema instalado e permissões não puderam ser confirmados.
+
+**Inspeção estática do contrato:** o guard exige `NODE_ENV=test`, a flag `STAFF03_POSTGRES_PROJECTION_TEST=authorized-local`, três URLs válidas e iguais, protocolo PostgreSQL, loopback autorizado, porta efetiva 55432 e caminho `arenago_staff_homolog_20261111`, sem redirecionamento de host/porta/banco. A migration 0008 declara `external_entry_calls`, FKs para `events`, `participations` e `users`, checks de status/resolução, índices únicos parciais por evento e participação pendente, índice de histórico e triggers de imutabilidade, resolução, integridade diferida e bloqueio de `TRUNCATE`. O teste requer também as tabelas `users`, `events`, `user_roles`, `participations` e `audit_logs`. Isso descreve o contrato esperado; a presença e compatibilidade do schema do banco não foram verificadas. Privilégios efetivos de leitura/escrita também permanecem desconhecidos.
+
+**Isolamento da fixture:** os IDs são UUIDs aleatórios. `drizzle(client, { schema })` e as escritas usam a mesma conexão `client`. A fixture abre `BEGIN`, usa savepoints por cenário, alterna `SET CONSTRAINTS ALL DEFERRED/IMMEDIATE`, não contém `COMMIT` e solicita `ROLLBACK` no `finally`; uma segunda conexão confere que os IDs temporários não persistiram. Ambas as conexões são encerradas com `Promise.allSettled`. Limitação: se o próprio `ROLLBACK` falhar, a exceção pode substituir a falha original; o fechamento da conexão deve provocar rollback pelo servidor, mas a confirmação observadora pode não ser alcançada. A conexão observadora e as consultas de catálogo somente poderão ser usadas depois do preflight do destino.
+
+**Bloqueio e retomada:** não configurar automaticamente `.env`, iniciar/reiniciar serviço ou container, nem usar os valores atuais. Para novo preflight, o responsável deve fornecer no processo temporário três URLs das credenciais locais previamente autorizadas, integralmente iguais e destinadas exclusivamente a `127.0.0.1:55432/arenago_staff_homolog_20261111`; então confirmar os campos sem imprimir segredo, identificar o listener dedicado e fazer a conferência SQL estritamente read-only com timeout. Esta etapa não autorizou nem executou o teste transacional. Após novo preflight aprovado, ainda será necessária autorização específica para suas escritas temporárias.
+
+**Comando individual preparado para uma etapa futura autorizada**, executado manualmente pelo responsável em PowerShell convencional a partir de `backend/` (não executado nesta etapa):
+
+```powershell
+$previous = @{}
+$names = @('NODE_ENV','DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL','STAFF03_POSTGRES_PROJECTION_TEST')
+foreach ($name in $names) { $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+try {
+  $env:NODE_ENV = 'test'
+  # Definir as três URLs temporárias somente com credenciais locais autorizadas,
+  # após validar destino, igualdade e ausência de parâmetros de redirecionamento.
+  $env:STAFF03_POSTGRES_PROJECTION_TEST = 'authorized-local'
+  .\node_modules\.bin\tsx.cmd --tsconfig tsconfig.test.json --test test/integration/staff03-external-call-projection.integration.test.ts
+  if ($LASTEXITCODE -ne 0) { throw "Integração terminou com código $LASTEXITCODE" }
+} finally {
+  foreach ($name in $names) {
+    if ($null -eq $previous[$name]) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+    else { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+  }
+}
+```
+
+O script acima é apenas um roteiro; as URLs não foram preenchidas. Antes de executá-lo, deve-se repetir o preflight read-only e obter a autorização separada para a fixture. Capturar saída em arquivo local com acesso restrito, revisar o conteúdo para evitar credenciais antes de compartilhá-lo e registrar o código de saída. Estado final: **BLOQUEADO para o preflight read-only e não autorizado para a execução funcional**.
+
+## Recuperação PostgreSQL e procedimento de migration — revisão de 27/11/2026
+
+### Evidência fornecida pelo responsável e diagnóstico do bloqueio anterior
+
+O responsável informou que recuperou manualmente PostgreSQL 18.6, serviço `postgresql-x64-18`, listener TCP local `127.0.0.1:55432` e acesso administrativo. O banco `arenago_staff_homolog_20261111` estava inexistente na instância consultada; a causa dessa ausência não foi determinada. O responsável o criou com owner `arenago_staff_homolog` e `template0`. A conexão posterior com a role dedicada confirmou, segundo o responsável, `current_database() = arenago_staff_homolog_20261111`, `current_user = arenago_staff_homolog`, endereço `127.0.0.1`, porta 55432 e transação read-only. Esses são resultados fornecidos pelo responsável; não foram reproduzidos pelo Codex.
+
+A primeira tentativa em `qa/regression` retornou `Missing script` e não aplicou migrations. A tentativa seguinte, no diretório `backend/`, terminou em `CHECK_FAILED`, com a mensagem de que migrations não foram executadas. A hipótese apresentada é a comparação de `inet_server_addr()::text` com `127.0.0.1` poder divergir por representação de máscara; `host(inet_server_addr())` é a expressão proposta para obter o endereço sem máscara. O script auxiliar que produziu `CHECK_FAILED` não está versionado no repositório e a mensagem genérica não identifica qual guarda falhou. Portanto, a hipótese é plausível, mas **não confirmada**; a tentativa não comprova falha ou sucesso de conexão, autenticação ou identidade, e nenhuma migration foi aplicada.
+
+### Inspeção estática da configuração oficial
+
+Foram relidos `backend/package.json`, `backend/drizzle.config.ts`, `backend/drizzle/meta/_journal.json` e os arquivos SQL `0001_identity_profile` a `0008_external_entry_calls`. O script `db:migrate` é `drizzle-kit migrate`; a configuração importa `dotenv/config`, prioriza `DATABASE_DIRECT_URL` sobre `DATABASE_URL`, usa `./drizzle` como saída e pode trocar o schema via `DRIZZLE_SCHEMA`. O journal local possui exatamente oito entradas, tags `0001_identity_profile` até `0008_external_entry_calls`; todos os oito arquivos estão presentes. Migrations, configuração e `package.json` não apresentam alterações locais. Não há `CREATE EXTENSION` nas migrations inspecionadas; a migration 0008 cria a tabela, FKs/checks, índices parciais, funções e triggers já descritos no preflight anterior. A existência dessas estruturas no banco só poderá ser confirmada depois da aplicação oficial.
+
+### Procedimento PowerShell completo para execução manual posterior
+
+O bloco abaixo é preparação documental e **não foi executado**. Deve ser copiado integralmente para uma sessão PowerShell convencional, com diretório atual `C:\DoJob\ProgramacaoMobile\backend`. Ele verifica branch/HEAD, integridade dos arquivos de migration e configuração, a sequência local 0001–0008 e os scripts npm; solicita a senha por prompt seguro; forma URLs iguais codificando usuário e senha; cria um arquivo dotenv temporário único, vazio e sem credenciais; define `DOTENV_CONFIG_PATH`, `DOTENV_CONFIG_OVERRIDE=false` e o schema Drizzle esperado; limpa opções externas de dotenv, Node, Drizzle e `PG*`; valida a URL e a identidade em transação `READ ONLY`; exige banco sem objetos/journal prévios e privilégios de criação; pede confirmação manual literal; e só então invoca o script oficial. A flag da fixture de integração PostgreSQL não é definida nem exigida neste procedimento. Qualquer guarda divergente interrompe a sequência. Não imprimir nem salvar a URL.
+
+```powershell
+& {
+$priorErrorActionPreference = $ErrorActionPreference
+try {
+$ErrorActionPreference = 'Stop'
+$expectedBranch = 'feature/staff-operacional-v2'
+$expectedHead = '9ee8789fdf22fd38b4f1d8303d2012706b4586d4'
+$expectedDatabase = 'arenago_staff_homolog_20261111'
+$expectedRole = 'arenago_staff_homolog'
+$expectedTags = @(
+  '0001_identity_profile','0002_events_base','0003_credentials_roles','0004_event_operations',
+  '0005_idempotency','0006_admin_2fa_login','0007_staff_idempotency_preparation','0008_external_entry_calls'
+)
+$stage = 'STATIC_GUARDS'
+$repo = (Resolve-Path '..').Path
+if ((Split-Path -Leaf (Get-Location).Path) -ne 'backend') { throw 'BLOCKED stage=WORKDIR' }
+$branch = (& git -C $repo branch --show-current).Trim()
+$head = (& git -C $repo rev-parse HEAD).Trim()
+if ($branch -ne $expectedBranch -or $head -ne $expectedHead) { throw 'BLOCKED stage=GIT_IDENTITY' }
+& git -C $repo diff --quiet HEAD -- backend/drizzle backend/drizzle.config.ts backend/package.json
+if ($LASTEXITCODE -ne 0) { throw 'BLOCKED stage=PROTECTED_FILES_DIRTY' }
+$pkg = Get-Content package.json -Raw | ConvertFrom-Json
+if ($pkg.scripts.'db:migrate' -ne 'drizzle-kit migrate' -or $pkg.scripts.'predb:migrate' -or $pkg.scripts.'postdb:migrate') { throw 'BLOCKED stage=NPM_SCRIPT_CONTRACT' }
+if (-not (Test-Path 'node_modules/.bin/tsx.cmd') -or -not (Test-Path 'node_modules/.bin/drizzle-kit.cmd')) { throw 'BLOCKED stage=DEPENDENCIES' }
+$npmPath = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue
+if ($null -eq $npmPath) { throw 'BLOCKED stage=NPM_NOT_FOUND' }
+$journal = Get-Content 'drizzle/meta/_journal.json' -Raw | ConvertFrom-Json
+$tags = @($journal.entries | ForEach-Object { $_.tag })
+if ($tags.Count -ne 8 -or (($tags -join '|') -ne ($expectedTags -join '|'))) { throw 'BLOCKED stage=JOURNAL_SEQUENCE' }
+foreach ($tag in $expectedTags) { if (-not (Test-Path (Join-Path 'drizzle' ($tag + '.sql')))) { throw 'BLOCKED stage=MIGRATION_FILE_MISSING' } }
+
+$credential = Get-Credential -UserName $expectedRole -Message 'Credencial local exclusiva do banco STAFF-03'
+if ($null -eq $credential -or $credential.UserName -ne $expectedRole) {
+  if ($credential -and $credential.Password) { $credential.Password.Dispose() }
+  throw 'BLOCKED stage=CREDENTIAL_IDENTITY'
+}
+$passwordPtr = [IntPtr]::Zero
+$plainPassword = $null
+$connectionUrl = $null
+$temporaryDotenvFile = $null
+$envSnapshot = @{}
+$managedNames = @()
+
+try {
+  $managedNames = @('NODE_ENV','DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL',
+    'STAFF03_POSTGRES_PROJECTION_TEST','DRIZZLE_SCHEMA','NODE_OPTIONS','DOTENV_CONFIG_PATH',
+    'DOTENV_CONFIG_OVERRIDE','DOTENV_KEY','DOTENV_CONFIG_DOTENV_KEY','npm_config_node_options')
+  $managedNames += (Get-ChildItem Env: | Where-Object { $_.Name -match '^(PG|DOTENV)[A-Z0-9_]*$' } | ForEach-Object { $_.Name })
+  $managedNames = @($managedNames | Sort-Object -Unique)
+  foreach ($name in $managedNames) {
+    $item = Get-Item "Env:$name" -ErrorAction SilentlyContinue
+    if ($null -eq $item) { $envSnapshot[$name] = @{ Exists = $false; Value = $null } }
+    else { $envSnapshot[$name] = @{ Exists = $true; Value = $item.Value } }
+  }
+
+  $passwordPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+  $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
+  $encodedUser = [Uri]::EscapeDataString($credential.UserName)
+  $encodedPassword = [Uri]::EscapeDataString($plainPassword)
+  $connectionUrl = "postgresql://${encodedUser}:${encodedPassword}@127.0.0.1:55432/${expectedDatabase}"
+  $temporaryDotenvFile = [IO.Path]::GetTempFileName()
+  if ((Get-Item -LiteralPath $temporaryDotenvFile).Length -ne 0) { throw 'BLOCKED stage=DOTENV_TEMP_NOT_EMPTY' }
+  foreach ($name in $managedNames) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+  $env:NODE_ENV = 'test'
+  $env:DATABASE_URL = $connectionUrl
+  $env:DATABASE_DIRECT_URL = $connectionUrl
+  $env:EVENTS_TEST_DATABASE_URL = $connectionUrl
+  $env:DOTENV_CONFIG_PATH = $temporaryDotenvFile
+  # dotenv 16.6.1 converte a string 'false' em true; o arquivo vazio é a barreira efetiva contra override.
+  $env:DOTENV_CONFIG_OVERRIDE = 'false'
+  $env:DRIZZLE_SCHEMA = './src/database/schema/index.ts'
+
+  function Invoke-NativeCaptured {
+    param([string]$FileName, [string[]]$Arguments, [AllowNull()][string]$StandardInputText)
+    $previousActionPreference = $ErrorActionPreference
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope 1 -ErrorAction SilentlyContinue
+    $nativePreferenceScope = 1
+    if ($null -eq $nativePreference) {
+      $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue
+      $nativePreferenceScope = 'Global'
+    }
+    try {
+      $ErrorActionPreference = 'Continue'
+      if ($null -ne $nativePreference) {
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Scope $nativePreferenceScope -Value $false
+      }
+      if ($null -ne $StandardInputText) {
+        $output = @($StandardInputText | & $FileName @Arguments 2>&1)
+      } else {
+        $output = @(& $FileName @Arguments 2>&1)
+      }
+      $exitCode = $LASTEXITCODE
+      [pscustomobject]@{ ExitCode = $exitCode; Output = @($output) }
+    } finally {
+      $ErrorActionPreference = $previousActionPreference
+      if ($null -ne $nativePreference) {
+        Set-Variable -Name PSNativeCommandUseErrorActionPreference -Scope $nativePreferenceScope -Value $nativePreference.Value
+      }
+    }
+  }
+  function Write-SanitizedProcessOutput {
+    param([object[]]$Output)
+    foreach ($line in $Output) {
+      $safeLine = [string]$line
+      if ($connectionUrl) { $safeLine = $safeLine.Replace($connectionUrl, '[DATABASE_URL_REDACTED]') }
+      if ($plainPassword) { $safeLine = $safeLine.Replace($plainPassword, '[PASSWORD_REDACTED]') }
+      $safeLine = $safeLine -replace '(?i)postgres(?:ql)?://\S+', '[DATABASE_URL_REDACTED]'
+      $safeLine = $safeLine -replace '(?i)(password|pwd)\s*[:=]\s*\S+', '$1=[REDACTED]'
+      Write-Output $safeLine
+    }
+  }
+
+  $stage = 'READ_ONLY_PREFLIGHT'
+  $preflight = @'
+const { Client } = require('pg');
+const names = ['DATABASE_URL','DATABASE_DIRECT_URL','EVENTS_TEST_DATABASE_URL'];
+const urls = names.map(n => process.env[n]);
+let stage = 'URL_GUARD'; let client; let inTransaction = false;
+const fail = (code) => { const e = new Error(); e.code = code; throw e; };
+(async () => {
+  try {
+    if (process.env.NODE_ENV !== 'test') fail('ENVIRONMENT_INVALID');
+    if (!urls.every(Boolean) || !urls.every(v => v === urls[0])) fail('URL_MISMATCH');
+    const u = new URL(urls[0]);
+    if (!['postgres:','postgresql:'].includes(u.protocol) || decodeURIComponent(u.username) !== 'arenago_staff_homolog'
+      || !decodeURIComponent(u.password) || u.hostname !== '127.0.0.1' || u.port !== '55432'
+      || u.pathname !== '/arenago_staff_homolog_20261111' || u.search || u.hash) fail('DESTINATION_REJECTED');
+    stage = 'CONNECT';
+    client = new Client({ connectionString: urls[0], connectionTimeoutMillis: 2500, statement_timeout: 5000, query_timeout: 7000 });
+    await client.connect();
+    stage = 'READ_ONLY_IDENTITY';
+    await client.query('BEGIN READ ONLY'); inTransaction = true;
+    const identity = (await client.query(`SELECT current_database() AS database, current_user AS role,
+      host(inet_server_addr()) AS host, inet_server_port() AS port,
+      current_setting('transaction_read_only') AS read_only,
+      (SELECT rolsuper FROM pg_roles WHERE rolname=current_user) AS superuser,
+      (SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user) AS createdb,
+      has_database_privilege(current_user,current_database(),'CONNECT') AS can_connect,
+      has_database_privilege(current_user,current_database(),'CREATE') AS can_create_schema,
+      has_schema_privilege(current_user,'public','USAGE') AS public_usage,
+      has_schema_privilege(current_user,'public','CREATE') AS public_create,
+      to_regclass('drizzle.__drizzle_migrations')::text AS migration_journal,
+      current_setting('server_version') AS server_version`)).rows[0];
+    if (identity.database !== 'arenago_staff_homolog_20261111' || identity.role !== 'arenago_staff_homolog'
+      || identity.host !== '127.0.0.1' || identity.port !== 55432 || identity.read_only !== 'on'
+      || !identity.server_version.startsWith('18.6')
+      || identity.superuser !== false || identity.createdb !== false || identity.can_connect !== true
+      || identity.can_create_schema !== true || identity.public_usage !== true || identity.public_create !== true
+      || identity.migration_journal !== null) fail('IDENTITY_OR_PERMISSION_MISMATCH');
+    stage = 'EMPTY_DATABASE_GUARD';
+    const state = (await client.query(`SELECT
+      (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+       AND c.relkind IN ('r','p','S','v','m','f')) AS relations,
+      (SELECT count(*)::int FROM pg_namespace WHERE nspname NOT LIKE 'pg_%'
+       AND nspname NOT IN ('information_schema','public')) AS extra_schemas`)).rows[0];
+    if (state.relations !== 0 || state.extra_schemas !== 0) fail('DATABASE_NOT_EMPTY');
+    await client.query('ROLLBACK'); inTransaction = false;
+    console.log('PREFLIGHT_OK ' + JSON.stringify({ database: identity.database, role: identity.role, host: identity.host,
+      port: identity.port, readOnly: true, relations: state.relations, extraSchemas: state.extra_schemas,
+      canCreateSchema: identity.can_create_schema, publicCreate: identity.public_create, serverVersion: identity.server_version }));
+  } catch (e) {
+    const c = e && e.code ? String(e.code) : 'CHECK_FAILED';
+    const category = c === '28P01' || c === '28000' ? 'AUTHENTICATION_FAILED'
+      : ['ECONNREFUSED','ETIMEDOUT','EHOSTUNREACH','ENOTFOUND'].includes(c) ? 'CONNECTION_FAILED' : c;
+    console.error('PREFLIGHT_FAILED stage=' + stage + ' category=' + category);
+    process.exitCode = 1;
+  } finally {
+    if (client) {
+      if (inTransaction) await client.query('ROLLBACK').catch(() => console.error('PREFLIGHT_CLEANUP=ROLLBACK_FAILED'));
+      await client.end().catch(() => console.error('PREFLIGHT_CLEANUP=CONNECTION_CLOSE_FAILED'));
+    }
+  }
+})();
+'@
+  $nodePath = (Get-Command node.exe -CommandType Application).Source
+  $preflightResult = Invoke-NativeCaptured -FileName $nodePath -Arguments @('-') -StandardInputText $preflight
+  Write-SanitizedProcessOutput $preflightResult.Output
+  if ($preflightResult.ExitCode -ne 0) { throw "BLOCKED stage=READ_ONLY_PREFLIGHT exit=$($preflightResult.ExitCode)" }
+
+  $approval = Read-Host 'Guards passaram. Para autorizar a migration oficial local, digite APPLY-STAFF03-MIGRATIONS-0001-0008'
+  if ($approval -cne 'APPLY-STAFF03-MIGRATIONS-0001-0008') { throw 'STOPPED stage=HUMAN_APPROVAL_NOT_GIVEN' }
+  $stage = 'OFFICIAL_MIGRATION'
+  $migrationResult = Invoke-NativeCaptured -FileName $npmPath.Source -Arguments @('run','db:migrate') -StandardInputText $null
+  $migrationExit = $migrationResult.ExitCode
+  Write-SanitizedProcessOutput $migrationResult.Output
+  $migrationResult = $null
+  if ($migrationExit -ne 0) { throw "MIGRATION_FAILED stage=OFFICIAL_MIGRATION exit=$migrationExit; interrompido, sem retry automático" }
+  Write-Output 'MIGRATION_OK command=npm.cmd run db:migrate'
+} finally {
+  try {
+    foreach ($name in $managedNames) {
+      try {
+        if ($envSnapshot.ContainsKey($name)) {
+          if ($envSnapshot[$name].Exists) { [Environment]::SetEnvironmentVariable($name, $envSnapshot[$name].Value, 'Process') }
+          else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+        }
+      } catch { [Console]::Error.WriteLine("ENV_RESTORE_FAILED name=$name") }
+    }
+  } finally {
+    try {
+      if ($temporaryDotenvFile -and (Test-Path -LiteralPath $temporaryDotenvFile)) {
+        Remove-Item -LiteralPath $temporaryDotenvFile -Force -ErrorAction Stop
+      }
+    } catch { [Console]::Error.WriteLine('DOTENV_TEMP_CLEANUP_FAILED') }
+  if ($passwordPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr); $passwordPtr = [IntPtr]::Zero }
+    if ($credential) { $credential.Password.Dispose() }
+  $plainPassword = $null; $encodedUser = $null; $encodedPassword = $null; $connectionUrl = $null
+    $preflight = $null; $preflightResult = $null; $migrationResult = $null
+    Remove-Variable credential -ErrorAction SilentlyContinue
+  }
+}
+} finally {
+  $ErrorActionPreference = $priorErrorActionPreference
+}
+}
+```
+
+**Compatibilidade dotenv e proteções do bloco:** a dependência instalada é dotenv 16.6.1. A inspeção de `lib/env-options.js` e `lib/main.js` confirmou que `DOTENV_CONFIG_OVERRIDE=false` chega como string, e `Boolean('false')` é verdadeiro nessa versão. Por isso, o bloqueio contra leitura de configurações externas não depende desse valor: `DOTENV_CONFIG_PATH` aponta para um arquivo temporário novo, verificado vazio, e `DOTENV_KEY`/todas as demais opções `DOTENV_*` são limpas antes de definir apenas o caminho e `false`. Assim dotenv só pode ler zero chaves; mesmo que a opção seja truthy, não há valores para sobrepor. O arquivo é removido no `finally`; o `.env` original não é alterado. As três URLs continuam iguais e o config usa explicitamente `DRIZZLE_SCHEMA=./src/database/schema/index.ts` e prioriza `DATABASE_DIRECT_URL`.
+
+O endereço é comparado por `host(inet_server_addr())`; o erro anterior não prova que a máscara tenha sido a causa. A URL é validada antes de `Client.connect()`. A flag `STAFF03_POSTGRES_PROJECTION_TEST` é removida temporariamente e restaurada, mas não é definida nem exigida para migrations; permanece exclusiva da execução posterior da fixture. O processo de migration só é alcançado após a confirmação literal manual. A captura chama o `.cmd` em primeiro plano com `2>&1` sob `ErrorActionPreference=Continue`; em PowerShell 7, `PSNativeCommandUseErrorActionPreference` é temporariamente desativada quando existir. Assim, stderr entra na coleção para sanitização, e `$LASTEXITCODE` é lido imediatamente após o comando sem deixar um erro nativo interromper a coleta. Só depois de sanitizar URLs/senhas a saída é exibida; não há arquivo de log bruto. `ErrorActionPreference` e a preferência nativa são restauradas em `finally`; as funções auxiliares estão em um scriptblock e não persistem na sessão. O bloco restaura as variáveis do processo e remove o dotenv temporário em `finally`; strings .NET não podem ser zeradas byte a byte, então não use transcript ou histórico persistente.
+
+Se o próprio `npm.cmd run db:migrate` falhar, parar e preservar somente saída já sanitizada para diagnóstico. Não repetir automaticamente, não usar `drizzle-kit push`, `db:generate`, seeds ou SQL manual. A role esperada não deve ser superuser nem ter `CREATEDB`; o preflight exige `CONNECT`, `CREATE` no banco (para o schema do journal Drizzle), `USAGE` e `CREATE` em `public`. As permissões das tabelas/funções após as migrations serão verificadas separadamente em read-only.
+
+### Verificações read-only posteriores às migrations
+
+Executar somente depois de uma migração manual aprovada e concluída, novamente com as três URLs validadas e sem exibi-las. Abrir `BEGIN READ ONLY`, aplicar `SET LOCAL statement_timeout='5s'`, executar as consultas abaixo e finalizar com `ROLLBACK`. Não selecionar linhas de dados das tabelas operacionais.
+
+Confirmar que o journal contém exatamente oito registros e mapear `created_at` ao `_journal.json` oficial (ordem/tag):
+
+```sql
+SELECT id, hash, created_at
+FROM drizzle.__drizzle_migrations
+ORDER BY created_at, id;
+
+SELECT count(*) AS migration_count,
+       count(DISTINCT created_at) AS distinct_timestamps,
+       min(created_at) AS first_created_at,
+       max(created_at) AS last_created_at
+FROM drizzle.__drizzle_migrations;
+```
+
+Os oito `created_at` esperados do journal local são `1792459201217`, `1792459202525`, `1792459203911`, `1792459205348`, `1792459206746`, `1794000000000`, `1794200000000` e `1794412800000`, na ordem dos tags 0001 a 0008. Inspeção estática do `drizzle-orm` instalado confirma que o hash é SHA-256 do texto completo da migration lido como string, e que `created_at` recebe `journalEntry.when`. Para comparar, executar localmente (não conecta ao banco) e comparar por tag os hashes/timestamps com o resultado SQL acima:
+
+```powershell
+node -e "const fs=require('node:fs'),c=require('node:crypto');const j=JSON.parse(fs.readFileSync('drizzle/meta/_journal.json','utf8'));for(const e of j.entries){const q=fs.readFileSync('drizzle/'+e.tag+'.sql').toString();console.log(e.tag+' '+e.when+' '+c.createHash('sha256').update(q).digest('hex'));}"
+```
+
+Conferir que há exatamente um hash/registro por timestamp e nenhum registro extra; divergência interrompe a validação. Não editar o journal ou aplicar SQL para forçar correspondência.
+
+Confirmar presença das tabelas da fixture e objetos centrais da migration 0008 sem consultar registros:
+
+```sql
+SELECT name, to_regclass('public.' || quote_ident(name)) IS NOT NULL AS present
+FROM (VALUES ('users'),('events'),('user_roles'),('participations'),('audit_logs'),
+             ('external_entry_calls')) AS required(name)
+ORDER BY name;
+
+SELECT conname, contype, condeferrable, condeferred
+FROM pg_constraint
+WHERE conrelid = 'public.external_entry_calls'::regclass
+ORDER BY conname;
+
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE schemaname='public' AND tablename='external_entry_calls'
+ORDER BY indexname;
+
+SELECT c.relname AS table_name, t.tgname, t.tgenabled, pg_get_triggerdef(t.oid) AS definition
+FROM pg_trigger t
+JOIN pg_class c ON c.oid=t.tgrelid
+JOIN pg_namespace n ON n.oid=c.relnamespace
+WHERE n.nspname='public' AND t.tgname IN (
+  'protect_external_entry_call','resolve_external_call_on_participation',
+  'check_external_call_integrity','check_external_call_participation',
+  'check_external_call_event','prevent_external_calls_truncate')
+ORDER BY c.relname,t.tgname;
+```
+
+Verificar os privilégios que a fixture precisa sem alterar ACLs. A fixture insere em `users`, `events`, `user_roles`, `participations` e `external_entry_calls`; atualiza `events`, `participations` e `external_entry_calls`; e as triggers precisam inserir em `audit_logs`. As projeções leem `users`, `events`, `participations` e `external_entry_calls`. Confirmar `SELECT` nas tabelas consultadas, `INSERT`/`UPDATE` nas tabelas correspondentes, `INSERT` em `audit_logs` e privilégios `USAGE`/`CREATE` já mencionados. Exemplo de catálogo (uma linha por tabela/privilégio; não altera ACL):
+
+```sql
+SELECT current_user,
+  has_table_privilege(current_user,'public.users','SELECT') AS users_select,
+  has_table_privilege(current_user,'public.users','INSERT') AS users_insert,
+  has_table_privilege(current_user,'public.events','SELECT') AS events_select,
+  has_table_privilege(current_user,'public.events','INSERT') AS events_insert,
+  has_table_privilege(current_user,'public.events','UPDATE') AS events_update,
+  has_table_privilege(current_user,'public.user_roles','INSERT') AS roles_insert,
+  has_table_privilege(current_user,'public.participations','SELECT') AS participations_select,
+  has_table_privilege(current_user,'public.participations','INSERT') AS participations_insert,
+  has_table_privilege(current_user,'public.participations','UPDATE') AS participations_update,
+  has_table_privilege(current_user,'public.external_entry_calls','SELECT') AS calls_select,
+  has_table_privilege(current_user,'public.external_entry_calls','INSERT') AS calls_insert,
+  has_table_privilege(current_user,'public.external_entry_calls','UPDATE') AS calls_update,
+  has_table_privilege(current_user,'public.audit_logs','INSERT') AS audit_insert;
+```
+
+Consulta sem privilégios necessários, journal diferente de 8, ausência de tabela/constraint/index/trigger obrigatório ou identidade diferente bloqueia a integração. As consultas pós-migration são plano futuro, não executado. Só depois do preflight e da migration aprovados será solicitada nova autorização explícita para rodar o teste PostgreSQL transacional individual.

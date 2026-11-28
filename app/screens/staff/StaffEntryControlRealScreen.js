@@ -448,10 +448,13 @@ export default function StaffEntryControlRealScreen({
         </View>
       )}
 
-      {snapshot.storageError && (
+      {!(snapshot.status === 'error' && ['session', 'denied'].includes(snapshot.error))
+        && (snapshot.storageError || (snapshot.feedback === 'storage' && !snapshot.knownOutcome)) && (
         <View style={styles.warningCard}>
           <Text accessibilityRole="alert" style={styles.warningMessage}>
-            Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.
+            {snapshot.storageError
+              ? 'Não foi possível verificar o registro seguro da solicitação. Atualize antes de continuar.'
+              : 'Não foi possível verificar o registro seguro da solicitação. A tentativa anterior não pôde ser concluída com segurança. O armazenamento voltou a responder; confira o estado atual antes de uma nova operação.'}
           </Text>
         </View>
       )}

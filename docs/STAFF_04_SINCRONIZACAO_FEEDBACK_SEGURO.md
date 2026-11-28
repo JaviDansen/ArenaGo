@@ -1,5 +1,11 @@
 # ArenaGo — STAFF-04 | Sincronização e Feedback Seguro
 
+### Escopo autorizado STAFF04-VAL-10 — 27/11/2026
+
+Implementar o reset visual no ciclo de vida da visita da Estação, preservando intenções persistidas, refresh no mesmo contexto e guards de callbacks antigos. Preparar cobertura A–G e procedimento ambiental comparativo para ENV-VAL-01. Esta rodada permite implementação e inspeção estática; testes, lint, typecheck e build ficam para Luna Medium. Os resultados anteriores não validam a nova alteração.
+
+Revisão diretamente relacionada identificou duas lacunas adicionais de visita: o catch de refresh verificava escopo antes de tratar 401/403, mas não a visita; o retorno de cancelReserved também verificava só escopo. Ao retornar à mesma estação, callbacks dessas visitas anteriores poderiam alterar a visita atual. Serão acrescentadas guards de visita nesses dois pontos, sem modificar contratos de persistência ou regras de autorização.
+
 ## 1. Objetivos e Escopo
 
 - **Projeto:** ArenaGo — ProgramacaoMobile (`JaviDansen/ArenaGo`)
@@ -8,7 +14,7 @@
 - **Prioridade:** P0
 - **Branch obrigatória:** `feature/staff-operacional-v2`
 - **Commit-base de referência (`HEAD` inicial verificado):** `6c77c3b515ef4ed47607250081055868cc803a30` (`Correções da Auditoria Independente — Rodada 2` da STAFF-03)
-- **Status do ciclo:** Implementação e preparação de testes concluídas para auditoria independente e posterior execução da campanha automatizada conjunta. **STAFF-03 e STAFF-04 ainda não foram submetidas à campanha automatizada conjunta nem homologadas no Expo Go**; portanto, nenhuma das duas tasks está testada, aprovada ou homologada.
+- **Status do ciclo (27/11/2026):** campanha automatizada local conjunta STAFF-03/STAFF-04 aprovada conforme a consolidação final deste documento: Backend 1.299/1.299, App 995/995 e QA independente 51/51. VAL-09/VAL-10 foram revalidadas nas suítes focadas e regressões App finais; ENV-VAL-01 foi superado pelo runner oficial no PowerShell convencional, embora sua causa específica no Codex permaneça desconhecida. Homologação Expo, integração PostgreSQL dedicada e aprovação formal continuam pendentes.
 
 ### Contexto das entregas anteriores
 
@@ -387,7 +393,7 @@ Pop-Location
 Antes de executar qualquer comando desta etapa, confirmar integralmente:
 - Autorização explícita do responsável para a campanha PostgreSQL.
 - `NODE_ENV=test`.
-- Identidade exata das URLs exigidas (`DATABASE_URL`, `DIRECT_DATABASE_URL`, `TEST_DATABASE_URL`), host/porta dedicados (`127.0.0.1:55432`) e `current_database() = arenago_staff_homolog_20261111`.
+- Identidade exata das URLs exigidas (`DATABASE_URL`, `DATABASE_DIRECT_URL`, `EVENTS_TEST_DATABASE_URL`), host/porta dedicados (`127.0.0.1:55432`) e `current_database() = arenago_staff_homolog_20261111`.
 - Presença da migration `0008` sem executar migrations ou seeds automaticamente.
 - Preservação de registros preexistentes (incluindo Admins históricos) e ausência de limpeza global.
 - Variável de guarda `STAFF03_POSTGRES_PROJECTION_TEST=authorized-local`.
@@ -619,3 +625,412 @@ Auditoria estática independente realizada sobre o commit `35e7c4e584db50a8bc86a
 - **Testes preparados:** [app/tests/staffOperationsService.integration.test.cjs](../app/tests/staffOperationsService.integration.test.cjs), [app/tests/staffEntryControl.test.cjs](../app/tests/staffEntryControl.test.cjs), [app/tests/staffEntryControlScreen.test.cjs](../app/tests/staffEntryControlScreen.test.cjs), [app/tests/staffStationOperational.test.cjs](../app/tests/staffStationOperational.test.cjs) e [app/tests/roleRoutingIntegration.test.cjs](../app/tests/roleRoutingIntegration.test.cjs) cobrindo `recordTerminal()`, `clear()` e `finish()` controlados em sucesso e recusa definitiva (`409`), limpeza imediata sem banner `busy` em `401`/`403`, ausência de `'persisting'` em `uncertain` e descarte de `onStage` obsoleto em troca de contexto.
 - **Verificações estáticas realizadas:** `node --input-type=module --check`, `@babel/parser` JSX, `node --check`, `git diff --check`.
 - **Riscos e limitações:** em dispositivos com `SecureStore` rápido, a etapa `"Registrando resultado com segurança..."` dura poucos milissegundos em operação normal, tornando-se visualmente proeminente apenas sob latência de I/O local.
+
+### Campanha de Validação Automatizada Conjunta — STAFF-03 + STAFF-04
+
+**Execução parcial — 27/11/2026 — GPT-6 Luna Medium**, no HEAD `9ee8789fdf22fd38b4f1d8303d2012706b4586d4` da branch `feature/staff-operacional-v2`.
+
+O achado `STAFF04-VAL-01` teve duas inconsistências na fixture do cenário `STAFF04-AUD-06 + AUD-04 (integrado)`: (1) a resposta HTTP pendente capturava antecipadamente a fase `open`, mesmo após o teste mudar a intenção para `closing`; (2) a expectativa `Status: Encerrando` não correspondia ao rótulo oficial `STATUS_LABELS.closing = 'Em encerramento'`. A fixture passou a fornecer explicitamente `closing` ao resolver a resposta pendente. A asserção foi ajustada para `Status: Em encerramento`, e o estado inicial `Status: Aberto` é verificado. O teste isolado passou (1/1, sem skips ou cancelamentos, código 0).
+
+A suíte completa `roleRoutingIntegration.test.cjs` terminou normalmente em 42.944 ms, com 63 aprovados, 1 falho, zero ignorados ou cancelados, código 1. O caso falho `STAFF04-AUD-01/02/04/05` esperava o botão `Cancelar` ao fechar o modal de conclusão da experiência; `app.press()` encontrou zero correspondências (`roleRoutingIntegration.test.cjs:4178`, helper na linha 283). Causa ainda não confirmada; a campanha foi interrompida e nenhum outro teste/código foi alterado. A falha não permite concluir se é fixture, implementação ou regressão sem inspeção adicional.
+
+O teste combinado que havia ficado sem conclusão na campanha anterior não reproduziu o travamento quando executado isoladamente nem durante a suíte completa desta retomada. Isso não explica definitivamente a interrupção anterior. Ainda pendem as outras suítes focadas, typecheck/lint/build/unitários do backend e as regressões completas de App e QA independente. Nenhuma integração PostgreSQL/Neon, migration, seed ou homologação Expo foi executada.
+
+### STAFF04-VAL-02 — Fixture de cancelamento e visibilidade do modal
+
+A suíte de integração havia falhado em `STAFF04-AUD-01/02/04/05` porque o harness procurava o rótulo `Cancelar`, enquanto `StationConfirmModal` expõe `CANCELAR OPERAÇÃO` como `accessibilityLabel`. A fixture agora aciona o rótulo correto, verifica `visible: false` no Modal ainda montado e confirma que a participação pendente permanece preservada, sem mutação. O teste isolado passou (1/1); a suíte integral de integração passou (64/64, código 0).
+
+Na retomada, `staffPolling.test.cjs` passou (6/6). `staffEventDiscovery.test.cjs` falhou em `STAFF04-AUD-02` (13/14): após um 403 no polling de eventos, a linha 1396 esperava `latestEventsPolling()?.enabled === false`, mas recebeu `true`. A falha bloqueia a continuação e permanece sem causa confirmada; não houve alteração nesse cenário. As outras suítes focadas, verificações do backend e regressões completas não foram executadas nesta retomada.
+
+A tentativa de campanha anterior que foi interrompida sem resumo não voltou a travar nesta rodada: o teste de modal isolado e a integração completa terminaram normalmente. Isso não estabelece a causa do travamento anterior.
+
+Integração PostgreSQL/Neon, migrations, seeds e homologação Expo não foram executadas. STAFF-03 e STAFF-04 continuam sem validação automatizada conjunta completa ou aprovação formal.
+
+### STAFF04-VAL-03 — Ciclo de vida do polling no harness
+
+**Causa confirmada:** o harness registrava apenas snapshots históricos de `useStaffPolling`; o seletor do evento retornava registros de escopo indefinido, pertencentes à Seleção de Eventos, mesmo quando o Painel com escopo `${event.id}:events:${epoch}:${revision}` estava montado. Após o 403, o registro antigo continuava aparecendo como habilitado, causando a falha da linha 1396 de `staffEventDiscovery.test.cjs`.
+
+**Correção:** preservado o histórico para as asserções existentes e adicionado um mapa distinto de registros atualmente montados, com identidade estável por `useRef`, atualização no efeito e remoção por cleanup. Os helpers atuais passaram a selecionar primeiro o polling do evento com escopo `:events:`. O teste verifica o registro único ativo do Painel antes do 403 e que ele deixa de ser acionável após o bloqueio/desmontagem.
+
+**Resultados:** STAFF04-AUD-02 isolado 1/1; `staffEventDiscovery` 14/14; `staffDashboard` 25/25. `roleRoutingIntegration` permanece 64/64; `staffPolling` 6/6. A execução seguinte, `staffOperationsService.integration`, falhou em STAFF04-AUD-04 (68/69): expectativa de sequência `post:401`, `onAuthError:session`, `recordTerminal:start` recebeu vetor vazio em `app/tests/staffOperationsService.integration.test.cjs:1114`. Causa ainda não classificada; nenhuma correção foi aplicada, e as suítes seguintes foram suspensas.
+
+Nenhuma validação Backend, regressão completa App/QA, PostgreSQL/Neon, migration, seed ou Expo foi executada nesta etapa. As tasks permanecem sem aprovação automatizada conjunta integral ou aprovação formal.
+
+### STAFF04-VAL-04 — Sincronização determinística dos testes do coordenador
+
+**Correção aplicada somente ao teste** `app/tests/staffOperationsService.integration.test.cjs`: sinais deferred explícitos acompanham o início de `recordTerminal()`, `clear()`, `reserve()` e `dispatch()` nos subcenários STAFF04-AUD-04. A espera possui limite de 3 segundos, diferencia operação encerrada/falha antes da etapa e libera os gates em `finally`. As asserções temporais e de persistência foram preservadas, inclusive os casos 401 e 403, recibo terminal, intenção presente durante `clear()`, remoção após sua conclusão, troca de conta e ausência de POST após contexto obsoleto.
+
+**Validação executada com `NODE_ENV=test`:** cenário filtrado STAFF04-AUD-04: 1/1, código 0, 627 ms. Suíte `staffOperationsService.integration.test.cjs`: 69/69, código 0, 1.607 ms. Ambas sem falhas, ignorados ou cancelados. Aviso não bloqueante do Node: `staffOperationsService.js` é inferido como ES module sem `type: module` no `package.json`.
+
+A campanha retomada prosseguiu para `staffEntryControl.test.cjs`, que teve 35 aprovados e 1 falho, código 1, em 906 ms. O teste `STAFF04-AUD-04: 404 RESOURCE_NOT_FOUND na resolução de chamada...` falhou em `staffEntryControl.test.cjs:536`: resultado observado `blocked`, esperado `rejected`. Diagnóstico estático: a fixture `stateWithCall` herda de `body()` a participante `id(4)` na fila e também declara essa mesma participante em `pendingCall`; `parseEntryState()` rejeita a duplicidade e o store não alcança estado `ready`. Isso indica fixture inconsistente, não prova falha de produção. A campanha foi interrompida; nenhuma modificação foi feita nesse cenário.
+
+Permanecem pendentes `staffEntryControlScreen`, `staffStationOperational`, `staffRealNavigation`, `staffBackground`, `staffDemoState`, `participationService`, verificações de backend e regressões completas de App e QA. Não foram executados PostgreSQL/Neon, migrations, seeds nem homologação Expo. STAFF-03/04 não estão aprovadas formalmente.
+### STAFF04-VAL-05 — Fixture 404, recibo e revalidação contextual
+
+**Correções somente em `app/tests/staffEntryControl.test.cjs`:** `stateWithCall` agora representa a participante chamada fora da FIFO e uma fila restante válida (`waitingCount: 1`, posição 1). Foi adicionada uma asserção ao teste do parser para a duplicidade entre `pendingCall` e `waiting`. O teste confere `kind/status` em `mutate()`, o `RESOURCE_NOT_FOUND` no resultado terminal do snapshot e no registro realmente persistido antes do reconhecimento, e utiliza chaves distintas `id(30)`, `id(31)` e `id(32)`.
+
+A revalidação é acionada pelo fluxo real de `mutate()` após cada POST: Caso A, POST 404 + GET 200 mantém o evento pronto e apresenta o novo estado; Caso B, POST 404 + GET 403 preserva o recibo da mutação, bloqueia o contexto e remove os dados protegidos; Caso C, POST 404 + GET 404 contextual também bloqueia e remove dados. O segundo POST foi confirmado e utiliza chave diferente da primeira operação.
+
+**Resultados efetivos:** teste isolado filtrado: 1 aprovado, 0 falhos/ignorados/cancelados, código 0, 528 ms. `staffEntryControl.test.cjs`: 36 aprovados, 0 falhos/ignorados/cancelados, código 0, 1.152 ms. `staffEntryControlScreen.test.cjs`: 10 aprovados, 3 falhos, 0 ignorados/cancelados, código 1, 4.221 ms. A campanha parou nessa primeira suíte falha.
+
+Diagnóstico estático das três falhas: `staffEntryControlScreen.test.cjs:1004` espera texto de acesso ao evento enquanto `StaffSyncFeedback.js` retorna “O acesso a esta operação não está disponível”; linhas 1152 e 1324 dereferenciam `postDeferred` após o callback `onPost` copiar seu valor e zerar a variável compartilhada. Não foi feita correção nesses testes. A saída também contém avisos não bloqueantes de depreciação de `react-test-renderer` e atualizações React fora de `act(...)`.
+
+Continuam pendentes `staffStationOperational.test.cjs`, `staffRealNavigation.test.cjs`, `staffBackground.test.cjs`, `staffDemoState.test.cjs`, `participationService.test.cjs`, as verificações de backend e as regressões completas de App e QA independente. Não foram executados PostgreSQL/Neon, migrations, seeds ou homologação Expo. STAFF-03/04 não estão aprovadas formalmente.
+### STAFF04-VAL-06 — Feedback e promises controladas da tela de Entrada
+
+**Escopo de implementação:** apenas `app/tests/staffEntryControlScreen.test.cjs`. As verificações de pré-condição 403 e 404 agora exigem as mensagens completas de `StaffSyncFeedback` e o tom `warning`; 401 e 409 também são conferidos no contexto de pré-condição, incluindo a informação de que nenhuma alteração foi enviada. As expectativas específicas de `describeStationRejection()` para mutações foram mantidas.
+
+As referências de promises controladas nos fluxos de ausência e confirmação foram separadas da variável consumível `postDeferred`. Sinais de entrada com timeout identificável comprovam POST, reserva, despacho, reconhecimento e cancelamento. Gates são liberados em `finally`, operações pendentes são aguardadas, falhas originais são preservadas contra erro de cleanup e os dois renderers são desmontados dentro de `act()`. A resolução do POST é seguida de uma etapa `act()` separada para permitir o efeito React que inicia o reconhecimento.
+
+**Validação dos três cenários selecionados:** comando filtrado com `STAFF-04: StaffSyncFeedback|STAFF-04 tela Controle de Entrada|STAFF04-AUD-03: StaffEntryControlRealScreen`. Primeira execução: 2 aprovados, 1 falho, código 1, 4.315 ms; AUD-03 teve timeout no sinal de reconhecimento. Após sincronização do ciclo React/`act`, segunda execução: 2 aprovados, 1 falho, código 1, 1.646 ms; AUD-03 atingiu a asserção posterior de falha de armazenamento, mas a mensagem esperada não estava visível (`staffEntryControlScreen.test.cjs:1434`). A suíte completa terminou com 12 aprovados, 1 falho, zero ignorados/cancelados, código 1, 3.913 ms, na mesma asserção. O diagnóstico então pendente foi confirmado em VAL-09: após `reserve()` falhar antes da escrita, `mutate()` publica `storageError: true` e `feedback: 'storage'`; o `refresh()` do `finally` recupera a disponibilidade do SecureStore (`storageError: false`) sem apagar `feedback`, mas a tela condiciona o aviso somente a `storageError`, fazendo a mensagem desaparecer. Nenhuma mudança de produção ou nessa asserção foi feita.
+
+**Cinco suítes focadas independentes:** `staffStationOperational.test.cjs` ficou em execução por mais de 30 s; foi encerrada sem resumo final. Saída parcial: 5 aprovados e 3 falhos. O filtro diagnóstico posterior executou exatamente os três casos falhos (0 aprovados, 3 falhos, código 1, 1.245 ms): (1) `STAFF-04 tela Estação`, TypeError em `:869`, `postDeferred` nulo após o callback consumi-lo; (2) `STAFF04-AUD-01`, asserção em `:1030` exige botão `Cancelar` mas o harness encontra zero; o componente expõe o rótulo `CANCELAR OPERAÇÃO`; (3) `STAFF04-AUD-03`, TypeError em `:1149` pela mesma referência nula a `postDeferred`. Provável bloqueio de execução completa: primeiro subcaso de `STAFF04-AUD-08`, que aguarda a operação enquanto o GET `/stations` está pendente; inferência estática, não causa confirmada. As demais passaram: `staffRealNavigation` 2/2 (1.394 ms), `staffBackground` 1/1 (95 ms), `staffDemoState` 22/22 (480 ms) e `participationService` 13/13 (436 ms); todas código 0, sem ignorados/cancelados.
+
+As suítes anteriormente aprovadas permanecem registradas: `roleRoutingIntegration` 64/64, `staffPolling` 6/6, `staffEventDiscovery` 14/14, `staffDashboard` 25/25, `staffOperationsService.integration` 69/69 e `staffEntryControl` 36/36. A validação ampliada de backend, regressão completa App e QA não foi executada porque há falha e bloqueio nas suítes focadas. Avisos observados: depreciação de `react-test-renderer` e atualizações React fora de `act()` na suíte completa de telas; warnings não foram suprimidos. Nenhum PostgreSQL/Neon, migration, seed, homologação ou publicação Git foi executado. STAFF-03/04 não estão aprovadas formalmente.
+
+### Implementação final e preparação pré-merge — 27/11/2026
+
+**Estado atual: implementação preparada, não validada.** Referência `9ee8789fdf22fd38b4f1d8303d2012706b4586d4`, branch `feature/staff-operacional-v2`. Os 275/276 resultados anteriores não validam as alterações desta rodada. Nenhum teste, lint, typecheck, build, PostgreSQL, seed ou migration foi executado nesta implementação.
+
+#### STAFF04-VAL-09 — Correção de produção preparada
+
+Alterado apenas `StaffEntryControlRealScreen.js` no código de produção. Aproveitado `snapshot.feedback === 'storage'`, que o serviço já preserva durante refresh/polling. Com armazenamento atualmente indisponível, permanece a mensagem original de atualização obrigatória. Após recuperação, o aviso histórico mantém a frase original e informa que a tentativa anterior não pôde ser concluída com segurança e que o armazenamento voltou a responder. Nenhuma mensagem nova afirma que a solicitação não foi enviada. O aviso histórico genérico não é apresentado com `knownOutcome`: nesse caso permanece o aviso específico de confirmação/recusa. Negativas de autorização têm prioridade e ocultam o aviso de armazenamento.
+
+Não foi criado estado adicional nem alterado o store ou formato persistente. O aviso dura durante refresh e polling; uma nova mutação válida já limpa/substitui `feedback`; reconhecimento/descarte efetivamente verificados e troca de contexto também o limpam. Tentativas bloqueadas não o apagam. Não há timer, replay, reconciliação por GET ou limpeza automática de intenções. A condição de habilitação dos botões não foi alterada: disponibilidade atual, intenção ativa, contexto e permissões continuam prevalecendo.
+
+Testes preparados (não executados):
+
+- A/H/I: mantida a asserção originalmente falha no AUD-03 da tela, acrescentando persistência do aviso após polling/refresh manual, preservação do registro acknowledged anterior, contagem de POST e chave diferente na próxima operação legítima, sem apagar manualmente a intenção anterior.
+- A/B/C: quatro casos novos de tela controlam falhas antes/depois da escrita de reserved/dispatching; conferem zero POST/PATCH, storage_error, aviso recuperado, bloqueio conforme intenção persistida, preservação do registro e isolamento após troca de sessão. Gates têm sinal explícito, timeout diagnóstico e cleanup que preserva a falha original.
+- A/B/C/H/I: ampliados os quatro casos do store com retorno storage_error, recuperação de storageError, feedback sobrevivendo a polling/refresh, bloqueio de intenções ativas, descarte seguro, chave nova após falha anterior à reserva e limpeza de feedback na nova sessão.
+- D/E/F/G: preservados os testes existentes de knownOutcome confirmado/recusado após falha terminal, uncertain/dispatching sem replay, 401/403 durante persistência, recibos históricos e troca de identidade/evento/epoch/revision. A cobertura existente não equivale a nova execução; requer revalidação integral.
+
+#### Investigação complementar da Estação
+
+AUD-09/AUD-10 anteriores não verificavam diretamente busy herdado em uma mutação sem negativa de autorização. Preparado o caso `STAFF04-VAL-09: novo contexto não herda busy da mutação não-auth da Estação anterior`: POST controlado, troca ST_1 → ST_2, ausência dos textos reais de busyKind, intenção antiga ainda bloqueante, zero POST extra e descarte da recusa 409 tardia. Corrigida também uma asserção negativa de AUD-09 para a mensagem real de `rejected_cleanup_pending`, evitando buscar texto obsoleto.
+
+**Defeito adicional identificado estaticamente, ainda sem execução:** `refresh()` da Estação aplica spread de `previous` e não limpa busy/busyKind ao receber novo scope; o efeito de troca invalida a operação antiga, cujo retorno também não limpa o novo contexto. Assim, busy pode ficar herdado. A proposta mínima é reinicializar busy/busyKind somente na troca de visita/contexto, preservando a intenção persistida e as guards dos callbacks. Não foi alterado código de produção da Estação. O teste novo pode expor esse bloqueio e não deve ser marcado skip ou ter expectativas enfraquecidas para avançar a campanha.
+
+#### STAFF03-VAL-01 — Tipagem transacional
+
+Em evidência complementar separada: `drizzle(client, { schema })` substitui o cast baseado em ConstructorParameters. As declarações instaladas admitem pg.Client em NodePgClient; drizzle é função, não construtor. Mesma instância transacional, guards, transação/rollback, observador, relógio, savepoints e projeções preservados. Typecheck pendente; nenhum acesso a banco foi executado.
+
+#### PREMERGE-VAL-01 — Lint preexistente
+
+Evidência separada contém somente os três arquivos reportados. `configurationQuery.search` verifica code units por `Array.from(...).every(...)`, equivalente à rejeição de U+0000–001F/U+007F e surrogates isolados, preservando normalização anterior, limites e busca. Pares válidos continuam aceitos. Isso remove a regex reportada por `no-control-regex` sem desabilitar regra.
+
+As duas fixtures importam `createRequire` de node:module e carregam o mesmo CommonJS relativamente a `__filename`, compatível com module commonjs. Preservada a inferência dinâmica já existente para exports dos .cjs, sem casts, novas declarações any ou supressões. Isso remove as chamadas diretas require reportadas por `no-require-imports`. Scripts de preparação e suas barreiras não foram alterados/executados. ESLint e typecheck ainda precisam comprovar a correção.
+
+#### ENV-VAL-01 — Plano para Luna Medium
+
+O log anterior ocorreu antes do runner em `node:os.userInfo`. O arquivo instalado `tsx/dist/temporary-directory-Du7LpLp9.mjs` consulta `process.geteuid()` quando disponível; no Windows utiliza `os.userInfo().username` e compõe um diretório sob `os.tmpdir()`. ENOMEM não comprova falta de memória física. O Node do log era 24.15.0, compatível com engines >=24.15.0; conferir a versão efetiva na próxima execução.
+
+Plano de diagnostico da campanha anterior, executado nesta revalidacao: confirmar versao Node; testar os.userInfo/os.tmpdir sem expor usuario/caminhos; testar escrita em arquivo temporario exclusivo; conferir somente presenca de TEMP/TMP/USERPROFILE/NODE_OPTIONS; inspecionar recursos/permissoes e inicializacao do tsx. Os resultados efetivos estao registrados na secao Revalidacao conjunta abaixo.
+
+#### Evidências e próxima campanha
+
+- `STAFF-04-changes.diff`: acumulado desde `6c77c3b515ef4ed47607250081055868cc803a30`, somente app/ e as duas documentações; exclui o próprio patch e as correções backend de STAFF-03/pré-merge.
+- `STAFF-03-typecheck-fix.diff`: complemento desde HEAD de referência, somente o teste SQL. O patch histórico `STAFF-03-changes.diff` permanece intacto.
+- `PREMERGE-VAL-01-changes.diff`: complemento desde HEAD de referência, somente os três arquivos de lint.
+
+Plano de execucao registrado antes da campanha de 27/11/2026; os resultados e bloqueios efetivos constam na secao Revalidacao conjunta abaixo. Suites completas App/QA condicionadas a todos os bloqueios focados resolvidos.
+
+Inspeções estáticas efetivamente realizadas nesta implementação: `node --check` dos três testes CJS alterados; parse JSX com o @babel/parser já instalado em app (o caminho inicialmente consultado em qa/regression não possui esse pacote; nenhuma instalação foi feita); `git diff --check -- app backend docs`; `git apply --stat` e `git apply --reverse --check` dos três patches. Todos os checks finais retornaram 0. Conferidos escopos dos headers dos patches e ausência de backend/autorreferência no patch STAFF-04. O histórico STAFF-03 está idêntico ao HEAD, SHA-256 `9CB0BEE61A0CC5037A4F793E7E3FEECC13EE58EE2C72C2F9E5EB74E6B598B183`. Git avisa sobre normalização LF/CRLF; os patches foram mantidos no formato emitido por Git. Essas inspeções não substituem testes/typecheck/lint/build.
+
+### Escopo da rodada final de implementação — 27/11/2026
+
+Rodada aberta antes da implementação: corrigir a renderização do feedback histórico de armazenamento usando o estado existente; ampliar cobertura sem executar testes; revisar busy na troca de contexto da Estação; corrigir tipagem SQL e os três erros de lint em evidências separadas; preparar diagnóstico do ENOMEM para Luna Medium. Preservar todas as correções anteriores. Nenhuma validação automatizada ou operação de banco está autorizada nesta etapa.
+
+### STAFF04-VAL-07/08/09 — Retomada de 27/11/2026
+
+#### VAL-07 — Fixtures da Estação
+
+Em `staffStationOperational.test.cjs`, o deferred do POST mantém referência estável mesmo após o callback consumir e zerar a variável compartilhada. O teste aguarda sinal explícito de início do POST antes de verificar processamento, polling pausado, bloqueio de duplo toque, contagem e confirmação. AUD-03 usa gates estáveis separados para GET de estações e POST, com sinais antes de conferir pré-condição e mutação. AUD-01 aciona o label acessível oficial `CANCELAR OPERAÇÃO`; o Modal segue montado com `visible: false`. Foram preservadas a pausa/retomada do polling e a ausência de mutação após cancelamento.
+
+Os três cenários que falharam na rodada anterior passaram filtrados: 3 aprovados, 0 falhos/ignorados/cancelados, código 0, duração 1.501 ms. A suíte integral da Estação passou 11/11, sem falhas, ignorados ou cancelados, código 0, 5.880 ms.
+
+#### VAL-08 — Sincronização concorrente do AUD-08
+
+A sequência anterior podia aguardar `pCall` enquanto ela aguardava um GET operacional que o teste só resolveria depois; havia dependência circular entre a promise da operação e a resposta controlada. O cenário agora sinaliza o início de `/queue` e `/stations`, inicia `pCall` sem esperá-la, rejeita `/queue` com 503 e aguarda o início do GET operacional posterior sem resolver esse GET. Em seguida, o 403 de `/stations` revoga imediatamente o acesso e remove os dados protegidos; somente depois o teste resolve a leitura 200 atrasada e aguarda `pCall`. O segundo subcenário verifica 401 enquanto `/queue` permanece pendente. Ambos verificam zero POSTs. AUD-08 isolado passou 1/1, código 0, 1.146 ms. A suíte integral passou, confirmando a correção da sincronização do harness.
+
+#### VAL-09 — Diagnóstico do aviso perdido
+
+A revalidação isolada de STAFF04-AUD-03 em `staffEntryControlScreen.test.cjs` falhou novamente na linha 1434: 0 aprovados, 1 falho, 0 ignorados/cancelados, código 1. O erro observado é a ausência de “Não foi possível verificar o registro seguro da solicitação.” A instrumentação temporária do teste foi retirada após a coleta.
+
+Estágio e efeitos confirmados pelo fluxo e pelo harness:
+
+- O bloqueio acontece em `storage.reserve(intent)`, no `setItemAsync` do SecureStore.
+- O mock rejeita dentro de `onSecureSet` antes de executar `Map.set`; a nova intenção não foi gravada. O valor anterior continua sendo uma operação `acknowledged`, que `active()` considera não pendente.
+- Como a exceção ocorre antes de `storage.dispatch` e da chamada HTTP, esta tentativa não envia POST nem PATCH. O `mutate()` retorna `{ kind: 'storage_error' }`.
+- O `catch` publica `storageError: true` e `feedback: 'storage'`. O `finally` limpa `busy` e chama `refresh()`.
+- O refresh retorna GET e SecureStore bem-sucedidos; publica `storageError: false`, preservando `feedback: 'storage'`. A renderização do aviso depende somente de `snapshot.storageError`, por isso o aviso some. A indisponibilidade atual foi recuperada, mas a falha da tentativa anterior ainda está no campo `feedback`.
+- Depois de GET 200, leitura do SecureStore bem-sucedida, nenhuma intenção ativa e mesmo contexto autenticado, os controles podem permitir nova tentativa; a reserva posterior pode substituir uma intenção `acknowledged`. Se a falha ocorrer depois do dispatch, o estado `dispatching`/resultado desconhecido deve continuar bloqueando repetição; para falha após resposta definitiva, `knownOutcome` e recibo devem continuar visíveis e preservados.
+
+Correção mínima proposta para uma tarefa posterior: separar o aviso persistente da tentativa anterior do indicador corrente de disponibilidade do armazenamento. O refresh pode limpar `storageError` após comprovar disponibilidade sem apagar o aviso. O aviso não deve ser, por si só, um bloqueio; manter os gates atuais para armazenamento indisponível, intenção ativa, resultado incerto, revogação e escopo obsoleto. Não limpar intenções automaticamente. Nenhuma produção ou asserção foi alterada nesta rodada. Naquela rodada, VAL-09 permanecia aberta; a revalidacao posterior passou, conforme os resultados atuais abaixo.
+
+#### Resultado individual das 12 suítes focadas
+
+| Suíte | Último resultado confirmado |
+|---|---:|
+| `roleRoutingIntegration` | 64/64 passou (execução anterior) |
+| `staffPolling` | 6/6 passou (anterior) |
+| `staffEventDiscovery` | 14/14 passou (anterior) |
+| `staffDashboard` | 25/25 passou (anterior) |
+| `staffOperationsService.integration` | 69/69 passou (anterior) |
+| `staffEntryControl` | 36/36 passou (anterior) |
+| `staffEntryControlScreen` | execução completa anterior 12/13; nesta rodada, filtro VAL-09 0/1 e falhou |
+| `staffStationOperational` | 11/11 passou nesta rodada |
+| `staffRealNavigation` | 2/2 passou (anterior) |
+| `staffBackground` | 1/1 passou (anterior) |
+| `staffDemoState` | 22/22 passou (anterior) |
+| `participationService` | 13/13 passou (anterior) |
+
+Os resultados marcados como anteriores não foram repetidos nesta rodada. Também passaram isoladamente AUD-09 (1/1, código 0, 1.710 ms) e AUD-10 (1/1, código 0, 851 ms); a suíte completa da Estação inclui ambos. Os runners React emitiram avisos não bloqueantes de depreciação de `react-test-renderer`.
+
+#### Typecheck, lint, build e unitários do backend
+
+Os scripts inspecionados em `backend/package.json` apontam `typecheck:test` para TypeScript, `lint` para ESLint do código/testes, `build` para `nest build` e `test` para `tsx --test test/unit/*.test.ts`. O script PostgreSQL `test:integration` não foi chamado.
+
+- `npm run typecheck:test`: código 2; erro TS2344 em `test/integration/staff03-external-call-projection.integration.test.ts:67`, `typeof drizzle` incompatível com uma restrição de construtor.
+- `npm run lint`: código 1; três erros: `src/events/admin-configuration.dto.ts:51`, `no-control-regex`; `test/unit/staff-a4-homolog-fixture.test.ts:4` e `test/unit/staff-homolog-fixture.test.ts:4`, `no-require-imports`.
+- `npm run build`: código 0.
+- `npm test`: código 1 antes de iniciar qualquer unitário; Node v24.15.0 reportou `uv_os_get_passwd returned ENOMEM` em `node:os.userInfo`, invocado pelo `tsx` ao criar diretório temporário.
+
+Nenhum desses comandos acessou PostgreSQL. Regressões completas do App e QA seguem suspensas devido à falha da VAL-09. STAFF-03/04 continuam sem aprovação formal ou homologação.
+
+
+### Revalidacao conjunta STAFF-03 + STAFF-04 — 27/11/2026
+
+Modelo designado confirmado manualmente: GPT-6 Luna Medium. Branch feature/staff-operacional-v2, HEAD 9ee8789fdf22fd38b4f1d8303d2012706b4586d4. Scripts inspecionados; NODE_ENV=test. Resultados anteriores permanecem historicos e nao foram somados.
+
+| Validacao/comando | Aprovados | Falhos | Ignorados/cancelados | Exit | Duracao |
+|---|---:|---:|---:|---:|---:|
+| VAL-09 store (filtro persistencia) | 6 | 0 | 0/0 | 0 | 897 ms |
+| VAL-09 screen (4 casos + AUD-03) | 5 | 0 | 0/0 | 0 | 2.211 ms |
+| staffEntryControl.test.cjs completa | 36 | 0 | 0/0 | 0 | 1.099 ms |
+| staffEntryControlScreen.test.cjs completa | 17 | 0 | 0/0 | 0 | 6.191 ms |
+| VAL-10 isolada, novo contexto sem busy | 0 | 1 | 0/0 | 1 | 1.228 ms |
+| staffStationOperational.test.cjs completa | 11 | 1 | 0/0 | 1 | 7.292 ms |
+| Backend typecheck:test | N/A | N/A | N/A | 0 | 9.779 ms |
+| Backend lint | N/A | N/A | N/A | 0 | 6.856 ms |
+| Backend build | N/A | N/A | N/A | 0 | 9.532 ms |
+| Backend unit npm test | 0* | 0* | 0/0* | 1 | 662 ms |
+| Regressao completa App | nao executada: bloqueada por VAL-10 | | | N/A | N/A |
+| QA independente | nao executada: bloqueada por VAL-10 | | | N/A | N/A |
+
+*Runner falhou antes da coleta de testes; nao houve casos funcionais. os.userInfo() e tsx falham com ERR_SYSTEM_ERROR/uv_os_get_passwd returned ENOMEM. os.tmpdir() e escrita/remocao no temp passaram; TEMP/TMP/USERPROFILE presentes, NODE_OPTIONS ausente. O processo PowerShell de controle estava em 67.8 MB de working set, 55.2 MB privados e 572 handles; no Windows, Node nao expoe geteuid/getuid. Esses dados nao caracterizam a memoria do processo Node ja encerrado e nao comprovam falta de memoria fisica.
+
+#### STAFF04-VAL-09: passou nesta rodada
+
+Seis cenarios focados do store e quatro casos de tela cobriram falhas antes/depois da escrita em reserved e dispatching. As suites passaram 36/36 e 17/17; filtro de tela passou 5/5 com AUD-03. Confirmados aviso apos refresh/polling, nenhum POST/PATCH quando a escrita falha, bloqueio coerente com intencao e feedback correto. Estes resultados superam as falhas historicas da VAL-09. Avisos: depreciacao react-test-renderer e atualizacoes React fora de act() na suite de tela.
+
+#### STAFF04-VAL-10: falhou; regressao bloqueada
+
+Em app/tests/staffStationOperational.test.cjs:2039, a operacao alcanca o POST controlado e a intencao original esta em dispatching. Apos trocar ST_1 por ST_2, os dados da fila B aparecem, mas continua o texto Processando operacao no servidor...; observado true, esperado false. A suite completa reproduziu a falha (11/12). As verificacoes posteriores de intencao bloqueante, zero POST extra e descarte do resultado tardio nao foram alcancadas. A leitura estatica de StaffStationOperationalScreen.js indica refresh preservando propriedades do estado anterior durante troca de scope; evidencia favorece defeito de producao, nao fixture. Nenhuma correcao foi feita. Correcao minima: limpar busy/busyKind apenas na troca de contexto/visita, mantendo intencao persistida e guards.
+
+#### STAFF03-VAL-01 e PREMERGE-VAL-01: passaram
+
+Backend typecheck:test, lint e build terminaram com exit 0. Typecheck incluiu arquivo SQL para tipagem sem executar o teste. Lint nao reportou no-control-regex nem no-require-imports; build passou. Nenhum acesso PostgreSQL ocorreu.
+
+#### Regressao completa e status
+
+App e QA independente nao foram executados pela falha focada VAL-10. As demais suites focadas planejadas (roleRoutingIntegration, polling, discovery, dashboard, operations service, navegacao, background, demo state e participation service) tambem nao foram repetidas; seus resultados anteriores permanecem historicos e nao validam esta rodada. Unitarios backend bloqueados antes dos casos. Nenhum PostgreSQL/Neon, test:integration, migration, seed ou operacao Git de publicacao ocorreu. Homologacao Expo e aprovacao formal de STAFF-03/04 continuam pendentes.
+
+### STAFF04-VAL-10 — implementação e revisão estática de 27/11/2026
+
+**Estado atual:** correção implementada localmente, ainda não validada. A campanha anterior confirmou VAL-09, Entrada 36/36 e tela Entrada 17/17; VAL-10 falhou 0/1 e Estação 11/12. Esses resultados são anteriores a esta alteração. Typecheck/lint/build backend passaram na campanha anterior; unitários continuam bloqueados por ENV-VAL-01.
+
+**Causa e alteração:** o efeito de nova visita já invalidava refs de operação, mas preservava `view.busy`/`busyKind`; `refresh()` espalhava esse estado anterior. O efeito agora inicia `scope: null`, `status: loading`, dados/pending/feedback nulos, busy falso e busyKind nulo, e fecha o modal. Em seguida, a leitura existente obtém o estado oficial e `coordinator.pending()`. O reset é apenas da representação em memória: não remove, reconhece, cancela nem substitui intenções persistidas. O refresh no mesmo contexto mantém busy/busyKind; seus controles e gates não foram alterados.
+
+**Revisão de callbacks:** dispatch já exige visita, sequência da operação, escopo, montagem e autorização antes de publicar resultado; seu finally só limpa dispatching da visita original e activeOpId correspondente. onStage/onAuthError e o reconhecimento automático continuam protegidos por visita/escopo. Foram documentadas antes da alteração e corrigidas duas lacunas relacionadas: catch do refresh passou a rejeitar visita antiga antes de tratar 401/403; retorno de descarte reservado passou a exigir montagem, mesma visita, escopo e ausência de revogação antes de limpar busy ou atualizar. Os pedidos de persistência já iniciados continuam pertencendo ao registro original. Uma negativa atual ainda bloqueia imediatamente; uma negativa atrasada de visita anterior não se torna atual por retorno à mesma estação. Guards generation, pollSeq, opSeqRef e revogação não foram removidas.
+
+**Cobertura preparada, não executada:** o teste original conserva a asserção falha e usa identificador STAFF04-VAL-10; foram preparados dez casos VAL-10 no total:
+
+- A/B/C: dois casos de troca ST_1 → ST_2 durante POST controlado, confirmando dispatching, fila B, ausência de busy herdado e bloqueio sem POST extra. Recusa definitiva 409 fica no recibo terminal da intenção original; timeout mantém dispatching. Refresh e nova tentativa continuam bloqueados; nenhum feedback tardio é exibido em B.
+- D: troca de conta e troca de sessão, com UUIDs válidos distintos; verificam limpeza visual, histórico da conta original, bloqueio por sessão, recibo confirmado e ausência de feedback cruzado.
+- E: a mutação de A termina no coordenador, mas o dispatch da tela ainda aguarda seu refresh. A conta B então pode legitimamente iniciar seu POST. Liberar o refresh antigo não pode limpar busy/estágio, alterar intenção nem publicar feedback em B. Não se cria concorrência artificial enquanto o coordenador ainda tem a mutação A em voo.
+- F: o botão Atualizar permanece desabilitado durante POST; um callback de refresh capturado antes da mutação, representando uma atualização já enfileirada, preserva busy e o bloqueio no mesmo contexto.
+- G: quatro casos 401/403 cobrem retorno à mesma estação com POST antigo e com refresh antigo, e preservam a prioridade de uma negativa atual. AUD-08/09/10 existentes foram mantidos.
+
+Gates independentes usam sinais explícitos com timeout diagnóstico; cleanup libera as promises, aguarda operações e preserva o erro primário. Não houve execução de testes, lint, typecheck ou build nesta implementação. A revisão sintática CJS e o parse JSX são inspeções estáticas, não aprovação funcional.
+
+#### ENV-VAL-01 — procedimento preparado para a próxima campanha
+
+O pacote instalado é tsx 4.23.15. `dist/temporary-directory-Du7LpLp9.mjs` calcula o diretório temporário no carregamento: usa geteuid quando disponível e `os.userInfo().username` no Windows. A CLI importa esse módulo e configura IPC/preflight; a exceção ocorre na avaliação do módulo, antes de comprovar criação de canal IPC. `dist/loader.mjs` e `dist/esm/index.mjs` também importam o mesmo módulo: usar `node --import tsx` não evita comprovadamente a causa.
+
+O comando oficial usa a descoberta explícita `test/unit/*.test.ts` e a configuração padrão `backend/tsconfig.json`; não usa tsconfig.test.json (este é do typecheck e do script de integração). O tsconfig padrão declara commonjs, experimentalDecorators e emitDecoratorMetadata. CLI/loader usam transformações esbuild; a presença de emitDecoratorMetadata no tsconfig não comprova emissão desses metadados pelo esbuild. Vários testes HTTP carregam reflect-metadata e `queue-entry-di.test.ts` valida a DI real Nest sem init/listen nem conexão ao banco. A equivalência de loader quanto a preflight, resolução, decorators e DI não foi comprovada nesta etapa; o loader não está recomendado como substituição autorizada do runner oficial. Não usar TypeScript nativo nem descoberta genérica de testes.
+
+Com Luna Medium, comparar primeiro dentro do Codex e em PowerShell normal, ambos em `C:\DoJob\ProgramacaoMobile\backend`, usando o mesmo executável Node e `NODE_ENV=test`:
+
+```powershell
+$env:NODE_ENV = 'test'
+(Get-Command node).Source
+node --version
+node -e "const os=require('node:os'); for(const [name,fn] of [['userInfo',()=>os.userInfo()],['tmpdir',()=>os.tmpdir()]]) { try { fn(); console.log(name+': ok'); } catch(e) { console.log(name+': '+e.code+' / '+(e.info?.syscall??'')); } }"
+'TEMP','TMP','USERPROFILE','NODE_OPTIONS' | ForEach-Object { '{0}: {1}' -f $_,[bool][Environment]::GetEnvironmentVariable($_) }
+node_modules/.bin/tsx.cmd --version
+```
+
+Registrar apenas sucesso/códigos e presença de variáveis. Se necessário, repetir a prova de escrita num arquivo exclusivo sob TEMP com try/finally e remover somente esse arquivo. Não imprimir os dados de userInfo nem variáveis completas. Comparar permissões e recursos do processo sem desabilitar sandbox, falsificar usuário, alterar dependências ou configurações permanentes. Se o runner oficial funcionar no PowerShell normal, priorizar ali `npm.cmd test` após conferir novamente o script e inventário unitário; registrar a saída integral e contagens. Se não funcionar, preservar o erro e investigar o contexto de identidade Windows/Node antes de nova campanha. Não concluir falta de RAM a partir do código ENOMEM.
+
+**Próxima validação do App (Luna Medium):** em app/, primeiro `node --test --test-reporter=spec --test-timeout=30000 --test-name-pattern='STAFF04-VAL-10' tests/staffStationOperational.test.cjs`, com limite externo e saída integral; depois suíte completa da Estação e as duas suítes de Entrada. Só ampliar para as outras focadas e regressões completas após resolver os bloqueios. Nenhum PostgreSQL, integração real, migration, seed, homologação ou publicação Git foi executado nesta rodada. Expo e aprovação formal continuam pendentes.
+
+
+#### ENV-VAL-01 — inventário estático do comando oficial
+
+Arquivos diretos correspondentes a test/unit/*.test.ts (77), sem executar ou importar os testes:
+
+```text
+test/unit/absent.test.ts
+test/unit/access-code.test.ts
+test/unit/admin-close.test.ts
+test/unit/admin-close-http.test.ts
+test/unit/admin-configuration.test.ts
+test/unit/admin-configuration-http.test.ts
+test/unit/admin-external-queue.test.ts
+test/unit/admin-external-queue-http.test.ts
+test/unit/admin-role-management.test.ts
+test/unit/admin-role-management-db-guard.test.ts
+test/unit/admin-role-management-http.test.ts
+test/unit/admin-role-management-service.test.ts
+test/unit/admin-schedule.test.ts
+test/unit/admin-schedule-http.test.ts
+test/unit/admin-two-factor.unit.test.ts
+test/unit/auth.unit.test.ts
+test/unit/auth-stable-session-http.test.ts
+test/unit/call-next.test.ts
+test/unit/complete.test.ts
+test/unit/email-verification.test.ts
+test/unit/email-verification-http.test.ts
+test/unit/email-verification-mailer.test.ts
+test/unit/evaluation-read.test.ts
+test/unit/evaluation-read-http.test.ts
+test/unit/evaluation-write.test.ts
+test/unit/evaluation-write-http.test.ts
+test/unit/event-availability.test.ts
+test/unit/event-closure.test.ts
+test/unit/event-closure-scheduler.test.ts
+test/unit/event-entry-window.test.ts
+test/unit/event-operational-capacity.test.ts
+test/unit/experience-queue-control.test.ts
+test/unit/experience-queue-control-http.test.ts
+test/unit/experiences.test.ts
+test/unit/experiences-http.test.ts
+test/unit/external-queue.test.ts
+test/unit/first-admin-bootstrap.test.ts
+test/unit/first-admin-bootstrap-db-guard.test.ts
+test/unit/join-eligibility.test.ts
+test/unit/join-idempotency.test.ts
+test/unit/k03-cleanup.unit.test.ts
+test/unit/mutation-session-http.test.ts
+test/unit/participant-admission-db-guard.test.ts
+test/unit/participant-admission-http.test.ts
+test/unit/participant-admission-precision.test.ts
+test/unit/participant-queue-http.test.ts
+test/unit/participation-lifecycle.test.ts
+test/unit/participation-lifecycle-http.test.ts
+test/unit/participations-read-db-guard.unit.test.ts
+test/unit/profile-games.unit.test.ts
+test/unit/profile-statistics.unit.test.ts
+test/unit/queue-entry.test.ts
+test/unit/queue-entry-di.test.ts
+test/unit/queue-state.test.ts
+test/unit/queue-withdrawal.test.ts
+test/unit/schema.test.ts
+test/unit/staff-a4-homolog-fixture.test.ts
+test/unit/staff-called-removal.test.ts
+test/unit/staff-called-removal-http.test.ts
+test/unit/staff-entry.test.ts
+test/unit/staff-entry-call.test.ts
+test/unit/staff-entry-http.test.ts
+test/unit/staff-history.test.ts
+test/unit/staff-history-http.test.ts
+test/unit/staff-homolog-fixture.test.ts
+test/unit/staff-http.test.ts
+test/unit/staff-idempotency-schema-preparation.test.ts
+test/unit/staff-queries.test.ts
+test/unit/staff-queries-http.test.ts
+test/unit/staff-station-operational.test.ts
+test/unit/staff-station-operational-http.test.ts
+test/unit/station-availability.test.ts
+test/unit/station-availability-http.test.ts
+test/unit/test-db-guard.unit.test.ts
+test/unit/totp-activation-crypto.test.ts
+test/unit/totp-activation-http.test.ts
+test/unit/totp-activation-service.test.ts
+```
+
+#### Integridade estática desta implementação
+
+node --check do teste CJS e parse JSX com @babel/parser instalado passaram, sem executar os módulos ou os cenários. git diff --check -- app backend docs retornou 0. git apply --stat e git apply --check --reverse da evidência STAFF-04 retornaram 0; reverse check das evidências complementares STAFF-03-typecheck-fix e PREMERGE-VAL-01 também retornou 0. O diff global retorna 2 por whitespace nas linhas de contexto do arquivo de patch acumulado; isso é distinto de erro de whitespace em fontes/documentação, que não foi detectado. Preservado o formato de patch emitido pelo Git, sem retirar linhas necessárias à aplicação. Avisos LF/CRLF permanecem registrados.
+
+O patch STAFF-04 contém apenas app/ e os dois documentos das tasks, excluindo backend e o próprio patch. STAFF-03-changes.diff permanece com SHA-256 9CB0BEE61A0CC5037A4F793E7E3FEECC13EE58EE2C72C2F9E5EB74E6B598B183; as duas evidências complementares não foram regeneradas. Branch/HEAD mantidos, índice sem staging. Arquivos desta rodada: StaffStationOperationalScreen.js, staffStationOperational.test.cjs, os dois documentos STAFF-03/04 e STAFF-04-changes.diff. Demais alterações acumuladas preservadas. Não houve nova validação funcional nem declaração de aprovação.
+### PREMERGE-VAL-02 — isolamento de TTL em evaluation-write-http
+
+Resultados manuais informados pelo responsável: PowerShell convencional, Node 24.15.0 e tsx 4.23.15; os.userInfo e tsx --version funcionaram. npm test teve 1.287/1.290 aprovados e três falhos: dois expiresAt em evaluation-write-http.test.ts e um em experiences-http.test.ts. A suíte de avaliação isolada teve 23/25 com TTL externo não igual a 60; definindo TTL=60 apenas no processo, passou 25/25. A suíte de experiências passou isolada 10/10; a causa de sua falha na regressão permanece indeterminada. Esses resultados são execução manual do responsável.
+
+A fixture HTTP agora guarda EVALUATION_IDEMPOTENCY_TTL_SECONDS antes do Nest before, força 60 para cumprir as duas asserções fixas de expiração e restaura o valor anterior no encerramento, inclusive quando inicialização ou fechamento falham. Se a variável estava ausente, é removida. O teste que altera valores inválidos continua restaurando seu próprio valor interno em finally. Asserções, policy real, rotas, identidade e DI foram preservados. Nenhum teste foi executado nesta implementação; revalidação manual pendente.
+
+Campanha App/QA: VAL-10 passou 10/10; Estação 21/21; Entry 36/36; EntryScreen 17/17; OperationsService 69/69. roleRoutingIntegration não forneceu resumo recuperável na execução paralela e permanece pendente; demais suítes e regressões completas não foram executadas. Não inferir aprovação do conjunto.
+
+Para o responsável revalidar backend em PowerShell convencional, na pasta backend, preservando a configuração original do processo para o primeiro caso:
+
+```powershell
+npm.cmd test -- --test-name-pattern="E08.11 HTTP submit|E08.11 HTTP edit|TTL de avaliação|DI Nest resolve"
+$env:EVALUATION_IDEMPOTENCY_TTL_SECONDS = '120'
+npx.cmd tsx --test test/unit/evaluation-write-http.test.ts
+Remove-Item Env:EVALUATION_IDEMPOTENCY_TTL_SECONDS
+```
+
+Para testar a variável ausente, remover somente no processo e executar a mesma suíte; atenção: o teste inválido restaura o estado que observou ao iniciar. Depois executar `npm.cmd run typecheck:test`, `npm.cmd run lint` e `npm.cmd test`. Antes, confirmar scripts e presença/ausência do TTL sem exibir segredos. A regressão completa já inclui experiências; se reaparecer a falha, guardar stdout/stderr, exit e stack antes de qualquer hipótese. Nenhum teste de integração PostgreSQL, migration ou seed é autorizado por estas instruções.
+
+### Consolidação final da campanha local — resultados informados em 27/11/2026
+
+**Backend — execução manual do responsável em PowerShell convencional, Node v24.15.0, tsx v4.23.15, NODE_ENV=test.** O Codex não executou estes comandos. PREMERGE-VAL-02: evaluation-write-http passou 25/25 com TTL externo original (3.565,8582 ms, exit 0) e 25/25 com TTL temporário 120 (3.253,6247 ms, exit 0); nenhuma falha, skip ou cancelamento, e a variável foi restaurada. TTL ausente após dotenv não foi testado. `typecheck:test`, lint e build passaram (build aprovado em campanha anterior, sem alterações posteriores de produção backend). `npm test`: 1.299/1.299, 0 falhas/ignorados/cancelados/todo, 25.715,3853 ms, exit 0. experiences-http passou seus dez casos isolada e integralmente; sete testes STAFF-03/AUD-02/AUD-07 passaram. A falha anterior em nível de arquivo não foi reproduzida; causa indeterminada.
+
+**App — quatro primeiras suítes executadas pelo Codex; demais resultados fornecidos pelo responsável.** VAL-10 isolada 10/10; Station 21/21; Entry 36/36; EntryScreen 17/17; OperationsService 69/69. O responsável informou roleRoutingIntegration 64/64 (47.270,4485 ms), staffPolling 6/6 (560,9309 ms), staffEventDiscovery 14/14 (3.186,9821 ms), staffDashboard 25/25 (669,4606 ms), staffRealNavigation 2/2 (1.377,0723 ms), staffBackground 1/1 (93,7623 ms), staffDemoState 22/22 (513,1905 ms) e participationService 13/13 (544,6068 ms). As 12 suítes somam 290/290 sem falhas, skips ou cancelamentos; a VAL-10 isolada não é contada de novo.
+
+O responsável informou regressão completa App via `npm test`: 995/995, sem falhas/ignorados/cancelados/todo, 69.242,5012 ms, exit 0. Informou QA independente `node run.cjs`: 51 PASS, exit 0; distribuição A 19, B 2, C 13, D 4, E 3, F 10. Não foi fornecida duração ou contagem adicional. Artefatos locais `qa/regression/artifacts/results.tap`, `results.jsonl` e `runner-stderr.txt` existem; os dois relatórios de resultados concordam em 51 casos aprovados e stderr tem zero bytes. Portanto, total das três regressões informadas: 2.345/2.345, sem duplicar os focados.
+
+**ENV-VAL-01:** o responsável confirmou que o runner oficial funcionou no PowerShell convencional; o erro ENOMEM do ambiente Codex não se reproduziu lá. A causa específica dentro do Codex permanece indeterminada. Resultados backend/App acima são atribuições do responsável, não execuções do Codex nesta consolidação. Avisos de `react-test-renderer`, updates fora de `act()` e normalização LF/CRLF são observações, não falhas funcionais.
+
+**Status:** campanha automatizada local aprovada conforme resultados disponíveis. Isso não declara homologação Expo nem aprovação formal de STAFF-03/04. Integração PostgreSQL, homologação visual/funcional e aprovação do responsável permanecem pendentes.
+
+### Estado individual dos achados STAFF-04 após a campanha — 27/11/2026
+
+Os históricos anteriores permanecem preservados. A regressão final do App (995/995) e o total das suítes focadas (290/290) não apresentaram falhas; a campanha não fornece um exit isolado para cada identificador abaixo. Resultados isolados explicitamente disponíveis permanecem registrados nas seções VAL correspondentes.
+
+| Registro | Estado final da validação automatizada local |
+|---|---|
+| STAFF04-AUD-01 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-02 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-03 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-04 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-05 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-06 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-07 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-08 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-09 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-AUD-10 | Sem falha na regressão App final; status isolado permanece conforme histórico. |
+| STAFF04-VAL-01 | Teste isolado aprovado (1/1), conforme histórico; regressão App final sem falhas. |
+| STAFF04-VAL-02 | Teste isolado e integração completa aprovados (64/64), conforme histórico; regressão App final sem falhas. |
+| STAFF04-VAL-03 | Cenário isolado, `staffEventDiscovery` (14/14) e `staffDashboard` (25/25) aprovados. |
+| STAFF04-VAL-04 | Cenário isolado e `staffOperationsService.integration` (69/69) aprovados. |
+| STAFF04-VAL-05 | Cenário isolado e `staffEntryControl` (36/36) aprovados. |
+| STAFF04-VAL-06 | Sem falha nas suítes finais; resultado isolado conforme histórico. |
+| STAFF04-VAL-07 | Sem falha nas suítes finais; resultado isolado conforme histórico. |
+| STAFF04-VAL-08 | Sem falha nas suítes finais; resultado isolado conforme histórico. |
+| STAFF04-VAL-09 | `staffEntryControl` 36/36 e `staffEntryControlScreen` 17/17 aprovados, conforme histórico. |
+| STAFF04-VAL-10 | Teste isolado 10/10 e `staffStationOperational` 21/21 aprovados, conforme histórico. |
+
+Esses status registram validação automatizada, sem declarar homologação Expo ou aprovação formal.
+
+### Preflight PostgreSQL STAFF-03 — 27/11/2026
+
+O preflight local foi **bloqueado antes de qualquer conexão**: as três URLs não existem no ambiente do processo; em `backend/.env` só foram encontradas `DATABASE_URL` e `DATABASE_DIRECT_URL`, com destinos não permitidos e diferentes entre si; `EVENTS_TEST_DATABASE_URL` está ausente. O serviço PostgreSQL do Windows está iniciado, mas não há listener em `127.0.0.1:55432`; o Docker daemon também não estava acessível. Nenhuma URL completa/credencial foi registrada, nenhuma consulta a PostgreSQL ou Neon ocorreu e nenhum serviço/container foi iniciado. A presença, identidade e permissões do schema não foram confirmadas.
+
+A inspeção estática confirma o guard de destino e autorização, a migration 0008 com constraints/índices/triggers da chamada externa, e a fixture com UUIDs aleatórios, mesma conexão para Drizzle e SQL, `BEGIN`/savepoints/rollback, sem `COMMIT`, verificação por conexão observadora e encerramento das conexões. Isso não substitui a confirmação do schema instalado. O roteiro de execução individual permanece preparado no documento STAFF-03; o teste funcional transacional segue sem autorização e não foi executado.
+
+### Recuperação do PostgreSQL e migration — atualização de 27/11/2026
+
+O responsável informou que recriou apenas o banco dedicado em PostgreSQL local (a instância consultada não continha esse banco; a causa da ausência não foi determinada) e confirmou sua identidade por uma consulta read-only. A tentativa posterior de preflight de migration havia parado em `CHECK_FAILED`; nenhuma migration foi executada. A possível divergência entre `inet_server_addr()::text` e `127.0.0.1` não foi comprovada. A configuração oficial usa `DATABASE_DIRECT_URL` antes de `DATABASE_URL`, importa dotenv e contém exatamente as oito migrations do journal local. O procedimento no documento STAFF-03 foi ajustado: cria arquivo dotenv temporário vazio e único, restaura-o/ambiente em `finally`, não define nem exige `STAFF03_POSTGRES_PROJECTION_TEST` (essa autorização é exclusiva da fixture futura), preserva a confirmação humana de migration e captura stdout/stderr com `2>&1` em PowerShell 5.1 e 7 sob preferências isoladas, sanitizando antes da exibição e lendo o exit code antes de processar a saída. O dotenv instalado é 16.6.1; nele a string `DOTENV_CONFIG_OVERRIDE=false` é truthy, e o arquivo vazio impede qualquer override de valores. O Codex não executou conexão, migrations, testes ou qualquer operação de banco; a aplicação das migrations e a integração PostgreSQL continuam pendentes.

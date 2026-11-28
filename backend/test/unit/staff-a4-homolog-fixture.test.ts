@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRequire } from "node:module";
 
-const fixture = require("../../scripts/prepare-staff-a4-homologation.cjs");
+const fixture = createRequire(__filename)("../../scripts/prepare-staff-a4-homologation.cjs");
 
 test("fixture A4 limita as contas e mantém Admin separado do Staff", async () => {
   assert.deepEqual(fixture.ACCOUNTS.map((account: { email: string }) => account.email), [

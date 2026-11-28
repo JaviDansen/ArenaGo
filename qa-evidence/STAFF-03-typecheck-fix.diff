@@ -1,0 +1,13 @@
+diff --git a/backend/test/integration/staff03-external-call-projection.integration.test.ts b/backend/test/integration/staff03-external-call-projection.integration.test.ts
+index f0c9e6d..2bbec1c 100644
+--- a/backend/test/integration/staff03-external-call-projection.integration.test.ts
++++ b/backend/test/integration/staff03-external-call-projection.integration.test.ts
+@@ -64,7 +64,7 @@ test("STAFF-03 PostgreSQL: projeção externalEntryCall integra ciclo FIFO, trig
+       "Migration 0008_external_entry_calls precisa estar aplicada no banco de validação.",
+     );
+ 
+-    const db = drizzle(client as unknown as ConstructorParameters<typeof drizzle>[0], { schema });
++    const db = drizzle(client, { schema });
+     const projectById = async (userId: string, participationId: string, at?: ReturnType<typeof sql>) => {
+       const rows = (await db.execute<ParticipationProjectionRow>(participationProjection(userId, participationId, at))).rows;
+       return rows.map((row) => publicParticipation(row));

@@ -308,7 +308,7 @@ export default function StaffStationOperationalScreen({
       setView((previous) => ({ ...previous, status: 'ready', data, pending, error: null, autoRecoverable: false }));
       return true;
     } catch (error) {
-      if (!same(initial, getContext())) return false;
+      if (visitAtStart !== visitIdRef.current || !same(initial, getContext())) return false;
       if (error?.status === 401 || error?.status === 403) {
         revokeStationAccess(error.status === 401 ? 'session' : 'denied', initial, null);
         return false;
@@ -440,6 +440,21 @@ export default function StaffStationOperationalScreen({
     acknowledging.current = false;
     autoAttempt.current = null;
     revokedKindRef.current = null;
+    // A nova visita não herda representação visual nem pending em memória.
+    // refresh relê a intenção persistida; não libera operações por este reset.
+    dialogRef.current = null;
+    setDialog(null);
+    setView({
+      scope: null,
+      status: 'loading',
+      data: null,
+      error: null,
+      autoRecoverable: false,
+      pending: null,
+      busy: false,
+      busyKind: null,
+      feedback: null,
+    });
     if (!liveRef.current.accessDenied) void refresh();
     return () => {
       mounted.current = false;
@@ -636,11 +651,12 @@ export default function StaffStationOperationalScreen({
       || !expected.receiptId
       || pending.receiptId !== expected.receiptId
     ) return;
+    const originVisitId = visitIdRef.current;
     setView((previous) => ({ ...previous, busy: true, busyKind: 'cancelling' }));
     try {
       if (pending.kind === 'reserved') await coordinator.cancelReserved(scope, expected.receiptId);
     } catch { /* A intenção permanece bloqueada; nova leitura mostra o estado persistido. */ }
-    if (same(scope, getContext())) {
+    if (mounted.current && originVisitId === visitIdRef.current && !revokedKindRef.current && same(scope, getContext())) {
       setView((previous) => ({ ...previous, busy: false, busyKind: null }));
       await refresh();
     }

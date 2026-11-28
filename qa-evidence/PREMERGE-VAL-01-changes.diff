@@ -1,0 +1,42 @@
+diff --git a/backend/src/events/admin-configuration.dto.ts b/backend/src/events/admin-configuration.dto.ts
+index 69adb3e..bd2f6e0 100644
+--- a/backend/src/events/admin-configuration.dto.ts
++++ b/backend/src/events/admin-configuration.dto.ts
+@@ -48,7 +48,8 @@ export const configurationQuery=z.object({limit:z.string().regex(/^[1-9]\d?$/).t
+   cursor:z.string().transform((value,ctx)=>{const cursor=decodeCursor(value);if(!cursor){ctx.addIssue({code:'custom',message:'Cursor inválido.'});return z.NEVER;}return cursor;}).optional(),
+   phase:effectivePhase.optional(),statusStored:z.enum(['scheduled','open','closing','closed']).optional(),
+   search:z.string().max(180).transform(value=>value.trim().replace(/\s+/gu,' '))
+-    .refine(value=>!/[\u0000-\u001f\u007f]/u.test(value)&&Array.from(value).every(c=>!(c.length===1&&c.charCodeAt(0)>=0xd800&&c.charCodeAt(0)<=0xdfff)),'Busca inválida.').optional(),
++    .refine(value=>Array.from(value).every(c=>c.charCodeAt(0)>=32&&c.charCodeAt(0)!==127
++      &&!(c.length===1&&c.charCodeAt(0)>=0xd800&&c.charCodeAt(0)<=0xdfff)),'Busca inválida.').optional(),
+   excludeClosed:z.enum(['true','false']).transform(value=>value==='true').optional()}).strict();
+ export type ConfigurationPage=z.infer<typeof configurationQuery>;
+ const precise=z.custom<string>(isPreciseInstant);
+diff --git a/backend/test/unit/staff-a4-homolog-fixture.test.ts b/backend/test/unit/staff-a4-homolog-fixture.test.ts
+index 96974d0..3f5fcbf 100644
+--- a/backend/test/unit/staff-a4-homolog-fixture.test.ts
++++ b/backend/test/unit/staff-a4-homolog-fixture.test.ts
+@@ -1,7 +1,8 @@
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
++import { createRequire } from "node:module";
+ 
+-const fixture = require("../../scripts/prepare-staff-a4-homologation.cjs");
++const fixture = createRequire(__filename)("../../scripts/prepare-staff-a4-homologation.cjs");
+ 
+ test("fixture A4 limita as contas e mantém Admin separado do Staff", async () => {
+   assert.deepEqual(fixture.ACCOUNTS.map((account: { email: string }) => account.email), [
+diff --git a/backend/test/unit/staff-homolog-fixture.test.ts b/backend/test/unit/staff-homolog-fixture.test.ts
+index 5630144..b58d245 100644
+--- a/backend/test/unit/staff-homolog-fixture.test.ts
++++ b/backend/test/unit/staff-homolog-fixture.test.ts
+@@ -1,7 +1,8 @@
+ import assert from "node:assert/strict";
+ import { test } from "node:test";
++import { createRequire } from "node:module";
+ 
+-const fixture = require("../../scripts/prepare-staff-homologation.cjs");
++const fixture = createRequire(__filename)("../../scripts/prepare-staff-homologation.cjs");
+ 
+ test("fixture exige test, --execute, terminal e ausência de redirecionadores", () => {
+   assert.doesNotThrow(() => fixture.validateLaunch({ NODE_ENV: "test" }, ["--execute"], true, true));

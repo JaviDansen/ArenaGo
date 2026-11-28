@@ -392,6 +392,8 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
   const runtime = createUiRuntime(jsx);
   const { react: React, createNativeStackNavigator } = runtime;
   const pollingRegistrations = [];
+  const activePollingRegistrations = new Map();
+  let nextPollingRegistrationId = 0;
   let authState = initialAuth;
 
   const eventsSvc = loadModule('services/staffEventsService.js', require).exports;
@@ -489,6 +491,13 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
       return {
         useStaffPolling(enabled, read, intervalMs, scope) {
           pollingRegistrations.push({ enabled, read, intervalMs, scope });
+          const registrationId = React.useRef(null);
+          if (registrationId.current === null) registrationId.current = ++nextPollingRegistrationId;
+          React.useEffect(() => {
+            const registration = { id: registrationId.current, enabled, read, intervalMs, scope };
+            activePollingRegistrations.set(registration.id, registration);
+            return () => activePollingRegistrations.delete(registration.id);
+          }, [enabled, read, intervalMs, scope]);
         },
       };
     }
@@ -523,6 +532,7 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
 
   return {
     pollingRegistrations,
+    activePollingRegistrations,
     assertHeader(actionLabel) {
       const headers = findAllByType('View').filter((node) => node.props.testID === 'staff-live-header');
       assert.equal(headers.length, 1);
@@ -548,11 +558,10 @@ function createStaffUiHarness({ initialAuth, onGet, onLogout }) {
       return null;
     },
     latestEventsPolling() {
-      for (let i = pollingRegistrations.length - 1; i >= 0; i -= 1) {
-        const reg = pollingRegistrations[i];
-        if (reg.intervalMs === 60000 && reg.scope === undefined) return reg;
-      }
-      return null;
+      const active = [...activePollingRegistrations.values()].filter((reg) => reg.intervalMs === 60000);
+      return active.find((reg) => String(reg.scope).includes(':events:'))
+        ?? active.find((reg) => reg.scope === undefined)
+        ?? null;
     },
     async triggerEventsPolling() {
       const reg = this.latestEventsPolling();
@@ -1388,12 +1397,17 @@ test('STAFF04-AUD-02: negativa 401/403 concorrente com refresh bloqueia 200 atra
 
     // 403 em polling de eventos enquanto o StaffEventDashboard está aberto limpa seleção e telas filhas
     eventsMode = '403';
+    const panelPolling = [...rig.activePollingRegistrations.values()]
+      .filter((reg) => reg.intervalMs === 60000 && String(reg.scope).includes(':events:'));
+    assert.equal(panelPolling.length, 1, 'Painel montado possui um polling atual de eventos');
+    assert.equal(panelPolling[0].enabled, true);
     await rig.triggerEventsPolling();
     assert.ok(!rig.hasText('Just Dance'), 'experiências protegidas removidas após perda de acesso aos eventos');
     assert.ok(!rig.hasText('Estação 01'), 'estações protegidas removidas após perda de acesso aos eventos');
     assert.ok(!rig.hasText('Controle de Entrada'));
     assert.ok(rig.hasText('Acesso Staff indisponível para esta conta. Volte aos eventos ou procure o responsável.'));
-    assert.equal(rig.latestEventsPolling()?.enabled, false);
+    assert.equal(rig.activePollingRegistrations.size, 0,
+      'após 403, o polling do Painel desmontado não permanece acionável');
 
     // Ao voltar e tentar atualização manual com 503, indicador afirma recuperação manual (sem 60s automático)
     await rig.press('Voltar aos eventos');

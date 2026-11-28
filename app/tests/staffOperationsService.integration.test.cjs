@@ -1067,6 +1067,21 @@ test('STAFF04-AUD-03: falha transitória na pré-condição preserva phase preco
 test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/clear, reage a falha local e trava reserve/dispatch concorrente', async () => {
   const { createStaffOperationsCoordinator } = await service;
   const defer = () => { let resolve, reject; const promise = new Promise((y, n) => { resolve = y; reject = n; }); return { promise, resolve, reject }; };
+  const observeCall = (promise) => promise.then((value) => ({ value }), (error) => ({ error }));
+  const waitForStage = async (signal, settled, label) => {
+    let timer;
+    const outcome = await Promise.race([
+      signal.promise.then(() => ({ reached: true })),
+      settled.then((result) => ({ settled: result })),
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), 3000); }),
+    ]);
+    clearTimeout(timer);
+    if (outcome.timeout) throw new Error(`Timeout aguardando ${label}.`);
+    if (outcome.settled) {
+      if (outcome.settled.error) throw new Error(`Operação falhou antes de ${label}.`, { cause: outcome.settled.error });
+      throw new Error(`Operação terminou antes de ${label}: ${JSON.stringify(outcome.settled.value)}.`);
+    }
+  };
 
   // 1. 401 e 403 em POST disparam onAuthError antes de recordTerminal concluir, preservando .receipt e clear() final
   for (const [httpStatus, code, expectedKind] of [[401, 'SESSION_REVOKED', 'session'], [403, 'STAFF_EVENT_FORBIDDEN', 'denied']]) {
@@ -1075,11 +1090,14 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
     const baseSetItem = rig.values;
     const recordDeferred = defer();
     const clearDeferred = defer();
+    const recordStarted = defer();
+    const clearStarted = defer();
     let locked = false;
     const instrumentedStorage = {
       ...rig.storage,
       async recordTerminal(u, k, outcome) {
         events.push('recordTerminal:start');
+        recordStarted.resolve();
         await recordDeferred.promise;
         const r = await rig.storage.recordTerminal(u, k, outcome);
         events.push('recordTerminal:done');
@@ -1087,6 +1105,7 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
       },
       async clear(u, k) {
         events.push('clear:start');
+        clearStarted.resolve();
         await clearDeferred.promise;
         await rig.storage.clear(u, k);
         events.push('clear:done');
@@ -1109,22 +1128,29 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
       },
     });
 
-    const pCall = manager.callNext(context, experienceId, stationId);
-    for (let i = 0; i < 6 && !events.includes('recordTerminal:start'); i += 1) await Promise.resolve();
-    assert.deepEqual(events.slice(0, 3), [`post:${httpStatus}`, `onAuthError:${expectedKind}`, 'recordTerminal:start']);
-    assert.equal(locked, true, 'trava síncrona ativada antes do fim de recordTerminal');
+    const settled = observeCall(manager.callNext(context, experienceId, stationId));
+    try {
+      await waitForStage(recordStarted, settled, 'recordTerminal:start');
+      assert.deepEqual(events.slice(0, 3), [`post:${httpStatus}`, `onAuthError:${expectedKind}`, 'recordTerminal:start']);
+      assert.equal(locked, true, 'trava síncrona ativada antes do fim de recordTerminal');
 
-    recordDeferred.resolve();
-    for (let i = 0; i < 6 && !events.includes('clear:start'); i += 1) await Promise.resolve();
-    assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}.receipt`));
-    assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}`), 'primária ainda presente enquanto clear pende');
+      recordDeferred.resolve();
+      await waitForStage(clearStarted, settled, 'clear:start');
+      assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}.receipt`));
+      assert.ok(baseSetItem.has(`arenago.staff.operation.${userId}`), 'primária ainda presente enquanto clear pende');
 
-    clearDeferred.resolve();
-    const result = await pCall;
-    assert.equal(result.kind, 'rejected');
-    assert.equal(result.status, httpStatus);
-    assert.equal(baseSetItem.has(`arenago.staff.operation.${userId}`), false, 'primária limpa após clear');
-    assert.equal(JSON.parse(baseSetItem.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, httpStatus);
+      clearDeferred.resolve();
+      const resultOutcome = await settled;
+      if (resultOutcome.error) throw resultOutcome.error;
+      const result = resultOutcome.value;
+      assert.equal(result.kind, 'rejected');
+      assert.equal(result.status, httpStatus);
+      assert.equal(baseSetItem.has(`arenago.staff.operation.${userId}`), false, 'primária limpa após clear');
+      assert.equal(JSON.parse(baseSetItem.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, httpStatus);
+    } finally {
+      recordDeferred.resolve();
+      clearDeferred.resolve();
+    }
   }
 
   // 2. Recibo gravado + falha de clear() retorna rejected_cleanup_pending sem perder .receipt e mantendo onAuthError prévio
@@ -1153,6 +1179,7 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
   {
     const rig = secureStaffRig();
     const reserveGate = defer();
+    const reserveStarted = defer();
     let current = true;
     let dispatchCalled = 0;
     let posts = 0;
@@ -1165,6 +1192,7 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
         ...rig.storage,
         async reserve(intent) {
           const r = await rig.storage.reserve(intent);
+          reserveStarted.resolve();
           await reserveGate.promise;
           return r;
         },
@@ -1174,19 +1202,27 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
       createKey: () => key,
     });
     const pCall = manager.callNext(context, experienceId, stationId);
-    await new Promise((r) => setTimeout(r, 10));
-    current = false;
-    reserveGate.resolve();
-    assert.equal((await pCall).kind, 'stale');
-    assert.equal(dispatchCalled, 0);
-    assert.equal(posts, 0);
-    assert.equal(rig.values.has(`arenago.staff.operation.${userId}`), false);
+    const settled = observeCall(pCall);
+    try {
+      await waitForStage(reserveStarted, settled, 'reserve()');
+      current = false;
+      reserveGate.resolve();
+      const result = await settled;
+      if (result.error) throw result.error;
+      assert.equal(result.value.kind, 'stale');
+      assert.equal(dispatchCalled, 0);
+      assert.equal(posts, 0);
+      assert.equal(rig.values.has(`arenago.staff.operation.${userId}`), false);
+    } finally {
+      reserveGate.resolve();
+    }
   }
 
   // 4. GET 401/403 concorrente durante dispatch() preserva dispatching de forma conservadora e aborta POST
   {
     const rig = secureStaffRig();
     const dispatchGate = defer();
+    const dispatchStarted = defer();
     let current = true;
     let posts = 0;
     const manager = createStaffOperationsCoordinator({
@@ -1198,6 +1234,7 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
         ...rig.storage,
         async dispatch(u, k) {
           const ok = await rig.storage.dispatch(u, k);
+          dispatchStarted.resolve();
           await dispatchGate.promise;
           return ok;
         },
@@ -1206,18 +1243,26 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
       createKey: () => key,
     });
     const pCall = manager.callNext(context, experienceId, stationId);
-    await new Promise((r) => setTimeout(r, 10));
-    current = false;
-    dispatchGate.resolve();
-    assert.equal((await pCall).kind, 'stale');
-    assert.equal(posts, 0);
-    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}`)).phase, 'dispatching');
+    const settled = observeCall(pCall);
+    try {
+      await waitForStage(dispatchStarted, settled, 'dispatch()');
+      current = false;
+      dispatchGate.resolve();
+      const result = await settled;
+      if (result.error) throw result.error;
+      assert.equal(result.value.kind, 'stale');
+      assert.equal(posts, 0);
+      assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}`)).phase, 'dispatching');
+    } finally {
+      dispatchGate.resolve();
+    }
   }
 
   // 5. Troca de conta durante recordTerminal/clear após 403 ainda grava .receipt para conta antiga sem bloquear nova conta
   {
     const rig = secureStaffRig();
     const recordDeferred = defer();
+    const recordStarted = defer();
     let activeUser = userId;
     const otherUser = '20000000-0000-4000-8000-000000000002';
     const keyUser2 = '50000000-0000-4000-8000-000000000002';
@@ -1225,7 +1270,10 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
     const storageUser1 = {
       ...rig.storage,
       async recordTerminal(u, k, o) {
-        if (u === userId) await recordDeferred.promise;
+        if (u === userId) {
+          recordStarted.resolve();
+          await recordDeferred.promise;
+        }
         return rig.storage.recordTerminal(u, k, o);
       },
     };
@@ -1240,24 +1288,31 @@ test('STAFF04-AUD-04 (coordenador): onAuthError dispara antes de recordTerminal/
       onAuthError: () => { activeUser = otherUser; },
     });
     const pUser1 = m1.callNext(context, experienceId, stationId);
-    await new Promise((r) => setTimeout(r, 10));
-    const m2 = createStaffOperationsCoordinator({
-      client: {
-        async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
-        async post() { postCount += 1; return called(); },
-      },
-      storage: rig.storage,
-      isCurrent: (c) => c.userId === activeUser,
-      createKey: () => keyUser2,
-    });
-    const resUser2 = await m2.callNext({ ...context, userId: otherUser }, experienceId, stationId);
-    assert.equal(resUser2.kind, 'confirmed');
-    recordDeferred.resolve();
-    const resUser1 = await pUser1;
-    assert.equal(resUser1.status, 403);
-    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, 403);
-    assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${otherUser}.receipt`)).outcome.kind, 'confirmed');
-    assert.equal(postCount, 2);
+    const settledUser1 = observeCall(pUser1);
+    try {
+      await waitForStage(recordStarted, settledUser1, 'recordTerminal() da conta original');
+      const m2 = createStaffOperationsCoordinator({
+        client: {
+          async get(url) { return url.endsWith('/stations') ? stations() : queue(); },
+          async post() { postCount += 1; return called(); },
+        },
+        storage: rig.storage,
+        isCurrent: (c) => c.userId === activeUser,
+        createKey: () => keyUser2,
+      });
+      const resUser2 = await m2.callNext({ ...context, userId: otherUser }, experienceId, stationId);
+      assert.equal(resUser2.kind, 'confirmed');
+      recordDeferred.resolve();
+      const resultUser1 = await settledUser1;
+      if (resultUser1.error) throw resultUser1.error;
+      const resUser1 = resultUser1.value;
+      assert.equal(resUser1.status, 403);
+      assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${userId}.receipt`)).outcome.status, 403);
+      assert.equal(JSON.parse(rig.values.get(`arenago.staff.operation.${otherUser}.receipt`)).outcome.kind, 'confirmed');
+      assert.equal(postCount, 2);
+    } finally {
+      recordDeferred.resolve();
+    }
   }
 });
 

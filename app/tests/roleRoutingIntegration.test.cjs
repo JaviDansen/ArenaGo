@@ -4175,8 +4175,9 @@ test('STAFF04-AUD-01/02/04/05 integração ponta a ponta: poll em voo sem sobrep
 
     await app.press('Concluir experiência');
     assert.equal(app.modals()[0].props.visible, true);
-    await app.press('Cancelar');
-    assert.equal(app.modals().length, 0);
+    await app.press('CANCELAR OPERAÇÃO');
+    assert.equal(app.modals()[0].props.visible, false);
+    assert.equal(stationPending.serviceSessionId, serviceSessId, 'cancelamento não executa mutação');
 
     await app.tickTimers(5000);
     assert.equal(opGets, 2, 'alternância via modal durante voo pendente não duplica timer nem gera GET paralelo');
@@ -4485,7 +4486,9 @@ test('STAFF04-AUD-06 + AUD-04 (integrado): agendador único de 60s em todas as s
           if (deferNextEvents) {
             deferNextEvents = false;
             return new Promise((done) => {
-              slowEventsResolve = () => done({ events: list });
+              slowEventsResolve = (effectivePhase = slowPhase) => done({ events: activeAccount === 'A'
+                ? [{ ...eventA, effectivePhase }, eventB]
+                : [eventB] });
             });
           }
           return { events: list };
@@ -4555,6 +4558,7 @@ test('STAFF04-AUD-06 + AUD-04 (integrado): agendador único de 60s em todas as s
     await app.mount();
     await app.act(() => app.manager.login({ email: staffA.email, password: 'ficticia' }));
     await app.press(`Selecionar evento ${eventA.name}`);
+    assert.ok(app.hasExactText('Status: Aberto'));
 
     // 1 e 2: ciclo normal de 60s executa exatamente 1 GET /staff/events por ciclo (sem duplicação nem redundância sequencial)
     assert.ok(app.hasExactText('Eventos e fase: atualização automática ativa · a cada 60s'));
@@ -4572,12 +4576,11 @@ test('STAFF04-AUD-06 + AUD-04 (integrado): agendador único de 60s em todas as s
     assert.equal(eventsGets, before + 1);
     await app.tickTimers(60000);
     assert.equal(eventsGets, before + 1, 'resposta lenta bloqueia novo ciclo concorrente de 60s');
-    slowPhase = 'closing';
     await app.act(async () => {
-      slowEventsResolve();
+      slowEventsResolve('closing');
       await new Promise((resolve) => origSetTimeout(resolve, 0));
     });
-    assert.ok(app.hasText('Status: Encerrando'));
+    assert.ok(app.hasExactText('Status: Em encerramento'));
     before = eventsGets;
     await app.tickTimers(60000);
     assert.equal(eventsGets, before + 1);

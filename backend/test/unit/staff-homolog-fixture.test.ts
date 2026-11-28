@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createRequire } from "node:module";
 
-const fixture = require("../../scripts/prepare-staff-homologation.cjs");
+const fixture = createRequire(__filename)("../../scripts/prepare-staff-homologation.cjs");
 
 test("fixture exige test, --execute, terminal e ausência de redirecionadores", () => {
   assert.doesNotThrow(() => fixture.validateLaunch({ NODE_ENV: "test" }, ["--execute"], true, true));

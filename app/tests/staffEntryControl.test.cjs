@@ -68,6 +68,11 @@ test('leitura silenciosa atualiza FIFO sem POST e conserva dados durante falha t
 });
 test('contrato valida identidade mínima, FIFO, contagem e resposta da operação', () => {
   assert.equal(api.parseEntryState(body(), id(3)).waiting[0].displayName, 'Ana');
+  assert.throws(() => api.parseEntryState({
+    ...body(),
+    pendingCall: { id: id(60), participationId: id(4), displayName: 'Ana', calledAt: at },
+    canCall: false, canConfirm: true, canMarkAbsent: true, canRemove: true,
+  }, id(3)), /Resposta inválida/);
   for (const patch of [{ waitingCount: 3 }, { observedAt: '2026-11-10' }, { waiting: [...body().waiting].reverse() },
     { waiting: [body().waiting[0], { ...body().waiting[1], participationId: id(4) }] }]) {
     assert.throws(() => api.parseEntryState({ ...body(), ...patch }, id(3)));
@@ -102,11 +107,28 @@ test('timeout e reinício com novo adaptador preservam dispatching sem outro POS
 for (const phase of ['reserved', 'dispatching']) for (const mode of ['before', 'after']) {
   test(`persistência ${phase} falha ${mode} sem envio`, async () => {
     const persisted = adapter(new Map(), { phase, mode }), r = await rig({ persisted });
-    await r.store.mutate({ kind: 'call' });
-    assert.equal(r.calls.some(c => c.method === 'POST'), false);
+    assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'storage_error');
+    assert.equal(r.calls.some(c => ['POST', 'PATCH'].includes(c.method)), false);
+    assert.equal(r.store.getSnapshot().storageError, false, 'refresh recupera disponibilidade local');
+    assert.equal(r.store.getSnapshot().feedback, 'storage', 'feedback histórico sobrevive à recuperação');
+    await r.store.poll();
+    await r.store.refresh();
+    assert.equal(r.store.getSnapshot().feedback, 'storage');
     const pending = r.store.getSnapshot().pending;
+    if (phase === 'reserved' && mode === 'before') {
+      assert.equal(pending, null);
+      persisted.fault.phase = null;
+      assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'confirmed');
+      assert.equal(r.store.getSnapshot().feedback, 'confirmed');
+      assert.equal(r.calls.find(c => c.method === 'POST').opts.headers['Idempotency-Key'], id(21));
+    } else {
+      assert.ok(pending);
+      assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'blocked');
+    }
     if (phase === 'dispatching' && mode === 'after') assert.equal(pending.phase, 'dispatching');
     if (pending?.phase === 'reserved') { persisted.fault.phase = null; await r.store.cancelReserved(pending.key); assert.equal(r.store.getSnapshot().pending, null); }
+    r.setContext({ ...context, sessionId: id(98), epoch: 2 });
+    assert.equal(r.store.getSnapshot().feedback, null);
   });
 }
 for (const mode of ['before', 'after']) test(`confirmação não perdida em memória após falha ${mode} do recibo`, async () => {
@@ -496,65 +518,131 @@ test('STAFF04-AUD-04: 403 em mutação com falha SecureStore mantém acesso bloq
   assert.equal((await r.store.mutate({ kind: 'call' })).kind, 'blocked');
 });
 
-test('STAFF04-AUD-04: 404 RESOURCE_NOT_FOUND na resolução de chamada mantém evento válido com GET 200 e só revoga se GET confirmar 403/404', async () => {
+test('STAFF04-AUD-04: 404 RESOURCE_NOT_FOUND na resolução de chamada mantém evento válido com GET 200 e só revoga se GET contextual confirmar 403/404', async () => {
   const activeCall = { id: id(60), participationId: id(4), displayName: 'Ana', calledAt: at };
   const stateWithCall = {
     ...body(),
     pendingCall: activeCall,
+    waitingCount: 1,
+    waiting: [{ participationId: id(5), displayName: 'Bia', position: 1 }],
     canCall: false,
     canConfirm: true,
     canMarkAbsent: true,
     canRemove: true,
   };
-  let nextGetMode = 'resolved_200';
-  const persisted = adapter();
-  const client = {
-    get: async () => {
-      if (nextGetMode === 'forbidden_403') throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
-      if (nextGetMode === 'resolved_200') {
-        return { ...body(), pendingCall: null, waitingCount: 0, waiting: [], canCall: false };
-      }
-      return stateWithCall;
-    },
-    post: async () => {
-      throw Object.assign(new Error('not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
-    },
-    patch: async () => ({ eventId: context.eventId, externalQueueEnabled: true, releasedCount: 0, changedAt: at }),
+  const resolvedState = { ...body(), pendingCall: null, waitingCount: 0, waiting: [], canCall: false };
+  const makeScenario = (scenarioContext, persisted) => {
+    const scenario = { getMode: 'initial', modeAfterPost: 'resolved_200', posts: [] };
+    const client = {
+      get: async () => {
+        if (scenario.getMode === 'forbidden_403') {
+          throw Object.assign(new Error('forbidden'), { status: 403, code: 'STAFF_EVENT_FORBIDDEN' });
+        }
+        if (scenario.getMode === 'missing_404') {
+          throw Object.assign(new Error('event missing'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
+        }
+        return scenario.getMode === 'resolved_200' ? resolvedState : stateWithCall;
+      },
+      post: async (path, payload, options) => {
+        scenario.posts.push({ path, payload, options });
+        scenario.getMode = scenario.modeAfterPost;
+        throw Object.assign(new Error('not found'), { status: 404, code: 'RESOURCE_NOT_FOUND' });
+      },
+    };
+    return {
+      scenario,
+      store: api.createStaffEntryStore({
+        client,
+        storage: persisted.storage,
+        getContext: () => scenarioContext,
+        createKey: (() => { let nextKey = scenarioContext === context ? 30 : 32; return () => id(nextKey++); })(),
+      }),
+      persisted,
+    };
   };
 
-  // Caso 1: chamada já foi resolvida fora da sessão, mas evento continua válido (GET 200)
-  nextGetMode = 'initial';
-  const store = api.createStaffEntryStore({
-    client,
-    storage: persisted.storage,
-    getContext: () => context,
-    createKey: () => id(30),
-  });
-  store.setContext(context);
-  await store.refresh();
-  const resValid = await store.mutate({ kind: 'confirm_call', callId: id(60) });
+  const persisted = adapter();
+  const first = makeScenario(context, persisted);
+  first.store.setContext(context);
+  await first.store.refresh();
+  const initial = first.store.getSnapshot();
+  assert.equal(initial.status, 'ready');
+  assert.equal(initial.error, null);
+  assert.equal(initial.data.pendingCall.id, activeCall.id);
+  assert.equal(initial.data.pendingCall.participationId, activeCall.participationId);
+  assert.equal(initial.data.waiting.some((row) => row.participationId === activeCall.participationId), false);
+  assert.equal(initial.data.waitingCount, 1);
+  assert.deepEqual(initial.data.waiting.map((row) => row.position), [1]);
+  assert.equal(initial.data.canConfirm, true);
+
+  // Caso A: POST 404 seguido da revalidação contextual GET 200.
+  first.scenario.modeAfterPost = 'resolved_200';
+  const resValid = await first.store.mutate({ kind: 'confirm_call', callId: activeCall.id });
   assert.equal(resValid.kind, 'rejected');
   assert.equal(resValid.status, 404);
-  assert.equal(resValid.code, 'RESOURCE_NOT_FOUND');
-  assert.notEqual(store.getSnapshot().error, 'denied', '404 da chamada não presume revogação imediata do evento');
-  nextGetMode = 'resolved_200';
-  await store.refresh();
-  assert.equal(store.getSnapshot().status, 'ready');
-  assert.equal(store.getSnapshot().error, null);
+  assert.equal(first.scenario.posts.length, 1);
+  assert.equal(first.scenario.posts[0].options.headers['Idempotency-Key'], id(30));
+  const pendingA = first.store.getSnapshot().pending;
+  assert.equal(pendingA.phase, 'terminal');
+  assert.equal(pendingA.outcome.kind, 'rejected');
+  assert.equal(pendingA.outcome.status, 404);
+  assert.equal(pendingA.outcome.code, 'RESOURCE_NOT_FOUND');
+  const persistedA = await persisted.storage.get(context.userId);
+  assert.equal(persistedA.phase, 'terminal');
+  assert.equal(persistedA.key, id(30));
+  assert.deepEqual(persistedA.outcome, pendingA.outcome);
+  assert.equal(first.store.getSnapshot().status, 'ready');
+  assert.equal(first.store.getSnapshot().error, null);
+  assert.deepEqual(first.store.getSnapshot().data, api.parseEntryState(resolvedState, context.eventId));
 
-  // Caso 2: GET posterior confirma 403 -> evento é efetivamente revogado
-  nextGetMode = 'initial';
-  await store.acknowledge(id(30));
-  await store.refresh();
-  const resRevoked = await store.mutate({ kind: 'confirm_call', callId: id(60) });
-  assert.equal(resRevoked.status, 404);
-  nextGetMode = 'forbidden_403';
-  await store.refresh();
-  assert.equal(store.getSnapshot().status, 'error');
-  assert.equal(store.getSnapshot().error, 'denied');
-  assert.equal(store.getSnapshot().data, null);
+  // O primeiro recibo é reconhecido antes de uma nova intenção com chave distinta.
+  assert.equal((await first.store.acknowledge(id(30))).kind, 'done');
+  assert.equal((await persisted.storage.get(context.userId)).phase, 'acknowledged');
+  first.scenario.getMode = 'initial';
+  await first.store.refresh();
+  assert.equal(first.store.getSnapshot().status, 'ready');
+  assert.equal(first.store.getSnapshot().data.canConfirm, true);
+
+  // Caso B: segundo POST 404 seguido de GET 403 bloqueia o contexto sem perder o recibo.
+  first.scenario.modeAfterPost = 'forbidden_403';
+  const resForbidden = await first.store.mutate({ kind: 'confirm_call', callId: activeCall.id });
+  assert.equal(resForbidden.kind, 'rejected');
+  assert.equal(resForbidden.status, 404);
+  assert.equal(first.scenario.posts.length, 2);
+  assert.equal(first.scenario.posts[1].options.headers['Idempotency-Key'], id(31));
+  const pendingB = first.store.getSnapshot().pending;
+  assert.equal(pendingB.key, id(31));
+  assert.equal(pendingB.phase, 'terminal');
+  assert.equal(pendingB.outcome.code, 'RESOURCE_NOT_FOUND');
+  const persistedB = await persisted.storage.get(context.userId);
+  assert.equal(persistedB.key, id(31));
+  assert.equal(persistedB.phase, 'terminal');
+  assert.equal(persistedB.outcome.status, 404);
+  assert.equal(first.store.getSnapshot().status, 'error');
+  assert.equal(first.store.getSnapshot().error, 'denied');
+  assert.equal(first.store.getSnapshot().data, null);
+  assert.equal((await first.store.mutate({ kind: 'confirm_call', callId: activeCall.id })).kind, 'blocked');
+
+  // Caso C: fixture independente, POST 404 seguido de GET 404 contextual também bloqueia com segurança.
+  const context404 = { ...context, sessionId: id(10) };
+  const third = makeScenario(context404, adapter());
+  third.store.setContext(context404);
+  await third.store.refresh();
+  assert.equal(third.store.getSnapshot().status, 'ready');
+  third.scenario.modeAfterPost = 'missing_404';
+  const resMissing = await third.store.mutate({ kind: 'confirm_call', callId: activeCall.id });
+  assert.equal(resMissing.kind, 'rejected');
+  assert.equal(resMissing.status, 404);
+  assert.equal(third.scenario.posts.length, 1);
+  assert.equal(third.scenario.posts[0].options.headers['Idempotency-Key'], id(32));
+  const persistedC = await third.persisted.storage.get(context404.userId);
+  assert.equal(persistedC.phase, 'terminal');
+  assert.equal(persistedC.outcome.code, 'RESOURCE_NOT_FOUND');
+  assert.equal(third.store.getSnapshot().status, 'error');
+  assert.equal(third.store.getSnapshot().error, 'denied');
+  assert.equal(third.store.getSnapshot().data, null);
+  assert.equal((await third.store.mutate({ kind: 'confirm_call', callId: activeCall.id })).kind, 'blocked');
 });
-
 test('STAFF04-AUD-04 e AUD-03 (store): GET 401/403 concorrente durante reserve/dispatch bloqueia POST, isola busyKind por contexto e grava finish lento', async () => {
   // 1. Troca de contexto enquanto acknowledge está em voo não limpa busyKind do novo contexto
   {

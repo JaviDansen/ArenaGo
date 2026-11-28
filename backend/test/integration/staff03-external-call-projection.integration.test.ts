@@ -64,7 +64,7 @@ test("STAFF-03 PostgreSQL: projeção externalEntryCall integra ciclo FIFO, trig
       "Migration 0008_external_entry_calls precisa estar aplicada no banco de validação.",
     );
 
-    const db = drizzle(client as unknown as ConstructorParameters<typeof drizzle>[0], { schema });
+    const db = drizzle(client, { schema });
     const projectById = async (userId: string, participationId: string, at?: ReturnType<typeof sql>) => {
       const rows = (await db.execute<ParticipationProjectionRow>(participationProjection(userId, participationId, at))).rows;
       return rows.map((row) => publicParticipation(row));

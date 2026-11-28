@@ -38,6 +38,15 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+const waitForSignal = async (signal, label) => {
+  let timer;
+  try {
+    await Promise.race([
+      signal.promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timeout aguardando ${label}.`)), 3000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+};
 
 // ============================================================================
 // 1. Testes unitários puros do indicador seguro de tempo desde a chamada
@@ -706,6 +715,7 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
   const slot = `arenago.staff.operation.${USER_1}`;
   let getMode = 'timeout';
   let postDeferred = null;
+  let postStarted = null;
   let postMode = 'call';
   let postCalls = 0;
 
@@ -771,6 +781,7 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
       if (postDeferred) {
         const currentDeferred = postDeferred;
         postDeferred = null;
+        postStarted?.resolve();
         return currentDeferred.promise;
       }
       if (postMode === 'call') {
@@ -852,11 +863,15 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
     await h.press('Atualizar atendimento');
     assert.equal(h.isDisabled('Chamar próximo'), false);
 
-    postDeferred = deferred();
+    const callPostGate = deferred();
+    const callPostStarted = deferred();
+    postDeferred = callPostGate;
+    postStarted = callPostStarted;
     const callHandler = h.handler('Chamar próximo');
     let inflightCall;
     await h.act(async () => {
       inflightCall = callHandler();
+      await waitForSignal(callPostStarted, 'POST de chamada da Estação');
     });
     assert.ok(h.hasExactText('Processando operação no servidor...'));
     assert.equal(h.getPolling().enabled, false, 'polling pausado durante operação em andamento');
@@ -866,7 +881,7 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
     assert.equal(postCalls, 1);
     activeState = calledState;
     await h.act(async () => {
-      postDeferred.resolve({
+      callPostGate.resolve({
         serviceSession: {
           id: SESS_1,
           queueEntryId: ENTRY_1,
@@ -878,6 +893,7 @@ test('STAFF-04 tela Estação: recuperação automática após erro inicial (pre
       });
       await inflightCall;
     });
+    postStarted = null;
     await flush();
     assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
 
@@ -1027,8 +1043,10 @@ test('STAFF04-AUD-01: poll() em voo bloqueia reentrada, descarta resposta atrasa
       await h.getPolling().read();
     });
     assert.equal(opGets, getsDuringModal, 'poll() recusa execução enquanto modal estiver aberto');
-    await h.press('Cancelar');
-    assert.equal(h.modals().length, 0);
+    const confirmModal = h.modals()[0];
+    await h.press('CANCELAR OPERAÇÃO');
+    assert.equal(h.modals().length, 1);
+    assert.equal(confirmModal.props.visible, false);
     assert.equal(h.getPolling().enabled, true);
 
     // 3. Negativa 403 em poll em voo não é descartada mesmo se refresh manual concorrente iniciar antes da resposta
@@ -1059,7 +1077,9 @@ test('STAFF04-AUD-01: poll() em voo bloqueia reentrada, descarta resposta atrasa
 
 test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitórias de pré-condição sem POST nem recusa', { skip }, async () => {
   let stationsDeferred = null;
+  let stationsStarted = null;
   let postDeferred = null;
+  let postStarted = null;
   let preErrorMode = null;
   let postCalls = 0;
 
@@ -1093,6 +1113,7 @@ test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitór
         if (stationsDeferred) {
           const d = stationsDeferred;
           stationsDeferred = null;
+          stationsStarted?.resolve();
           return d.promise;
         }
         if (preErrorMode === 'network') throw Object.assign(new Error('offline'), { isNetworkError: true });
@@ -1114,6 +1135,7 @@ test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitór
       if (postDeferred) {
         const d = postDeferred;
         postDeferred = null;
+        postStarted?.resolve();
         return d.promise;
       }
       activeState = calledState;
@@ -1136,27 +1158,37 @@ test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitór
     await h.mount();
 
     // 1. Distingue pré-condição de processamento no servidor antes do POST
-    stationsDeferred = deferred();
-    postDeferred = deferred();
+    const stationGate = deferred();
+    const stationStarted = deferred();
+    const operationPostGate = deferred();
+    const operationPostStarted = deferred();
+    stationsDeferred = stationGate;
+    stationsStarted = stationStarted;
+    postDeferred = operationPostGate;
+    postStarted = operationPostStarted;
     let inflight;
     await h.act(async () => {
       inflight = h.handler('Chamar próximo')();
+      await waitForSignal(stationStarted, 'GET de estações da pré-condição');
     });
     assert.ok(h.hasExactText('Verificando condições antes do envio...'));
     assert.equal(postCalls, 0);
 
     await h.act(async () => {
-      stationsDeferred.resolve({
+      stationGate.resolve({
         eventId: EV_A,
         stations: [{ id: ST_1, experienceId: EXP_1, label: 'Cabine 01', availability: 'available', pendingServiceSessionId: null }],
       });
+    });
+    await h.act(async () => {
+      await waitForSignal(operationPostStarted, 'POST após pré-condição');
     });
     assert.ok(h.hasExactText('Processando operação no servidor...'));
     assert.equal(postCalls, 1);
 
     activeState = calledState;
     await h.act(async () => {
-      postDeferred.resolve({
+      operationPostGate.resolve({
         serviceSession: {
           id: SESS_1,
           queueEntryId: ENTRY_1,
@@ -1168,6 +1200,8 @@ test('STAFF04-AUD-03: estágio busy precondition vs mutating e falhas transitór
       });
       await inflight;
     });
+    stationsStarted = null;
+    postStarted = null;
     await flush();
     assert.ok(h.hasText('Participante chamado. Operação confirmada pelo servidor.'));
 
@@ -1710,17 +1744,23 @@ test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela re
   {
     const qGate = deferred();
     const sGate = deferred();
+    const qStarted = deferred();
+    const sStarted = deferred();
+    const opStarted = deferred();
     let opDeferred = null;
     let deniedKind = null;
     let postCalls = 0;
+    const slowOpRead = deferred();
+    let pCall;
     const h = createStationHarness({
       onAccessDenied: (kind) => { deniedKind = kind; },
       onGet: (url) => {
-        if (url.endsWith('/queue')) return qGate.promise;
-        if (url.endsWith('/stations')) return sGate.promise;
+        if (url.endsWith('/queue')) { qStarted.resolve(); return qGate.promise; }
+        if (url.endsWith('/stations')) { sStarted.resolve(); return sGate.promise; }
         if (opDeferred) {
           const d = opDeferred;
           opDeferred = null;
+          opStarted.resolve();
           return d.promise;
         }
         return Promise.resolve(baseState);
@@ -1731,14 +1771,18 @@ test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela re
       await h.mount();
       assert.ok(h.hasQueueRow(1, 'Ana Clara'));
 
-      // Inicia Chamar próximo; /queue rejeita 503 primeiro, e o refresh(true) pós-503 fica em voo (opDeferred)
-      const slowOpRead = deferred();
-      let pCall;
+      // Inicia Chamar próximo e confirma que ambas as leituras preliminares estão em andamento.
       await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+      await Promise.all([
+        waitForSignal(qStarted, 'GET /queue preliminar'),
+        waitForSignal(sStarted, 'GET /stations preliminar'),
+      ]);
+
+      // O próximo GET operacional fica deliberadamente pendente após o 503.
       opDeferred = slowOpRead;
       await h.act(async () => {
         qGate.reject(Object.assign(new Error('503'), { status: 503 }));
-        await pCall;
+        await waitForSignal(opStarted, 'GET /operational-state após 503');
       });
       assert.equal(deniedKind, null);
       assert.equal(postCalls, 0);
@@ -1753,11 +1797,14 @@ test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela re
 
       await h.act(async () => {
         slowOpRead.resolve(baseState);
+        await pCall;
       });
       assert.equal(h.hasText('Ana Clara'), false, 'resposta 200 atrasada não restaura dados protegidos');
     } finally {
       qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 0, canCallWaitingEntries: false, firstWaitingQueueEntryId: null });
       sGate.resolve({ eventId: EV_A, stations: [] });
+      slowOpRead.resolve(baseState);
+      if (pCall) await pCall.catch(() => {});
       h.dispose();
     }
   }
@@ -1766,24 +1813,30 @@ test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela re
   {
     const qGate = deferred();
     const sGate = deferred();
+    const qStarted = deferred();
+    const sStarted = deferred();
     let deniedKind = null;
     let postCalls = 0;
+    let pCall;
     const h = createStationHarness({
       onAccessDenied: (kind) => {
         deniedKind = kind;
         void h.rerender({ accessDenied: true, accessDeniedKind: kind });
       },
       onGet: (url) => {
-        if (url.endsWith('/queue')) return qGate.promise;
-        if (url.endsWith('/stations')) return sGate.promise;
+        if (url.endsWith('/queue')) { qStarted.resolve(); return qGate.promise; }
+        if (url.endsWith('/stations')) { sStarted.resolve(); return sGate.promise; }
         return Promise.resolve(baseState);
       },
       onPost: async () => { postCalls += 1; return {}; },
     });
     try {
       await h.mount();
-      let pCall;
       await h.act(async () => { pCall = h.handler('Chamar próximo')(); });
+      await Promise.all([
+        waitForSignal(qStarted, 'GET /queue preliminar com irmã pendente'),
+        waitForSignal(sStarted, 'GET /stations preliminar com irmã pendente'),
+      ]);
       await h.act(async () => {
         sGate.reject(Object.assign(new Error('401'), { status: 401, code: 'SESSION_REVOKED' }));
         await pCall;
@@ -1795,6 +1848,8 @@ test('STAFF04-AUD-08 (tela Estação): 401/403 em leitura preliminar paralela re
       assert.ok(h.hasText('Sessão inválida. Entre novamente.'));
     } finally {
       qGate.resolve({ eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 });
+      sGate.resolve({ eventId: EV_A, stations: [] });
+      if (pCall) await pCall.catch(() => {});
       h.dispose();
     }
   }
@@ -1899,7 +1954,7 @@ test('STAFF04-AUD-09 (tela Estação): isola feedback tardio entre contas, sess�
       });
 
       assert.equal(
-        h.hasText('Recusa registrada pelo servidor, mas a limpeza local falhou'),
+        h.hasText('Recusa registrada pelo servidor, mas o reconhecimento local ainda não foi concluído.'),
         false,
         `${transition}: não publica feedback tardio fora do escopo/visita original`,
       );
@@ -1945,6 +2000,228 @@ test('STAFF04-AUD-09 (tela Estação): isola feedback tardio entre contas, sess�
       h.dispose();
     }
   }
+});
+
+for (const outcome of ['rejected', 'uncertain']) test(`STAFF04-VAL-10: novo contexto não herda busy da mutação não-auth da Estação anterior (${outcome})`, { skip }, async () => {
+  const postGate = deferred();
+  const postStarted = deferred();
+  let stationId = ST_1;
+  let operation;
+  let primaryError;
+  let posts = 0;
+  const h = createStationHarness({
+    onGet: async (url) => {
+      if (url.endsWith('/stations')) return { eventId: EV_A, stations: [{
+        id: stationId, experienceId: EXP_1, label: 'Cabine', availability: 'available', pendingServiceSessionId: null,
+      }] };
+      if (url.endsWith('/queue')) return { eventId: EV_A, experienceId: EXP_1, waitingCount: 1,
+        canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 };
+      return { eventId: EV_A, experienceId: EXP_1, stationId, availability: 'available', canCall: true,
+        waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: stationId === ST_1 ? 'Fila A' : 'Fila B', position: 1 }], pending: null };
+    },
+    onPost: () => { posts += 1; postStarted.resolve(); return postGate.promise; },
+  });
+  try {
+    await h.mount();
+    await h.act(async () => {
+      operation = h.handler('Chamar próximo')();
+      await waitForSignal(postStarted, 'POST do contexto original');
+    });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+    const key = `arenago.staff.operation.${USER_1}`;
+    const original = JSON.parse(h.secureValues.get(key));
+    assert.equal(original.phase, 'dispatching');
+    stationId = ST_2;
+    await h.rerender({ station: { id: ST_2, experienceId: EXP_1, label: 'Cabine 02', availability: 'available', pendingServiceSessionId: null } });
+    assert.ok(h.hasQueueRow(1, 'Fila B'));
+    for (const text of ['Processando operação no servidor...', 'Verificando condições antes do envio...',
+      'Preparando solicitação com segurança...', 'Registrando envio seguro...', 'Registrando resultado com segurança...']) {
+      assert.equal(h.hasText(text), false, `novo contexto não herda busyKind: ${text}`);
+    }
+    assert.equal(JSON.parse(h.secureValues.get(key)).key, original.key);
+    assert.equal(h.isDisabled('Chamar próximo'), true, 'intenção original pendente continua bloqueante');
+    await h.press('Chamar próximo');
+    assert.equal(posts, 1);
+    await h.act(async () => {
+      postGate.reject(outcome === 'rejected'
+        ? Object.assign(new Error('conflict'), { status: 409, code: 'STATION_UNAVAILABLE' })
+        : Object.assign(new Error('timeout'), { isTimeout: true, outcomeUnknown: true }));
+      await operation;
+    });
+    assert.equal(h.hasText('A estação não está disponível para esta operação.'), false);
+    assert.ok(h.hasQueueRow(1, 'Fila B'));
+    assert.equal(posts, 1);
+    const stored = JSON.parse(h.secureValues.get(outcome === 'rejected' ? `${key}.receipt` : key));
+    assert.equal(stored.key, original.key);
+    assert.equal(stored.stationId, ST_1);
+    assert.equal(stored.phase, outcome === 'rejected' ? 'terminal' : 'dispatching');
+    if (outcome === 'rejected') assert.equal(stored.outcome.status, 409);
+    await h.press('Atualizar atendimento');
+    assert.equal(h.isDisabled('Chamar próximo'), true);
+    await h.press('Chamar próximo');
+    assert.equal(posts, 1, 'intenção histórica não permite replay após refresh');
+    assert.equal(h.hasText('Processando operação no servidor...'), false);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    try {
+      await h.act(async () => {
+        postGate.resolve({});
+        await operation;
+      });
+      h.dispose();
+    } catch (error) { if (!primaryError) throw error; }
+  }
+});
+
+// VAL-10: fixtures comuns usam os contratos reais e contas distintas para permitir
+// uma operação nova sem violar o bloqueio persistente por usuário.
+const val10Auth = (userId = USER_1, sessionId = SESSION_1) => ({
+  isAuthenticated: true, user: { id: userId, roles: ['staff'] }, sessionId,
+  isIdentityVerified: () => true, getSessionEpoch: () => 1, getIdentityRevision: () => 1,
+});
+const val10State = (stationId = ST_1) => ({
+  eventId: EV_A, experienceId: EXP_1, stationId, availability: 'available', canCall: true,
+  waitingCount: 1, waiting: [{ queueEntryId: ENTRY_1, displayName: 'Fila atual', position: 1 }], pending: null,
+});
+const val10Read = (url, stationId = ST_1) => url.endsWith('/stations')
+  ? { eventId: EV_A, stations: [{ id: stationId, experienceId: EXP_1, label: 'Cabine', availability: 'available', pendingServiceSessionId: null }] }
+  : url.endsWith('/queue')
+    ? { eventId: EV_A, experienceId: EXP_1, waitingCount: 1, canCallWaitingEntries: true, firstWaitingQueueEntryId: ENTRY_1 }
+    : val10State(stationId);
+const val10Called = () => ({ serviceSession: { id: SESS_1, queueEntryId: ENTRY_1, experienceId: EXP_1,
+  station: { id: ST_1, label: 'Cabine' }, status: 'pending', calledAt: '2026-11-19T15:00:00.000Z' } });
+
+for (const change of ['account', 'session']) test(`STAFF04-VAL-10: troca de ${change} isola busy e resultado definitivo histórico`, { skip }, async () => {
+  const gate = deferred(), started = deferred();
+  const userB = 'abcdef00-0000-4000-8000-000000000002';
+  const sessionB = '10000000-0000-4000-8000-000000000002';
+  let operation, primaryError, posts = 0;
+  const h = createStationHarness({ onGet: async url => val10Read(url),
+    onPost: () => { posts++; started.resolve(); return gate.promise; } });
+  const key = `arenago.staff.operation.${USER_1}`;
+  try {
+    await h.mount();
+    await h.act(async () => { operation = h.handler('Chamar próximo')(); await waitForSignal(started, 'POST original'); });
+    const original = JSON.parse(h.secureValues.get(key));
+    await h.rerender({ auth: val10Auth(change === 'account' ? userB : USER_1, sessionB) });
+    assert.equal(h.hasText('Processando operação no servidor...'), false);
+    assert.equal(h.isDisabled('Chamar próximo'), change === 'session');
+    assert.equal(JSON.parse(h.secureValues.get(key)).key, original.key);
+    await h.act(async () => { gate.resolve(val10Called()); await operation; });
+    const receipt = JSON.parse(h.secureValues.get(`${key}.receipt`));
+    assert.equal(receipt.key, original.key);
+    assert.equal(receipt.sessionId, SESSION_1);
+    assert.equal(receipt.outcome.kind, 'confirmed');
+    assert.equal(h.hasText('Participante chamado. Operação confirmada pelo servidor.'), false);
+    assert.ok(h.hasQueueRow(1, 'Fila atual'));
+    assert.equal(posts, 1);
+  } catch (error) { primaryError = error; throw error; }
+  finally { try { await h.act(async () => { gate.resolve(val10Called()); await operation; }); h.dispose(); }
+    catch (error) { if (!primaryError) throw error; } }
+});
+
+test('STAFF04-VAL-10: finally da visita A não limpa operação legítima da conta B', { skip }, async () => {
+  const aPost = deferred(), aStarted = deferred(), aRefresh = deferred(), refreshStarted = deferred();
+  const bPost = deferred(), bStarted = deferred();
+  const userB = 'abcdef00-0000-4000-8000-000000000002';
+  let accountB = false, waitRefresh = false, posts = 0, aOperation, bOperation, primaryError;
+  const h = createStationHarness({
+    onGet: async url => {
+      if (url.endsWith('/operational-state') && waitRefresh && !accountB) { refreshStarted.resolve(); return aRefresh.promise; }
+      return val10Read(url);
+    },
+    onPost: () => { posts++; if (accountB) { bStarted.resolve(); return bPost.promise; } aStarted.resolve(); return aPost.promise; },
+  });
+  try {
+    await h.mount();
+    await h.act(async () => { aOperation = h.handler('Chamar próximo')(); await waitForSignal(aStarted, 'POST A'); });
+    // O coordenador já terminou a mutação de A, mas dispatch ainda aguarda refresh.
+    waitRefresh = true;
+    await h.act(async () => { aPost.reject(Object.assign(new Error('conflict'), { status: 409, code: 'STATION_UNAVAILABLE' })); await waitForSignal(refreshStarted, 'refresh A'); });
+    accountB = true;
+    await h.rerender({ auth: val10Auth(userB, '10000000-0000-4000-8000-000000000002') });
+    assert.equal(h.isDisabled('Chamar próximo'), false);
+    await h.act(async () => { bOperation = h.handler('Chamar próximo')(); await waitForSignal(bStarted, 'POST B'); });
+    const bKey = `arenago.staff.operation.${userB}`;
+    const before = h.secureValues.get(bKey);
+    await h.act(async () => { aRefresh.resolve(val10State()); await aOperation; });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+    assert.equal(h.isDisabled('Chamar próximo'), true);
+    assert.equal(h.secureValues.get(bKey), before);
+    assert.equal(h.hasText('A estação não está disponível para esta operação.'), false);
+    await h.press('Chamar próximo');
+    assert.equal(posts, 2);
+  } catch (error) { primaryError = error; throw error; }
+  finally { try { await h.act(async () => { aPost.resolve(val10Called()); aRefresh.resolve(val10State()); bPost.resolve(val10Called()); await Promise.all([aOperation, bOperation]); }); h.dispose(); }
+    catch (error) { if (!primaryError) throw error; } }
+});
+
+test('STAFF04-VAL-10: refresh no mesmo contexto preserva busy e bloqueio durante POST', { skip }, async () => {
+  const gate = deferred(), started = deferred(); let operation, primaryError, posts = 0;
+  const h = createStationHarness({ onGet: async url => val10Read(url), onPost: () => { posts++; started.resolve(); return gate.promise; } });
+  try {
+    await h.mount();
+    const refresh = h.handler('Atualizar atendimento');
+    await h.act(async () => { operation = h.handler('Chamar próximo')(); await waitForSignal(started, 'POST em andamento'); });
+    assert.equal(h.isDisabled('Atualizar atendimento'), true);
+    // Callback capturado antes da operação: mesmo se já enfileirado, refresh não libera busy.
+    await h.act(async () => { await refresh(); });
+    assert.ok(h.hasExactText('Processando operação no servidor...'));
+    assert.equal(h.isDisabled('Chamar próximo'), true);
+    await h.press('Chamar próximo'); assert.equal(posts, 1);
+  } catch (error) { primaryError = error; throw error; }
+  finally { try { await h.act(async () => { gate.resolve(val10Called()); await operation; }); h.dispose(); }
+    catch (error) { if (!primaryError) throw error; } }
+});
+
+for (const status of [401, 403]) test(`STAFF04-VAL-10: mutação ${status} antiga não revoga nova visita à mesma estação`, { skip }, async () => {
+  const gate = deferred(), started = deferred(); let operation, primaryError, denials = 0, stationId = ST_1;
+  const h = createStationHarness({ onGet: async url => val10Read(url, stationId),
+    onAccessDenied: () => { denials++; }, onPost: () => { started.resolve(); return gate.promise; } });
+  try {
+    await h.mount();
+    await h.act(async () => { operation = h.handler('Chamar próximo')(); await waitForSignal(started, 'POST da visita A'); });
+    stationId = ST_2;
+    await h.rerender({ station: { id: ST_2, experienceId: EXP_1, label: 'B' } });
+    stationId = ST_1;
+    await h.rerender({ station: { id: ST_1, experienceId: EXP_1, label: 'A nova visita' } });
+    await h.act(async () => { gate.reject(Object.assign(new Error('denied'), { status })); await operation; });
+    assert.equal(denials, 0);
+    assert.equal(h.hasText('Processando operação no servidor...'), false);
+    assert.ok(h.hasQueueRow(1, 'Fila atual'));
+    await h.rerender({ accessDenied: true, accessDeniedKind: status === 401 ? 'session' : 'denied' });
+    assert.equal(h.hasQueueRow(1, 'Fila atual'), false);
+    assert.equal(h.hasButton('Chamar próximo'), false);
+  } catch (error) { primaryError = error; throw error; }
+  finally { try { await h.act(async () => { gate.resolve(val10Called()); await operation; }); h.dispose(); }
+    catch (error) { if (!primaryError) throw error; } }
+});
+
+for (const status of [401, 403]) test(`STAFF04-VAL-10: refresh ${status} de visita antiga não revoga retorno à mesma estação`, { skip }, async () => {
+  const readGate = deferred(), readStarted = deferred(); let hold = false, refresh, primaryError, denials = 0, stationId = ST_1;
+  const h = createStationHarness({ onGet: async url => {
+    if (hold && url.endsWith('/operational-state')) { readStarted.resolve(); return readGate.promise; }
+    return val10Read(url, stationId);
+  }, onAccessDenied: () => { denials++; } });
+  try {
+    await h.mount(); hold = true;
+    await h.act(async () => { refresh = h.handler('Atualizar atendimento')(); await waitForSignal(readStarted, 'refresh antigo'); });
+    hold = false;
+    stationId = ST_2;
+    await h.rerender({ station: { id: ST_2, experienceId: EXP_1, label: 'B' } });
+    stationId = ST_1;
+    await h.rerender({ station: { id: ST_1, experienceId: EXP_1, label: 'A' } });
+    await h.act(async () => { readGate.reject(Object.assign(new Error('denied'), { status })); await refresh; });
+    assert.equal(denials, 0);
+    assert.ok(h.hasQueueRow(1, 'Fila atual'));
+    // Uma negativa da visita atual continua prevalecendo.
+    hold = true;
+    await h.press('Atualizar atendimento');
+    assert.equal(denials, 1);
+    assert.equal(h.hasQueueRow(1, 'Fila atual'), false);
+  } catch (error) { primaryError = error; throw error; }
+  finally { try { await h.act(async () => { readGate.resolve(val10State()); await refresh; }); h.dispose(); }
+    catch (error) { if (!primaryError) throw error; } }
 });
 
 test('STAFF04-AUD-10 (tela Estação): exibe "Registrando resultado com segurança..." em recordTerminal/clear sem indicar sucesso prematuro nem expor 403', { skip }, async () => {
