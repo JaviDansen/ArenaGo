@@ -1,0 +1,406 @@
+diff --git a/app/App.js b/app/App.js
+index 690a13d..d45a2aa 100644
+--- a/app/App.js
++++ b/app/App.js
+@@ -76,7 +76,7 @@ export function AppNavigation() {
+       component: ParticipationDetailsScreen,
+       options: {
+         ...participantHeaderOptions,
+-        headerShown: true,
++        headerShown: false,
+         title: 'Detalhes da participação',
+       },
+     },
+diff --git a/app/screens/participation/ParticipationRealDetailsScreen.js b/app/screens/participation/ParticipationRealDetailsScreen.js
+index 3973ce0..0cd5671 100644
+--- a/app/screens/participation/ParticipationRealDetailsScreen.js
++++ b/app/screens/participation/ParticipationRealDetailsScreen.js
+@@ -2,26 +2,55 @@ import { useContext, useEffect, useState } from 'react';
+ import { StatusBar } from 'expo-status-bar';
+ import { ScrollView, StyleSheet, Text, View } from 'react-native';
+ 
+-import { AuthBackground, Badge, Button, Card } from '../../components/ui';
++import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
+ import { AuthContext } from '../../context/AuthContext';
+ import { fetchParticipationEvaluation, validateHistoryItem } from '../../services/participationHistoryService';
+ import { formatStayDuration } from '../../utils/participation';
+ import { colors, spacing, typography } from '../../theme';
+ 
+-function dateText(value) {
++export function dateText(value) {
+   if (!value) return 'Não registrado';
+   const timestamp = Date.parse(value);
+   if (!Number.isFinite(timestamp)) return 'Registro inválido';
+-  return new Date(timestamp).toLocaleString('pt-BR');
++  const date = new Date(timestamp);
++  return `${date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' })} • ${date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+ }
+ 
+-function durationText(start, end) {
++export function durationText(start, end) {
+   if (!start || !end) return 'Não registrado';
+   const startMs = Date.parse(start), endMs = Date.parse(end);
+   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 'Não registrado';
+   return formatStayDuration(Math.round((endMs - startMs) / 60000)) ?? 'Menos de 1 minuto';
+ }
+ 
++const STATUS_LABELS = {
++  finished: 'Finalizada', active: 'Ativa', waiting: 'Aguardando', canceled: 'Cancelada',
++};
++const FINISH_REASON_LABELS = {
++  voluntary: 'Saída voluntária',
++  external_wait_withdrawal: 'Desistência da espera de entrada',
++  staff_external_wait_removed: 'Retirada da espera pelo Staff',
++  external_absence_after_entry_cutoff: 'Ausência após o limite de entrada',
++  admin_immediate: 'Encerramento imediato do evento',
++  admin_controlled_external_wait_closed: 'Encerramento da espera de entrada pelo evento',
++  automatic_operational_deadline: 'Fim do prazo operacional do evento',
++  automatic_admin_deadline: 'Fim do prazo de encerramento do evento',
++};
++export const participationStatusText = value => Object.prototype.hasOwnProperty.call(STATUS_LABELS, value) ? STATUS_LABELS[value] : 'Não informada';
++export const finishReasonText = value => Object.prototype.hasOwnProperty.call(FINISH_REASON_LABELS, value) ? FINISH_REASON_LABELS[value] : 'Motivo não informado';
++
++function SummaryCard({ icon, value, label }) {
++  return (
++    <Card variant="elevated" padding={spacing.md} style={styles.summaryCard}>
++      <View style={styles.summaryIcon}>
++        <LineIcon name={icon} size={20} color={colors.brand.primaryLight} />
++      </View>
++      <Text style={styles.summaryValue}>{value}</Text>
++      <Text style={styles.summaryLabel}>{label}</Text>
++    </Card>
++  );
++}
++
+ function DetailRow({ label, value }) {
+   return (
+     <View style={styles.row}>
+@@ -62,8 +91,9 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+     return (
+       <AuthBackground variant="login" overlayOpacity={0.68} testID="participation-details-background">
+         <StatusBar style="light" />
++        <ScreenHeader title="Detalhes da participação" onBack={() => navigation.goBack()} testID="participation-details-header" />
+         <View style={styles.messageScreen}>
+-          <Card variant="elevated">
++          <Card variant="elevated" style={styles.unavailableCard}>
+             <Badge label="DETALHES INDISPONÍVEIS" variant="warning" />
+             <Text style={styles.notice}>
+               Os detalhes não estão disponíveis nesta navegação. Volte à aba Eventos e selecione a participação.
+@@ -76,38 +106,47 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+ 
+   const evaluation = evaluationState.evaluation;
+   const entry = item.arenaEnteredAt ?? item.joinedAt;
+-  const statusLabel = item.status === 'finished'
+-    ? 'PARTICIPAÇÃO FINALIZADA'
+-    : item.status === 'active'
+-      ? 'PARTICIPAÇÃO ATIVA'
+-      : 'PARTICIPAÇÃO NA FILA';
+-  const statusVariant = item.status === 'finished' ? 'success' : item.status === 'active' ? 'brand' : 'warning';
++  const statusLabel = `PARTICIPAÇÃO ${participationStatusText(item.status).toLocaleUpperCase('pt-BR')}`;
++  const statusVariant = item.status === 'finished' || item.status === 'active' ? 'success' : item.status === 'canceled' ? 'default' : 'warning';
+ 
+   return (
+     <AuthBackground variant="login" overlayOpacity={0.68} testID="participation-details-background">
+       <StatusBar style="light" />
++      <ScreenHeader title="Detalhes da participação" onBack={() => navigation.goBack()} testID="participation-details-header" />
+       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+-        <Badge label={statusLabel} variant={statusVariant} />
++        <Badge label={statusLabel} variant={statusVariant} style={item.status === 'canceled' ? styles.neutralBadge : undefined} />
+         <Text style={styles.title}>{item.event.name}</Text>
+-        <Text style={styles.note}>Dados reais da sua participação. Horários no fuso do dispositivo.</Text>
+-        <Text style={styles.section}>Participação</Text>
+-        <Card variant="default" style={styles.detailCard}>
+-          <DetailRow label="Situação" value={item.status} />
++        <Text style={styles.note}>Data da participação: {dateText(item.joinedAt)}</Text>
++        <View style={styles.summary} testID="participation-summary">
++          <SummaryCard icon="clock" value={durationText(entry, item.finishedAt)} label="Permanência" />
++          <SummaryCard icon="check" value={String(item.completedServicesCount)} label="Atendimentos concluídos" />
++        </View>
++        <Card variant="default" padding={spacing.md} style={styles.detailCard}>
++          <Text style={styles.section} accessibilityRole="header">Informações da participação</Text>
+           <DetailRow label="Ingresso" value={dateText(item.joinedAt)} />
+           <DetailRow label="Entrada na Arena" value={dateText(item.arenaEnteredAt)} />
+           <DetailRow label="Saída" value={dateText(item.finishedAt)} />
+-          <DetailRow label="Permanência" value={durationText(entry, item.finishedAt)} />
+-          <DetailRow label="Atendimentos concluídos" value={String(item.completedServicesCount)} />
+-          {item.finishReason ? <DetailRow label="Motivo da saída" value={item.finishReason} /> : null}
++          {item.finishReason ? <DetailRow label="Motivo da saída" value={finishReasonText(item.finishReason)} /> : null}
++          <Text style={styles.timezone}>Horários no fuso do dispositivo.</Text>
+         </Card>
+-        <Text style={styles.section}>Avaliação</Text>
+-        <Card variant="elevated" style={styles.detailCard}>
++        <Card variant="elevated" padding={spacing.md} style={[styles.detailCard, styles.evaluationCard]}>
++          <Text style={styles.section} accessibilityRole="header">Sua avaliação</Text>
+           {submitted ? (
+             evaluationState.loading ? <Text style={styles.notice}>Carregando avaliação...</Text>
+             : evaluationState.error ? <Text style={styles.error}>{evaluationState.error}</Text>
+             : evaluation ? (
+               <>
+-                <DetailRow label="Nota" value={`${evaluation.rating} de 5 estrelas`} />
++                <View style={styles.ratingRow} accessible accessibilityLabel={`${evaluation.rating} de 5 estrelas`} testID="participation-rating">
++                  {[1, 2, 3, 4, 5].map(star => (
++                    <Text key={star} style={[styles.star, star <= evaluation.rating && styles.starFilled]}
++                      accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
++                      testID={`participation-star-${star}-${star <= evaluation.rating ? 'filled' : 'empty'}`}>
++                      {star <= evaluation.rating ? '★' : '☆'}
++                    </Text>
++                  ))}
++                </View>
++                <Text style={styles.ratingValue}>{evaluation.rating} de 5 estrelas</Text>
++                <Text style={styles.note}>Avaliação registrada</Text>
+                 {evaluation.comment ? <Text style={styles.comment}>{evaluation.comment}</Text> : null}
+               </>
+             ) : <Text style={styles.notice}>Avaliação indisponível.</Text>
+@@ -127,14 +166,27 @@ export default function ParticipationRealDetailsScreen({ route, navigation }) {
+ 
+ const styles = StyleSheet.create({
+   messageScreen: { flex: 1, justifyContent: 'center', padding: spacing.layout.screenPaddingHorizontal },
+-  content: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.lg, paddingBottom: spacing.xxxl },
+-  title: { ...typography.titleLarge, color: colors.text.primary, marginTop: spacing.md },
++  content: { flexGrow: 1, paddingHorizontal: spacing.layout.screenPaddingHorizontal, paddingTop: spacing.xs, paddingBottom: spacing.xxxl },
++  title: { ...typography.titleLarge, color: colors.text.primary, marginTop: spacing.sm },
+   note: { ...typography.bodySmall, color: colors.text.secondary, marginTop: spacing.sm },
+-  section: { ...typography.titleSmall, color: colors.text.primary, marginTop: spacing.xxl, marginBottom: spacing.sm },
+-  detailCard: { alignItems: 'stretch' },
+-  row: { borderBottomColor: colors.border.subtle, borderBottomWidth: 1, paddingVertical: spacing.md },
++  section: { ...typography.titleSmall, color: colors.text.primary, marginBottom: spacing.xs },
++  detailCard: { alignItems: 'stretch', marginTop: spacing.md, backgroundColor: colors.background.base, borderColor: `${colors.brand.primaryLight}40` },
++  unavailableCard: { backgroundColor: colors.background.base, borderColor: colors.semantic.warning },
++  evaluationCard: { borderColor: colors.brand.primary },
++  neutralBadge: { backgroundColor: colors.background.base },
++  row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'baseline', gap: spacing.xs, paddingVertical: spacing.sm },
+   label: { ...typography.caption, color: colors.text.muted },
+-  value: { ...typography.body, color: colors.text.primary, fontWeight: '600', marginTop: spacing.xxs },
++  value: { ...typography.body, color: colors.text.primary, fontWeight: '600', flexGrow: 1, flexShrink: 1, flexBasis: 170, textAlign: 'right' },
++  summary: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.md },
++  summaryCard: { flexGrow: 1, flexShrink: 1, flexBasis: 140, alignItems: 'flex-start', backgroundColor: colors.background.base, borderColor: `${colors.brand.primaryLight}40` },
++  summaryIcon: { padding: spacing.sm, borderRadius: spacing.sm, backgroundColor: colors.brand.primaryDim },
++  summaryValue: { ...typography.titleMedium, color: colors.brand.primaryLight, marginTop: spacing.sm },
++  summaryLabel: { ...typography.bodySmall, color: colors.text.secondary, marginTop: spacing.xs },
++  timezone: { ...typography.caption, color: colors.text.muted, marginTop: spacing.xs },
++  ratingRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: spacing.sm },
++  star: { color: colors.text.muted, fontSize: 30, lineHeight: 36 },
++  starFilled: { color: colors.semantic.warning },
++  ratingValue: { ...typography.titleSmall, color: colors.text.primary, marginTop: spacing.sm },
+   notice: { ...typography.body, color: colors.text.secondary, marginTop: spacing.md },
+   error: { ...typography.body, color: '#FF9AAE', marginTop: spacing.md },
+   comment: { ...typography.body, color: colors.text.secondary, marginTop: spacing.md },
+diff --git a/app/tests/participationDetails.test.cjs b/app/tests/participationDetails.test.cjs
+index eacdd9b..f461ad2 100644
+--- a/app/tests/participationDetails.test.cjs
++++ b/app/tests/participationDetails.test.cjs
+@@ -316,7 +316,7 @@ test('details open from the root stack with a back button to the list', () => {
+   const screens = nodes(app.exports.AppNavigation()).filter((node) => node.type === 'StackScreen');
+   const details = screens.find((node) => node.props.name === 'ParticipationDetails');
+   assert.equal(details.props.component, './screens/participation/ParticipationRealDetailsScreen');
+-  assert.equal(details.props.options.headerShown, true);
++  assert.equal(details.props.options.headerShown, false, 'retorno pertence ao ScreenHeader da tela real');
+   assert.notEqual(details.props.options.headerBackVisible, false);
+   assert.equal(details.props.options.title, 'Detalhes da participação');
+   assert.ok(screens.some((node) => node.props.name === 'MainTabs'));
+diff --git a/app/tests/participante05aDetalhesVisual.test.cjs b/app/tests/participante05aDetalhesVisual.test.cjs
+new file mode 100644
+index 0000000..7994364
+--- /dev/null
++++ b/app/tests/participante05aDetalhesVisual.test.cjs
+@@ -0,0 +1,138 @@
++﻿const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const { loadModule, nodes, textOf, createParticipantUiStubs, createParticipantThemeStub } = require('./helpers/questionnaireHarness.cjs');
++const ID = '22222222-2222-4222-8222-222222222222';
++const item = {
++  participationId: ID, event: { id: '11111111-1111-4111-8111-111111111111', name: 'Arena com um nome extenso que deve continuar legível' },
++  status: 'finished', joinedAt: '2026-11-17T10:42:05Z', arenaEnteredAt: '2026-11-17T11:00:00Z',
++  finishedAt: '2026-11-23T02:53:00Z', finishReason: 'voluntary', completedServicesCount: 7,
++  evaluation: { eligible: true, submitted: true, pending: false },
++};
++function harness(historyItem = item, get = async () => ({ evaluation: {
++  id: '33333333-3333-4333-8333-333333333333', participationId: ID, rating: 4, comment: null,
++} })) {
++  let currentState, effect;
++  const calls = [];
++  const service = loadModule('services/participationHistoryService.js', require).exports;
++  const participation = loadModule('utils/participation.js', require).exports;
++  const module = loadModule('screens/participation/ParticipationRealDetailsScreen.js', name => {
++    if (name === 'react') return {
++      useContext: () => ({ isAuthenticated: true, user: { id: 'A' }, httpClient: { get }, getSessionEpoch: () => 1 }),
++      useEffect: fn => { effect = fn; },
++      useState: initial => { if (currentState === undefined) currentState = initial; return [currentState, next => { currentState = next; }]; },
++    };
++    if (name === 'react-native') return { ScrollView: 'ScrollView', Text: 'Text', View: 'View', StyleSheet: { create: s => s } };
++    if (name === 'expo-status-bar') return { StatusBar: 'StatusBar' };
++    if (name === '../../components/ui') return createParticipantUiStubs();
++    if (name === '../../context/AuthContext') return { AuthContext: {} };
++    if (name === '../../theme') return createParticipantThemeStub();
++    if (name === '../../services/participationHistoryService') return service;
++    if (name === '../../utils/participation') return participation;
++    return require(name);
++  }).exports;
++  const render = () => {
++    const tree = module.default({ route: { params: { historyItem, participationId: ID } },
++      navigation: { goBack: () => calls.push('back'), navigate: (...args) => calls.push(args) } });
++    const all = nodes(tree);
++    return { all, texts: all.filter(n => n.type === 'Text').map(textOf),
++      text: value => all.find(n => n.type === 'Text' && textOf(n) === value),
++      byId: id => all.find(n => n.props?.testID === id),
++      press: label => all.find(n => n.type === 'Pressable' && n.props.accessibilityLabel === label).props.onPress() };
++  };
++  return { render, calls, module, start: () => effect() };
++}
++
++test('05A: detalhes reais e indisponíveis oferecem retorno pela pilha atual', () => {
++  // goBack preserva a origem: não substitui Home ou Eventos por uma rota fixa.
++  for (const value of [item, null]) {
++    const h = harness(value), view = h.render();
++    assert.ok(view.text('Detalhes da participação'));
++    view.press('Voltar'); assert.deepEqual(h.calls, ['back']);
++    if (!value) assert.ok(view.texts.includes('DETALHES INDISPONÍVEIS'));
++  }
++});
++
++test('05A: duração longa, contagem, datas completas e nome real não são ajustados para a captura', () => {
++  const h = harness(), view = h.render();
++  assert.ok(view.text(item.event.name));
++  assert.ok(view.text('135h 53min'));
++  assert.ok(view.text('7'));
++  for (const instant of [item.joinedAt, item.arenaEnteredAt, item.finishedAt]) {
++    const value = h.module.dateText(instant);
++    assert.ok(view.texts.some(t => t.includes(value)));
++    assert.match(value, /2026/); assert.match(value, /• \d{2}:\d{2}$/);
++    assert.doesNotMatch(value, /:\d{2}:\d{2}/);
++  }
++  assert.notEqual(h.module.dateText(item.joinedAt), h.module.dateText(item.finishedAt));
++  assert.ok(view.text('Horários no fuso do dispositivo.'));
++  assert.ok(view.text('Saída voluntária'));
++  assert.equal(view.text('finished'), undefined); assert.equal(view.text('voluntary'), undefined);
++});
++
++test('05A: todos os estados e motivos reais têm apresentação em português e fallback neutro', () => {
++  const h = harness();
++  for (const [status, label] of Object.entries({ finished: 'FINALIZADA', active: 'ATIVA', waiting: 'AGUARDANDO', canceled: 'CANCELADA' })) {
++    const view = harness({ ...item, status }).render();
++    assert.ok(view.text(`PARTICIPAÇÃO ${label}`));
++    if (status === 'canceled') assert.equal(view.text('PARTICIPAÇÃO NA FILA'), undefined);
++  }
++  for (const reason of ['voluntary', 'external_wait_withdrawal', 'staff_external_wait_removed', 'external_absence_after_entry_cutoff',
++    'admin_immediate', 'admin_controlled_external_wait_closed', 'automatic_operational_deadline', 'automatic_admin_deadline']) {
++    assert.notEqual(h.module.finishReasonText(reason), reason);
++    assert.notEqual(h.module.finishReasonText(reason), 'Motivo não informado');
++  }
++  assert.equal(h.module.finishReasonText('unknown'), 'Motivo não informado');
++  assert.equal(h.module.participationStatusText('unknown'), 'Não informada');
++});
++
++test('05A: consulta real mantém carregamento, quatro estrelas e comentário opcional somente leitura', async () => {
++  for (const comment of [null, 'Experiência muito boa']) {
++    let resolve;
++    const requests = [];
++    const h = harness(item, (url, options) => { requests.push([url, options]); return new Promise(r => { resolve = r; }); });
++    h.render(); h.start();
++    assert.ok(h.render().text('Carregando avaliação...'));
++    assert.equal(h.render().byId('participation-rating'), undefined);
++    resolve({ evaluation: { id: '33333333-3333-4333-8333-333333333333', participationId: ID, rating: 4, comment } });
++    await new Promise(r => setImmediate(r));
++    const view = h.render();
++    assert.deepEqual(structuredClone(requests), [[`/participations/${ID}/evaluation`, { auth: true }]]);
++    assert.ok(view.text('4 de 5 estrelas'));
++    for (let star = 1; star <= 5; star++) {
++      const node = view.byId(`participation-star-${star}-${star <= 4 ? 'filled' : 'empty'}`);
++      assert.ok(node); assert.equal(textOf(node), star <= 4 ? '★' : '☆'); assert.equal(node.props.onPress, undefined);
++    }
++    assert.ok(view.text('Avaliação registrada'));
++    if (comment) assert.ok(view.text(comment));
++    assert.equal(view.all.some(n => n.props?.title === 'Avaliar evento'), false);
++  }
++});
++
++test('05A: falha de consulta não apresenta nota fictícia', async () => {
++  const h = harness(item, async () => { throw new Error('offline'); });
++  h.render(); h.start(); await new Promise(r => setImmediate(r));
++  const view = h.render();
++  assert.ok(view.text('Não foi possível carregar a avaliação registrada.'));
++  assert.equal(view.byId('participation-rating'), undefined);
++});
++
++test('05A: pendência navega com a participação original; ausência de avaliação não oferece ação', () => {
++  const pending = { ...item, evaluation: { eligible: true, submitted: false, pending: true } };
++  const h = harness(pending), view = h.render(); view.press('Avaliar este evento');
++  assert.equal(h.calls[0][0], 'RealEvaluation'); assert.equal(h.calls[0][1].participationId, ID);
++  assert.equal(h.calls[0][1].historyItem, pending);
++  const none = harness({ ...item, evaluation: { eligible: false, submitted: false, pending: false } }).render();
++  assert.ok(none.text('Nenhuma avaliação pendente para esta participação.'));
++  assert.equal(none.byId('participation-rating'), undefined);
++});
++
++test('05A: somente a rota de detalhes troca o header nativo pelo header do design system', () => {
++  const source = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8');
++  assert.match(source, /name: 'ParticipationDetails',[\s\S]*?headerShown: false/);
++  for (const origin of ['home/HomeScreen.js', 'participation/ParticipationsRealScreen.js']) {
++    const body = fs.readFileSync(path.join(__dirname, '../screens', origin), 'utf8');
++    assert.match(body, /ParticipationDetails/);
++  }
++});
+diff --git a/docs/PARTICIPANTE_05A_DETALHES_PARTICIPACAO_VISUAL_IMPLEMENTACAO.md b/docs/PARTICIPANTE_05A_DETALHES_PARTICIPACAO_VISUAL_IMPLEMENTACAO.md
+new file mode 100644
+index 0000000..2e90ca3
+--- /dev/null
++++ b/docs/PARTICIPANTE_05A_DETALHES_PARTICIPACAO_VISUAL_IMPLEMENTACAO.md
+@@ -0,0 +1,56 @@
++﻿# PARTICIPANTE-05A — Detalhes da participação: antecipação visual
++
++## Diagnóstico e estratégia antes da implementação
++
++Base efetiva: `52dfe6309e6f9ed6898164796427e4638c482b18`, branch `feature/heliom-participante-ux`. Antecipação exclusivamente visual; não conclui a PARTICIPANTE-05. PARTICIPANTE-01 permanece suspensa.
++
++A rota ParticipationDetails habilita um header nativo, expondo o nome da rota de origem no iOS. A tela real exibe status e motivo brutos, datas com segundos e resumo distribuído em linhas altas. A intervenção desabilitará apenas esse header nativo e usará ScreenHeader com goBack, inclusive para detalhes indisponíveis. Permanência e atendimentos terão cards flexíveis; os campos temporais serão compactos, com data completa sem segundos e indicação do fuso do dispositivo. Estados e motivos serão traduzidos após inspeção dos valores de domínio. A avaliação usará cinco ícones gráficos existentes, em leitura, com nota real, preservando consulta, erro, carregamento e pendência.
++
++Nenhum endpoint, timestamp, cálculo, dado histórico, permissão ou regra de avaliação será alterado. A duração continuará utilizando o mecanismo atual. Nome do evento e data da participação usarão exclusivamente o contrato real, sem tratar ingresso como data oficial do evento.
++
++## Validação planejada
++
++Preparar testes de apresentação, retorno, estados, motivos, datas diferentes, duração longa, nota/comentário, pendência, erro e indisponibilidade; preservar cenários existentes de Home/Eventos. A execução cabe a Luna Medium conforme AGENTS.md. A aprovação anterior de 1009 testes não valida esta revisão. Capturas finais para o paper dependem de execução real conectada ao backend pelo responsável.
++
++## Implementação concluída localmente
++
++- Header nativo desativado exclusivamente em ParticipationDetails. ScreenHeader com título e goBack presente nos estados válido e indisponível; origem Home/Eventos preservada sem reset ou navegação fixa.
++- Evento com nome completo, status real traduzido, inclusive Cancelada, e Data da participação identificada pelo ingresso. Não há data oficial do evento inventada.
++- Cards de Permanência e Atendimentos concluídos em flex com quebra, sem altura fixa. Cálculo original intacto, incluindo durações superiores a um dia. Linhas temporais flexíveis, datas completas sem segundos e indicação explícita do fuso do dispositivo.
++- Status finished/active/waiting/canceled e oito motivos reais traduzidos. Fontes: participation-lifecycle.service.ts, staff-entry-call.service.ts, admin-close.service.ts e event-closure.projection.ts. Valores desconhecidos têm fallback neutro; valores de contrato não são modificados.
++- Sua avaliação utiliza a representação gráfica ★/☆ já empregada por EvaluationScreen, com cores do tema, sem Pressable, nota real e comentário opcional. O grupo tem rótulo acessível e cinco estrelas; erro/carregamento não exibem estrelas fictícias. Pendência mantém RealEvaluation e o item original.
++- Não houve modificação de autenticação, serviços, backend, timestamps ou regras de avaliação. Não houve novas dependências.
++
++## Testes preparados e verificações
++
++Criado `app/tests/participante05aDetalhesVisual.test.cjs` para retorno, estados, duração longa (135h 53min), contagem real, datas de dias distintos sem segundos, motivos, fallback, consulta da avaliação com carregamento/erro/comentário, leitura das estrelas e ação pendente. A inspeção das origens Home/Eventos e da rota é estática; não substitui a validação do retorno em navegação real. Adaptada a expectativa anterior de header nativo em participationDetails.test.cjs sem remover suas demais asserções.
++
++O implementador realizou inspeção sintática e integridade Git/evidência. Nenhum teste, lint, build ou typecheck foi executado, conforme separação de executor do AGENTS.md. Não existe novo resultado de aprovação automatizada. Para Luna Medium, após inspecionar os comandos e configurar NODE_ENV=test em ambiente isolado, executar na raiz:
++
++```powershell
++node --test app/tests/participante05aDetalhesVisual.test.cjs
++node --test app/tests/participationDetails.test.cjs
++node --test app/tests/participationActionScreens.test.cjs
++node --test app/tests/participationEvaluations.test.cjs
++npm.cmd --prefix app test
++```
++
++A regressão completa deve seguir a aprovação das suítes focadas. Não conectar a banco real. Evidência: `qa-evidence/PARTICIPANTE_05A-changes.diff`, base `52dfe6309e6f9ed6898164796427e4638c482b18`, restrita a App.js, tela real de detalhes, dois arquivos de teste relacionados e este documento, excluindo o próprio patch.
++
++## Limitações e entrega
++
++Consulta remota tentada e indisponível por falha de conexão ao GitHub; o SHA de origem foi confirmado localmente. As capturas iPhone citadas no pedido não estão disponíveis no anexo acessível. Nenhuma renderização nativa ou captura real foi produzida nesta execução. Verificar no Expo: 375–430 dp, nomes extensos, fonte ampliada, quebra dos cards, cinco estrelas, comentários longos, retorno a partir da Home e de Eventos, inclusive detalhes indisponíveis. A captura do paper deve ser obtida pelo responsável no aplicativo real conectado ao backend.
++
++A engrenagem flutuante não foi identificada nestas telas pelo código; o controle de configurações de câmera em EventEntry é distinto. Não foi removida funcionalidade global nem atribuída a origem externa sem evidência.
++
++Estado: antecipação visual implementada localmente, aguardando campanha Luna Medium e validação no aparelho. Não conclui a PARTICIPANTE-05. Sem staging, commit, push ou merge.
++
++Conferência final: análise sintática dos JS/CJS alterados e `git diff --check -- app docs` aprovados. A evidência passou em `git apply --reverse --check`. A verificação Git global sinaliza uma linha de contexto vazia com espaço no patch acumulado da 02A, sem whitespace incorreto nos arquivos de código/documentação. Isso não representa execução dos testes preparados.
++
++## Correção complementar — identidade visual e paleta
++
++A revisão consultou os tokens oficiais sem modificá-los globalmente. Cards de informações, permanência, atendimentos e avaliação agora usam superfície neutra `colors.background.base`, evitando o tom azulado herdado de elevated. Contornos suaves usam primaryLight com alfa 40 hexadecimal; a avaliação tem borda primary, os ícones de resumo têm fundo primaryDim e os valores de resumo usam primaryLight. O estado indisponível mantém contorno amarelo; participação ativa e finalizada usam verde, cancelada permanece neutra e aguardando mantém aviso amarelo. Erros mantêm vermelho.
++
++As estrelas preenchidas usam `colors.semantic.warning`, como `EvaluationScreen` e a indicação do próprio colors.js para avaliações; as vazias continuam neutras. Essa exceção preserva a convenção gráfica existente, mantendo a identidade roxa nos cards, ícones e destaques. Não houve alteração do background original, rotas, handlers, dados, cálculos ou contratos. O restante da revisão anterior foi preservado.
++
++Verificações desta rodada: inspeção estática de sintaxe, diff e integridade dos patches. Nenhum teste, lint, typecheck ou build executado; a campanha aguarda confirmação manual de Luna Medium. A validação visual definitiva das cores e contraste permanece com o responsável no iPhone antes das capturas reais. Evidências únicas 02A/05A regeneradas com as bases e escopos documentados anteriormente.

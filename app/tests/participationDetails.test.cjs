@@ -316,7 +316,7 @@ test('details open from the root stack with a back button to the list', () => {
   const screens = nodes(app.exports.AppNavigation()).filter((node) => node.type === 'StackScreen');
   const details = screens.find((node) => node.props.name === 'ParticipationDetails');
   assert.equal(details.props.component, './screens/participation/ParticipationRealDetailsScreen');
-  assert.equal(details.props.options.headerShown, true);
+  assert.equal(details.props.options.headerShown, false, 'retorno pertence ao ScreenHeader da tela real');
   assert.notEqual(details.props.options.headerBackVisible, false);
   assert.equal(details.props.options.title, 'Detalhes da participação');
   assert.ok(screens.some((node) => node.props.name === 'MainTabs'));

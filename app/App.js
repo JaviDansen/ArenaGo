@@ -76,7 +76,7 @@ export function AppNavigation() {
       component: ParticipationDetailsScreen,
       options: {
         ...participantHeaderOptions,
-        headerShown: true,
+        headerShown: false,
         title: 'Detalhes da participação',
       },
     },
