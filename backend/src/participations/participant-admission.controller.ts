@@ -8,10 +8,13 @@ import { EventAccessCodeValidationError, normalizeEventAccessCode } from "../eve
 import { ParticipantQueueIdempotencyPolicy } from "../events/participant-queue-idempotency.policy";
 import { EventsService } from "../events/events.service";
 import type { JoinEligibilityBlockingReason, JoinEligibilityResult } from "./join-eligibility";
-import { ParticipationsService, type CreateParticipationResult } from "./participations.service";
+import { ADMISSION_INTENT_ABANDONED, classifyCompletedJoin, type JoinIntentLookupResult, type JsonValue } from "./join-idempotency";
+import { ParticipationsService, type AbandonJoinIntentResult, type CreateParticipationResult } from "./participations.service";
 
 const lookupBody = z.object({ accessCode: z.string() }).strict();
 const joinBody = z.object({ eventId: operationUuid }).strict();
+/** Mesmo corpo do ingresso original: o fingerprint da intenção é derivado dele. */
+const intentBody = joinBody;
 
 function problem(status: HttpStatus, code: string, detail: string): never {
   throw new ProblemException({
@@ -34,10 +37,20 @@ function blocked(eligibility: JoinEligibilityResult): never {
   problem(status, reason, "Os requisitos atuais não permitem ingressar neste evento.");
 }
 
+function abandonedReplay(result: CreateParticipationResult): boolean {
+  return result.kind === "replay" && result.httpStatus !== HttpStatus.CREATED
+    && classifyCompletedJoin({ httpStatus: result.httpStatus, resultReference: result.participationId,
+      resultPayload: result.idempotencyResult as JsonValue | null }).state === "abandoned";
+}
+
 function joinResponse(result: CreateParticipationResult): { participationId: string } {
   if (result.kind === "blocked") blocked(result.eligibility);
   if (result.kind === "request_conflict") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "Esta chave já foi usada para outro ingresso.");
   if (result.kind === "in_progress") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_IN_PROGRESS", "A operação com esta chave ainda está em andamento.");
+  // R02: chave abandonada é terminal; nunca vira ingresso nem erro 500.
+  if (abandonedReplay(result)) {
+    problem(HttpStatus.CONFLICT, ADMISSION_INTENT_ABANDONED, "Esta tentativa de ingresso foi cancelada e não pode ser concluída.");
+  }
   if (result.kind === "replay" && (result.httpStatus !== HttpStatus.CREATED ||
     result.idempotencyResult === null || typeof result.idempotencyResult !== "object" ||
     Array.isArray(result.idempotencyResult) || result.idempotencyResult.participationId !== result.participationId)) {
@@ -45,6 +58,14 @@ function joinResponse(result: CreateParticipationResult): { participationId: str
   }
   if (!result.participationId) throw new Error("Ingresso concluído sem identificador de participação.");
   return { participationId: result.participationId };
+}
+
+type IntentState = { state: "completed"; participationId: string } | { state: Exclude<JoinIntentLookupResult["state"], "completed"> };
+
+/** Resposta mínima: só o estado e, quando concluída, o identificador da própria participação. */
+function intentResponse(result: JoinIntentLookupResult | AbandonJoinIntentResult): { intent: IntentState } {
+  return { intent: result.state === "completed"
+    ? { state: "completed", participationId: result.participationId } : { state: result.state } };
 }
 
 @Controller()
@@ -86,5 +107,31 @@ export class ParticipantAdmissionController {
       userId, eventId, idempotencyKey, expiresAt: this.policy.expiresAt(),
     });
     return joinResponse(result);
+  }
+
+  /**
+   * R02: consulta somente-leitura da intenção (ator da sessão + `join` + chave + fingerprint do corpo).
+   * POST apenas para transportar o corpo e a chave no cabeçalho, nunca na URL.
+   */
+  @Post("participations/admission-intents/lookup")
+  @HttpCode(HttpStatus.OK)
+  async lookupIntent(@CurrentUserId() userId: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const { eventId } = validateOperationBody(intentBody, body, request);
+    const idempotencyKey = validateOperationIdempotencyKey(request);
+    return intentResponse(await this.participations.lookupJoinIntent({ userId, eventId, idempotencyKey }));
+  }
+
+  /** R02: abandono definitivo de intenção não concluída; nunca cancela participação existente. */
+  @Post("participations/admission-intents/abandon")
+  @HttpCode(HttpStatus.OK)
+  async abandonIntent(@CurrentUserId() userId: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const { eventId } = validateOperationBody(intentBody, body, request);
+    const idempotencyKey = validateOperationIdempotencyKey(request);
+    const result = await this.participations.abandonJoinIntent({
+      userId, eventId, idempotencyKey, expiresAt: this.policy.expiresAt(),
+    });
+    if (result.state === "conflict") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "Esta chave pertence a outro ingresso.");
+    if (result.state === "in_progress") problem(HttpStatus.CONFLICT, "IDEMPOTENCY_IN_PROGRESS", "A operação com esta chave ainda está em andamento.");
+    return intentResponse(result);
   }
 }

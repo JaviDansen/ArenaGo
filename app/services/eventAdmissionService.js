@@ -46,8 +46,10 @@ export function parseParticipationCreationResponse(body) {
 function validIntent(value, userId) {
   return value && value.userId === userId && validUuid(value.eventId) && validUuid(value.key) &&
     (value.confirmedParticipationId === null || validUuid(value.confirmedParticipationId)) &&
-    // createdAt é informativo (R01); intenções gravadas antes dele continuam válidas.
-    (value.createdAt === undefined || (typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))));
+    // createdAt (R01), attempts e eventName (R02) são opcionais: intenções antigas continuam válidas.
+    (value.createdAt === undefined || (typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt)))) &&
+    (value.attempts === undefined || (Number.isSafeInteger(value.attempts) && value.attempts >= 0)) &&
+    (value.eventName === undefined || (typeof value.eventName === 'string' && value.eventName.length <= 200));
 }
 
 const PARTICIPATION_STATUS = new Set(['waiting', 'active', 'finished', 'canceled']);
@@ -63,29 +65,48 @@ export function parseOwnedParticipationResponse(body, participationId) {
     finishedAt: participation.finishedAt ?? null, finishReason: participation.finishReason ?? null };
 }
 
-/**
- * Códigos que o backend só devolve depois de reservar a chave sem encontrar registro anterior
- * (o replay de `reserveJoinIntentWithTx` precede a elegibilidade e o rollback desfaz a reserva).
- * Para a chave enviada, eles provam que o POST não foi aplicado; a intenção pode ser liberada.
- */
-const NOT_APPLIED_CODES = new Set([
+const INTENT_STATES = new Set(['completed', 'not_found', 'in_progress', 'abandoned', 'conflict']);
+
+/** R02: resposta de consulta/abandono de intenção (`{ intent: { state, participationId? } }`). */
+export function parseAdmissionIntentResponse(body, allowed = INTENT_STATES) {
+  const intent = body?.intent;
+  if (!intent || !allowed.has(intent.state)) throw responseError();
+  if (intent.state === 'completed') {
+    if (!validUuid(intent.participationId)) throw responseError();
+    return { state: 'completed', participationId: intent.participationId };
+  }
+  return { state: intent.state };
+}
+
+/** Recusas de domínio/validação a uma requisição de ingresso efetivamente processada. */
+const REFUSAL_CODES = new Set([
   'VALIDATION_ERROR', 'EVENT_NOT_FOUND', 'PARTICIPATION_ALREADY_CURRENT', 'PROFILE_INCOMPLETE',
   'EVENT_NOT_STARTED', 'EVENT_REGISTRATION_CLOSED', 'EVENT_NOT_READY',
 ]);
 
-/** Classifica a falha do POST de ingresso para a chave enviada. */
+/**
+ * Classifica a falha de um POST de ingresso **para a requisição que a recebeu**.
+ * `refused` não prova, sozinho, que a intenção foi resolvida: outra requisição anterior com a
+ * mesma chave pode estar em trânsito. Só a primeira e única tentativa recusada libera a
+ * intenção (ver `confirm`); recusas durante a recuperação exigem consulta ou abandono.
+ */
 export function classifyJoinFailure(error) {
   if (error?.code === 'ADMISSION_OTHER_EVENT_PENDING') return 'other_pending';
+  if (error?.code === 'ADMISSION_INTENT_ABANDONED') return 'abandoned';
   if (error?.isNetworkError || error?.isTimeout || !error?.status || error.status >= 500 ||
       error?.code === 'IDEMPOTENCY_IN_PROGRESS' || error?.code === 'INVALID_ADMISSION_RESPONSE') return 'uncertain';
   if (error.status === 401 || error.status === 403) return 'session';
   if (error.code === 'IDEMPOTENCY_KEY_REUSED') return 'conflict';
-  if ([400, 404, 409, 422].includes(error.status) && NOT_APPLIED_CODES.has(error.code)) return 'not_applied';
+  if ([400, 404, 409, 422].includes(error.status) && REFUSAL_CODES.has(error.code)) return 'refused';
   // Outros 4xx sem semântica conhecida não provam nada sobre a chave: preservar.
   return 'unknown';
 }
 
-/** Persiste somente a intenção e sua chave, isoladas pelo UUID da conta; nenhum token é salvo. */
+/**
+ * Persiste somente a intenção e sua chave, isoladas pelo UUID da conta; nenhum token é salvo.
+ * Toda leitura-comparação-escrita roda dentro da mesma fila serializada (seção crítica):
+ * `create` não sobrescreve outra intenção, `update` e `clear` só agem sobre a chave esperada.
+ */
 export function createAdmissionIntentStorage({ platformOS = Platform.OS, secureStore = SecureStore } = {}) {
   const webValues = new Map();
   let queue = Promise.resolve();
@@ -116,23 +137,54 @@ export function createAdmissionIntentStorage({ platformOS = Platform.OS, secureS
     if (!validIntent(intent, userId)) throw new Error('A intenção de ingresso armazenada está inválida.');
     return intent;
   }
+  async function write(intent) {
+    if (!validIntent(intent, intent?.userId)) throw new Error('Intenção de ingresso inválida.');
+    const key = storageKey(intent.userId), value = JSON.stringify(intent);
+    if (platformOS === 'web') webValues.set(key, value);
+    else await secureStore.setItemAsync(key, value);
+  }
+  async function remove(userId) {
+    const key = storageKey(userId);
+    if (platformOS === 'web') webValues.delete(key);
+    else await secureStore.deleteItemAsync(key);
+  }
+  const matchesExpected = (intent, expected) =>
+    Object.entries(expected).every(([field, value]) => (intent[field] ?? null) === value);
   return {
     get(userId) { return enqueue(() => read(userId)); },
-    set(intent) {
+    /** Gravação incondicional (compatibilidade); o store usa as operações condicionais abaixo. */
+    set(intent) { return enqueue(() => write(intent)); },
+    /** Cria somente se a conta não tiver intenção; caso contrário devolve a existente intacta. */
+    create(intent) {
       return enqueue(async () => {
-        if (!validIntent(intent, intent?.userId)) throw new Error('Intenção de ingresso inválida.');
-        const key = storageKey(intent.userId), value = JSON.stringify(intent);
-        if (platformOS === 'web') webValues.set(key, value);
-        else await secureStore.setItemAsync(key, value);
+        const existing = await read(intent?.userId);
+        if (existing) return { created: false, intent: existing };
+        await write(intent);
+        return { created: true, intent };
       });
     },
-    clear(userId, keyToClear) {
+    /**
+     * Atualiza somente se a intenção atual tiver a chave esperada. `patch` pode ser função do
+     * valor atual (transição atômica). Identidade (conta, evento, chave) nunca muda.
+     * Devolve a intenção gravada ou `null` quando ela não é mais a atual.
+     */
+    update(userId, expectedKey, patch) {
+      return enqueue(async () => {
+        const existing = await read(userId);
+        if (!existing || existing.key !== expectedKey) return null;
+        const changes = typeof patch === 'function' ? patch(existing) : patch;
+        const next = { ...existing, ...changes, userId: existing.userId, eventId: existing.eventId, key: existing.key };
+        await write(next);
+        return next;
+      });
+    },
+    /** Remove somente a chave esperada, opcionalmente exigindo campos (ex.: `attempts: 1`). */
+    clear(userId, keyToClear, expected = {}) {
       return enqueue(async () => {
         const intent = await read(userId);
-        if (!intent || intent.key !== keyToClear) return;
-        const key = storageKey(userId);
-        if (platformOS === 'web') webValues.delete(key);
-        else await secureStore.deleteItemAsync(key);
+        if (!intent || intent.key !== keyToClear || !matchesExpected(intent, expected)) return false;
+        await remove(userId);
+        return true;
       });
     },
   };
@@ -162,16 +214,21 @@ export function describeAdmissionError(error, operation = 'lookup') {
 }
 
 const MESSAGES = {
-  otherPending: 'Há uma tentativa de ingresso anterior nesta conta que ainda não foi resolvida. Verifique essa tentativa antes de iniciar outra.',
+  otherPending: 'Há uma tentativa de ingresso anterior nesta conta que ainda não foi resolvida. Resolva essa tentativa antes de iniciar outra.',
+  samePending: 'Há uma tentativa de ingresso anterior neste evento ainda sem resultado confirmado. Verifique, repita ou cancele essa tentativa.',
   previousBusy: 'Aguarde a conclusão da tentativa de ingresso anterior.',
   unsynced: 'Ingresso confirmado, mas a participação ainda não pôde ser sincronizada. Atualize sem repetir o ingresso.',
   unsyncedAfterError: 'Ingresso confirmado. Não foi possível atualizar a participação agora; tente sincronizar novamente.',
   historical: 'Sua tentativa anterior foi registrada e essa participação já foi encerrada. Você pode iniciar um novo ingresso.',
+  abandoned: 'A tentativa anterior foi cancelada definitivamente e não poderá mais ser concluída. Nenhuma participação foi criada por ela.',
+  notFound: 'O servidor ainda não tem registro do resultado da tentativa anterior. Ela continua guardada: você pode verificar novamente, repetir o ingresso ou cancelar a tentativa.',
+  inProgress: 'A tentativa anterior ainda está sendo processada pelo servidor. Verifique novamente em instantes.',
+  repeatRefused: 'O servidor recusou a repetição agora. A tentativa anterior continua sem resultado confirmado; você pode verificar novamente ou cancelá-la.',
   recoveryUncertain: 'Não foi possível confirmar a tentativa anterior agora. Ela continua guardada com segurança; tente verificar novamente.',
-  recoverySession: 'Sua sessão não permitiu verificar a tentativa anterior. Entre novamente e tente outra vez.',
+  recoverySession: 'Sua sessão não permitiu resolver a tentativa anterior. Entre novamente e tente outra vez.',
   recoveryConflict: 'A tentativa anterior não pôde ser confirmada com segurança. Procure o suporte do evento; nenhum novo ingresso foi criado.',
   recoveryInconsistent: 'O servidor não confirmou a participação da tentativa anterior. Procure o suporte do evento; nenhum novo ingresso foi criado.',
-  recoveryStorage: 'Não foi possível ler a tentativa anterior guardada neste aparelho. Nenhum novo ingresso foi criado.',
+  recoveryStorage: 'Não foi possível ler ou atualizar a tentativa anterior guardada neste aparelho. Nenhum novo ingresso foi criado.',
   revalidateFailed: 'Não foi possível atualizar a situação do evento. Tente novamente antes de confirmar.',
   revalidateOtherEvent: 'Este código agora corresponde a outro evento. Consulte o evento novamente.',
 };
@@ -179,7 +236,7 @@ const MESSAGES = {
 /** Resumo público da intenção persistida; a chave idempotente nunca sai do store. */
 function describeIntent(intent, eventId) {
   if (!intent) return null;
-  return { eventId: intent.eventId, sameEvent: intent.eventId === eventId,
+  return { eventId: intent.eventId, eventName: intent.eventName ?? null, sameEvent: intent.eventId === eventId,
     confirmed: Boolean(intent.confirmedParticipationId) };
 }
 
@@ -189,7 +246,12 @@ function describeIntent(intent, eventId) {
  * Cada consulta (`lookup`) abre uma nova operação: estado de confirmação, erros e resultados de
  * sincronização de operações anteriores não são herdados, e respostas tardias delas não publicam
  * nada. A intenção persistida (chave idempotente) pertence à conta, não à operação, e só é
- * liberada por resolução autoritativa do servidor.
+ * liberada por resolução autoritativa do servidor ou por recusa da sua primeira e única tentativa.
+ *
+ * Recuperação de uma intenção anterior (R02), sempre com a chave e o corpo originais:
+ * - `reconcile` (Verificar): somente consulta (`/participations/admission-intents/lookup`);
+ * - `repeatPrevious` (Repetir): POST original, por ação explícita — pode concluir o ingresso;
+ * - `abandonPrevious` (Cancelar): abandono terminal no servidor; nunca cancela participação existente.
  */
 export function createEventAdmissionStore({
   client = httpClient,
@@ -203,7 +265,7 @@ export function createEventAdmissionStore({
   const empty = (identity = null, operation = 0) => ({ userId: identity?.userId ?? null, epoch: identity?.epoch ?? null,
     operation, status: 'idle', event: null, eligibility: null, eligibilityStatus: 'none', error: null,
     confirmedParticipationId: null, outcome: null, pendingIntent: null,
-    recovery: { status: 'idle', message: null } });
+    recovery: { status: 'idle', message: null, action: null } });
   let state = empty(), generation = 0, operation = 0, lookupSequence = 0;
   let accessCode = null;
   // Voos são marcados com a operação que os criou; outra operação nunca recebe seu resultado.
@@ -236,6 +298,7 @@ export function createEventAdmissionStore({
     try { return { intent: await intentStorage.get(ctx.userId), failed: false }; }
     catch { return { intent: null, failed: true }; }
   }
+  const pendingSummary = (pending, eventId) => (pending.failed ? { unreadable: true } : describeIntent(pending.intent, eventId));
 
   async function lookup(code) {
     if (state.userId === null) return { kind: 'stale' };
@@ -258,7 +321,7 @@ export function createEventAdmissionStore({
       if (!matches(ctx) || sequence !== lookupSequence) return { kind: 'stale' };
       accessCode = normalized;
       publish({ ...state, status: 'ready', ...result, eligibilityStatus: 'fresh', error: null,
-        pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, result.event.id) });
+        pendingIntent: pendingSummary(pending, result.event.id) });
       return { kind: 'found', ...result };
     } catch (error) {
       if (!matches(ctx) || sequence !== lookupSequence) return { kind: 'stale' };
@@ -270,15 +333,16 @@ export function createEventAdmissionStore({
 
   /**
    * Revalida a elegibilidade do mesmo evento pelo contrato real (`POST /events/lookup`).
-   * Não abre nova operação: confirmação e recuperação em curso desta operação são preservadas.
+   * Não abre nova operação e não interfere em ingresso ou recuperação em curso (devolve `busy`).
    */
   function revalidate() {
     const ctx = capture();
     if (!matches(ctx) || !state.event?.id || !accessCode) return Promise.resolve({ kind: 'unavailable' });
     if (revalidateFlight?.operation === operation) return revalidateFlight.promise;
-    if (joinFlight?.operation === operation) return Promise.resolve({ kind: 'busy' });
+    if (joinFlight?.operation === operation || recoveryFlight?.operation === operation) return Promise.resolve({ kind: 'busy' });
     const eventId = state.event.id, code = accessCode;
     const promise = (async () => {
+      // A autorização anterior deixa de valer enquanto a consulta estiver em andamento.
       update(ctx, { eligibilityStatus: 'revalidating' });
       try {
         const result = parseEventLookupResponse(await client.post('/events/lookup', { accessCode: code }, { auth: true }));
@@ -294,7 +358,7 @@ export function createEventAdmissionStore({
           // Erro de uma tentativa recusada deixa de valer quando o servidor reapresenta o estado.
           error: state.status === 'error' || state.status === 'ready' ? null : state.error,
           status: terminal || state.status === 'uncertain' || state.status === 'confirmed_unsynced' ? state.status : 'ready',
-          pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, eventId) });
+          pendingIntent: pendingSummary(pending, eventId) });
         return { kind: 'found', ...result };
       } catch (error) {
         if (!matches(ctx)) return { kind: 'stale' };
@@ -314,9 +378,41 @@ export function createEventAdmissionStore({
       await client.get(`/participations/${participationId}`, { auth: true }), participationId);
   }
 
-  async function clearIntent(userId, intentKey) {
-    try { await intentStorage.clear(userId, intentKey); return true; }
+  async function clearIntent(userId, intentKey, expected) {
+    try { return await intentStorage.clear(userId, intentKey, expected); }
     catch { return false; /* Preserva a chave caso o armazenamento não confirme sua remoção. */ }
+  }
+
+  /** Grava a prova do servidor só na intenção da mesma chave; nunca sobrescreve outra intenção. */
+  async function recordConfirmation(userId, intentKey, confirmedId) {
+    try { return Boolean(await intentStorage.update(userId, intentKey, { confirmedParticipationId: confirmedId })); }
+    catch { return false; }
+  }
+
+  /**
+   * Envia o POST original da intenção (mesma chave e mesmo corpo), contando antes a tentativa.
+   * Devolve `{ kind: 'confirmed', participationId }`, `{ kind: 'failed', error, attempts }` ou
+   * `{ kind: 'replaced' }` quando a intenção deixou de ser a atual antes do envio.
+   */
+  async function sendIntent(userId, intent) {
+    let counted;
+    try {
+      counted = await intentStorage.update(userId, intent.key,
+        (current) => ({ attempts: (Number.isSafeInteger(current.attempts) ? current.attempts : 1) + 1 }));
+    } catch (error) { return { kind: 'storage_failed', error }; }
+    if (!counted) return { kind: 'replaced' };
+    try {
+      const response = await client.post('/participations', { eventId: intent.eventId }, {
+        auth: true, headers: { 'Idempotency-Key': intent.key }, outcomeUnknownOnNetworkError: true,
+      });
+      const participationId = parseParticipationCreationResponse(response);
+      // Persistir antes de qualquer checagem de operação: a prova do servidor não pode se perder,
+      // mas só é gravada se esta ainda for a intenção atual (condicionada à chave).
+      await recordConfirmation(userId, intent.key, participationId);
+      return { kind: 'confirmed', participationId };
+    } catch (error) {
+      return { kind: 'failed', error, attempts: counted.attempts };
+    }
   }
 
   /**
@@ -324,7 +420,7 @@ export function createEventAdmissionStore({
    * Corrente → `complete`; encerrada/cancelada (GET /participations/:id) → `historical`.
    * Somente esses dois desfechos liberam a intenção persistida.
    */
-  async function settleConfirmed(ctx, confirmedId, eventId) {
+  async function settleConfirmed(ctx, confirmedId, eventId, intentKey = null) {
     try { await refreshParticipation(); }
     catch { /* O estado de leitura já informa a falha; o ingresso continua confirmado. */ }
     if (!identityMatches(ctx)) return { kind: 'stale' };
@@ -344,8 +440,8 @@ export function createEventAdmissionStore({
     if (!participation) return { kind: 'confirmed_unsynced' };
     const historical = ['finished', 'canceled'].includes(participation.status);
     try {
-      const intent = await intentStorage.get(ctx.userId);
-      if (intent?.confirmedParticipationId === confirmedId) await intentStorage.clear(ctx.userId, intent.key);
+      const key = intentKey ?? (await intentStorage.get(ctx.userId))?.key;
+      if (key) await intentStorage.clear(ctx.userId, key, { confirmedParticipationId: confirmedId });
     } catch { /* Uma intenção residual só permite replay; a leitura do servidor confirmou o desfecho. */ }
     if (!identityMatches(ctx)) return { kind: 'stale' };
     return { kind: historical ? 'historical' : 'complete', participation };
@@ -364,10 +460,10 @@ export function createEventAdmissionStore({
     }
   }
 
-  function synchronize(ctx, confirmedId, eventId) {
+  function synchronize(ctx, confirmedId, eventId, intentKey = null) {
     if (syncFlight?.operation === ctx.operation && syncFlight.confirmedId === confirmedId) return syncFlight.promise;
     const promise = (async () => {
-      const settled = await settleConfirmed(ctx, confirmedId, eventId);
+      const settled = await settleConfirmed(ctx, confirmedId, eventId, intentKey);
       if (settled.kind === 'stale' || !matches(ctx)) return { kind: 'stale' };
       publishSettled(ctx, confirmedId, settled);
       return settled.kind === 'inconsistent' ? { kind: 'error', message: MESSAGES.recoveryInconsistent } : settled;
@@ -387,7 +483,7 @@ export function createEventAdmissionStore({
 
   async function refreshPendingIntent(ctx) {
     const pending = await readPendingIntent(ctx);
-    update(ctx, { pendingIntent: pending.failed ? { unreadable: true } : describeIntent(pending.intent, state.event?.id) });
+    update(ctx, { pendingIntent: pendingSummary(pending, state.event?.id) });
   }
 
   function confirm(eventId) {
@@ -400,78 +496,74 @@ export function createEventAdmissionStore({
     if (joinFlight || recoveryFlight) return Promise.resolve({ kind: 'error', message: MESSAGES.previousBusy });
     if (state.confirmedParticipationId) return retrySync();
     const promise = (async () => {
-      let intent;
-      let confirmedId = null;
       update(ctx, { status: 'joining', error: null, outcome: null });
+      const fail = async (message, extra = {}) => {
+        if (!matches(ctx)) return { kind: 'stale' };
+        update(ctx, { status: extra.uncertain ? 'uncertain' : 'error', error: message });
+        await refreshPendingIntent(ctx);
+        return { kind: extra.uncertain ? 'uncertain' : 'error', message, revalidate: Boolean(extra.revalidate) };
+      };
+      let intent;
       try {
-        intent = await intentStorage.get(ctx.userId);
+        const key = createKey();
+        if (!validUuid(key)) throw new Error('Não foi possível gerar uma chave segura para o ingresso.');
+        // Criação condicional: nunca sobrescreve uma intenção anterior ainda não resolvida.
+        const created = await intentStorage.create({ userId: ctx.userId, eventId, key, confirmedParticipationId: null,
+          createdAt: now().toISOString(), attempts: 0, eventName: state.event?.name?.slice(0, 200) });
+        intent = created.intent;
         if (!matches(ctx)) return { kind: 'stale' };
-        if (intent && intent.eventId !== eventId) {
-          const error = new Error(MESSAGES.otherPending);
-          error.code = 'ADMISSION_OTHER_EVENT_PENDING';
-          throw error;
+        if (!created.created) {
+          if (intent.eventId !== eventId) return fail(MESSAGES.otherPending);
+          if (intent.confirmedParticipationId) {
+            update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: intent.confirmedParticipationId, error: null });
+            return synchronize(ctx, intent.confirmedParticipationId, eventId, intent.key);
+          }
+          // Tentativa anterior do mesmo evento sem resultado: repetir exige ação explícita (R02).
+          return fail(MESSAGES.samePending);
         }
-        if (!intent) {
-          const key = createKey();
-          if (!validUuid(key)) throw new Error('Não foi possível gerar uma chave segura para o ingresso.');
-          intent = { userId: ctx.userId, eventId, key, confirmedParticipationId: null, createdAt: now().toISOString() };
-          await intentStorage.set(intent);
-        }
-        if (!matches(ctx)) return { kind: 'stale' };
-        confirmedId = intent.confirmedParticipationId;
-        if (!confirmedId) {
-          // Intenção nova ou incerta do mesmo evento: mesma chave e mesmo corpo ⇒ replay seguro.
-          const response = await client.post('/participations', { eventId }, {
-            auth: true, headers: { 'Idempotency-Key': intent.key }, outcomeUnknownOnNetworkError: true,
-          });
-          confirmedId = parseParticipationCreationResponse(response);
-          // Persistir antes de checar a operação: a prova do servidor não pode se perder.
-          await intentStorage.set({ ...intent, confirmedParticipationId: confirmedId });
-        }
-        if (!matches(ctx)) return { kind: 'stale' };
-        update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: null });
-        return synchronize(ctx, confirmedId, eventId);
-      } catch (error) {
-        if (!matches(ctx)) return { kind: 'stale' };
-        if (confirmedId) {
-          update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: confirmedId, error: MESSAGES.unsyncedAfterError });
-          return { kind: 'confirmed_unsynced' };
-        }
-        const failure = classifyJoinFailure(error);
-        if (intent && failure === 'not_applied') {
-          await clearIntent(ctx.userId, intent.key);
-          if (!matches(ctx)) return { kind: 'stale' };
-        }
-        const message = failure === 'other_pending' ? error.message : describeAdmissionError(error, 'join');
-        const uncertain = failure === 'uncertain';
-        update(ctx, { status: uncertain ? 'uncertain' : 'error', error: message });
-        if (failure === 'other_pending' || failure === 'not_applied') await refreshPendingIntent(ctx);
-        return { kind: uncertain ? 'uncertain' : 'error', message,
-          // Recusa definitiva do servidor: a apresentação deve ser revalidada.
-          revalidate: failure === 'not_applied' };
+      } catch {
+        return fail(MESSAGES.recoveryStorage);
       }
+      const sent = await sendIntent(ctx.userId, intent);
+      if (sent.kind === 'confirmed') {
+        if (!matches(ctx)) return { kind: 'stale' };
+        update(ctx, { status: 'confirmed_unsynced', confirmedParticipationId: sent.participationId, error: null });
+        return synchronize(ctx, sent.participationId, eventId, intent.key);
+      }
+      if (sent.kind === 'replaced' || sent.kind === 'storage_failed') return fail(MESSAGES.recoveryStorage);
+      const failure = classifyJoinFailure(sent.error);
+      if (failure === 'abandoned') {
+        await clearIntent(ctx.userId, intent.key, { confirmedParticipationId: null });
+        return fail(MESSAGES.abandoned, { revalidate: true });
+      }
+      if (failure === 'refused') {
+        // Só a primeira e única tentativa com esta chave prova, pela recusa, que nada será criado.
+        const released = sent.attempts === 1 &&
+          await clearIntent(ctx.userId, intent.key, { attempts: 1, confirmedParticipationId: null });
+        return fail(describeAdmissionError(sent.error, 'join'), { revalidate: released });
+      }
+      return fail(describeAdmissionError(sent.error, 'join'), { uncertain: failure === 'uncertain' });
     })();
     const flight = { operation, promise };
     joinFlight = flight;
     return promise.finally(() => { if (joinFlight === flight) joinFlight = null; });
   }
 
-  /**
-   * Reconcilia a intenção persistida (de qualquer evento) sem criar nova chave.
-   * Sem identificador confirmado, repete o POST original (mesma chave e mesmo corpo): o backend
-   * devolve o resultado gravado ou prova que a chave não foi aplicada. Nunca presume sucesso.
-   */
-  function reconcile() {
+  /** Executa uma ação de recuperação com voo exclusivo por operação. */
+  function recover(action, run) {
     const ctx = capture();
     if (!matches(ctx)) return Promise.resolve({ kind: 'stale' });
-    if (recoveryFlight?.operation === operation) return recoveryFlight.promise;
+    if (recoveryFlight?.operation === operation) {
+      return recoveryFlight.action === action ? recoveryFlight.promise
+        : Promise.resolve({ kind: 'error', message: MESSAGES.previousBusy });
+    }
     if (joinFlight) return Promise.resolve({ kind: 'error', message: MESSAGES.previousBusy });
     const promise = (async () => {
-      update(ctx, { recovery: { status: 'checking', message: null } });
+      update(ctx, { recovery: { status: 'checking', message: null, action } });
       const finish = async (status, message, extra = {}) => {
         if (!matches(ctx)) return { kind: 'stale' };
         await refreshPendingIntent(ctx);
-        update(ctx, { recovery: { status, message } });
+        update(ctx, { recovery: { status, message, action } });
         return { kind: status, message, ...extra };
       };
       let intent;
@@ -479,42 +571,103 @@ export function createEventAdmissionStore({
       catch { return finish('blocked', MESSAGES.recoveryStorage); }
       if (!identityMatches(ctx)) return { kind: 'stale' };
       if (!intent) return finish('resolved', null, { outcome: 'none' });
-      let confirmedId = intent.confirmedParticipationId;
-      if (!confirmedId) {
-        try {
-          const response = await client.post('/participations', { eventId: intent.eventId }, {
-            auth: true, headers: { 'Idempotency-Key': intent.key }, outcomeUnknownOnNetworkError: true,
-          });
-          confirmedId = parseParticipationCreationResponse(response);
-          await intentStorage.set({ ...intent, confirmedParticipationId: confirmedId });
-        } catch (error) {
-          if (!identityMatches(ctx)) return { kind: 'stale' };
-          if (confirmedId) return finish('uncertain', MESSAGES.recoveryUncertain);
-          const failure = classifyJoinFailure(error);
-          if (failure === 'not_applied') {
-            // O servidor provou que a chave original não foi aplicada: nenhuma participação foi criada por ela.
-            const cleared = await clearIntent(ctx.userId, intent.key);
-            return cleared ? finish('resolved', null, { outcome: 'not_applied' })
-              : finish('blocked', MESSAGES.recoveryStorage);
-          }
-          if (failure === 'session') return finish('blocked', MESSAGES.recoverySession);
-          if (failure === 'conflict') return finish('blocked', MESSAGES.recoveryConflict);
-          return finish('uncertain', MESSAGES.recoveryUncertain);
-        }
-      }
-      if (!identityMatches(ctx)) return { kind: 'stale' };
-      const settled = await settleConfirmed(ctx, confirmedId, intent.eventId);
-      if (settled.kind === 'stale') return { kind: 'stale' };
-      if (settled.kind === 'inconsistent') return finish('blocked', MESSAGES.recoveryInconsistent);
-      if (settled.kind === 'confirmed_unsynced') return finish('uncertain', MESSAGES.recoveryUncertain);
-      return finish('resolved', settled.kind === 'historical' ? MESSAGES.historical : null,
-        { outcome: settled.kind === 'complete' ? 'current' : 'historical', participation: settled.participation });
+      const settle = async (confirmedId) => {
+        const settled = await settleConfirmed(ctx, confirmedId, intent.eventId, intent.key);
+        if (settled.kind === 'stale') return { kind: 'stale' };
+        if (settled.kind === 'inconsistent') return finish('blocked', MESSAGES.recoveryInconsistent);
+        if (settled.kind === 'confirmed_unsynced') return finish('uncertain', MESSAGES.recoveryUncertain);
+        return finish('resolved', settled.kind === 'historical' ? MESSAGES.historical : null,
+          { outcome: settled.kind === 'complete' ? 'current' : 'historical', participation: settled.participation });
+      };
+      const abandoned = async () => {
+        // Resultado terminal no servidor: a chave nunca mais poderá criar participação.
+        const cleared = await clearIntent(ctx.userId, intent.key, { confirmedParticipationId: null });
+        return cleared ? finish('resolved', MESSAGES.abandoned, { outcome: 'abandoned' }) : finish('blocked', MESSAGES.recoveryStorage);
+      };
+      if (intent.confirmedParticipationId) return settle(intent.confirmedParticipationId);
+      return run({ ctx, intent, finish, settle, abandoned });
     })();
-    const flight = { operation, promise };
+    const flight = { operation, action, promise };
     recoveryFlight = flight;
     return promise.finally(() => { if (recoveryFlight === flight) recoveryFlight = null; });
   }
 
+  const recoveryFailure = (error, finish) => {
+    const failure = classifyJoinFailure(error);
+    if (failure === 'session') return finish('blocked', MESSAGES.recoverySession);
+    if (failure === 'conflict') return finish('blocked', MESSAGES.recoveryConflict);
+    if (error?.code === 'IDEMPOTENCY_IN_PROGRESS') return finish('uncertain', MESSAGES.inProgress);
+    return finish('uncertain', MESSAGES.recoveryUncertain);
+  };
+
+  const intentRequest = (path, intent) => client.post(path, { eventId: intent.eventId }, {
+    auth: true, headers: { 'Idempotency-Key': intent.key },
+  });
+
+  /** Verificar tentativa anterior: somente consulta, sem nenhum efeito de ingresso. */
+  function reconcile() {
+    return recover('verify', async ({ ctx, intent, finish, settle, abandoned }) => {
+      let result;
+      try { result = parseAdmissionIntentResponse(await intentRequest('/participations/admission-intents/lookup', intent)); }
+      catch (error) {
+        if (!identityMatches(ctx)) return { kind: 'stale' };
+        return recoveryFailure(error, finish);
+      }
+      if (!identityMatches(ctx)) return { kind: 'stale' };
+      if (result.state === 'completed') {
+        await recordConfirmation(ctx.userId, intent.key, result.participationId);
+        return settle(result.participationId);
+      }
+      if (result.state === 'abandoned') return abandoned();
+      if (result.state === 'in_progress') return finish('uncertain', MESSAGES.inProgress);
+      if (result.state === 'conflict') return finish('blocked', MESSAGES.recoveryConflict);
+      // not_found: ausência atual não é prova; a intenção continua guardada.
+      return finish('unconfirmed', MESSAGES.notFound);
+    });
+  }
+
+  /** Repetir ingresso anterior: POST original por ação explícita; pode concluir o ingresso. */
+  function repeatPrevious() {
+    return recover('repeat', async ({ ctx, intent, finish, settle, abandoned }) => {
+      const sent = await sendIntent(ctx.userId, intent);
+      if (!identityMatches(ctx)) return { kind: 'stale' };
+      if (sent.kind === 'confirmed') return settle(sent.participationId);
+      if (sent.kind === 'replaced' || sent.kind === 'storage_failed') return finish('blocked', MESSAGES.recoveryStorage);
+      const failure = classifyJoinFailure(sent.error);
+      if (failure === 'abandoned') return abandoned();
+      if (failure === 'refused') {
+        if (sent.attempts === 1 &&
+            await clearIntent(ctx.userId, intent.key, { attempts: 1, confirmedParticipationId: null })) {
+          // Nunca enviada antes: esta recusa é da única requisição com a chave.
+          return finish('resolved', describeAdmissionError(sent.error, 'join'), { outcome: 'not_applied' });
+        }
+        return finish('unconfirmed', `${describeAdmissionError(sent.error, 'join')} ${MESSAGES.repeatRefused}`);
+      }
+      return recoveryFailure(sent.error, finish);
+    });
+  }
+
+  /** Cancelar tentativa anterior: abandono terminal; se o ingresso venceu, recupera a participação. */
+  function abandonPrevious() {
+    return recover('abandon', async ({ ctx, intent, finish, settle, abandoned }) => {
+      let result;
+      try {
+        result = parseAdmissionIntentResponse(await intentRequest('/participations/admission-intents/abandon', intent),
+          new Set(['abandoned', 'completed']));
+      } catch (error) {
+        if (!identityMatches(ctx)) return { kind: 'stale' };
+        return recoveryFailure(error, finish);
+      }
+      if (!identityMatches(ctx)) return { kind: 'stale' };
+      if (result.state === 'completed') {
+        await recordConfirmation(ctx.userId, intent.key, result.participationId);
+        return settle(result.participationId);
+      }
+      return abandoned();
+    });
+  }
+
   return { getSnapshot: () => state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    setIdentity, lookup, revalidate, confirm, retrySync, reconcile, isCurrent: () => matches(capture()) };
+    setIdentity, lookup, revalidate, confirm, retrySync, reconcile, repeatPrevious, abandonPrevious,
+    isCurrent: () => matches(capture()) };
 }

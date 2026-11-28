@@ -1,6 +1,6 @@
 import { useIsFocused } from '@react-navigation/native';
 import { StatusBar } from 'expo-status-bar';
-import { useContext, useEffect, useRef } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { AppState, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AuthBackground, Badge, Button, Card, LineIcon, ScreenHeader } from '../../components/ui';
@@ -22,7 +22,7 @@ const MAIN_TABS = { index: 0, routes: [{ name: 'MainTabs' }] };
 export default function EventConfirmationScreen({ navigation, route }) {
   const {
     admission, confirmEventEntry, retryEntrySync, revalidateEventEntry, reconcileEntryIntent,
-    isCurrentAdmission, refreshParticipation,
+    repeatPreviousEntry, abandonPreviousEntry, isCurrentAdmission, refreshParticipation,
   } = useContext(ParticipationContext);
   const initial = route?.params ?? {};
   const eventId = initial.event?.id;
@@ -30,6 +30,8 @@ export default function EventConfirmationScreen({ navigation, route }) {
   const focused = useIsFocused();
   const wasFocused = useRef(focused);
   const live = useRef(null);
+  // Repetir e cancelar exigem uma segunda confirmação explícita do participante.
+  const [pendingChoice, setPendingChoice] = useState(null);
 
   const current = Boolean(eventId) && admission?.event?.id === eventId;
   const event = current ? admission.event : initial.event;
@@ -40,14 +42,18 @@ export default function EventConfirmationScreen({ navigation, route }) {
   const confirmed = current && Boolean(admission.confirmedParticipationId);
   const uncertain = current && admission.status === 'uncertain';
   const pendingIntent = current ? admission.pendingIntent ?? null : null;
-  const recovery = current ? admission.recovery ?? { status: 'idle', message: null } : null;
+  const recovery = current ? admission.recovery ?? { status: 'idle', message: null, action: null } : null;
   const recovering = recovery?.status === 'checking';
-  // Intenção incerta do mesmo evento: o próprio "Verificar ingresso" repete a chave original.
-  const sameEventRetry = Boolean(pendingIntent?.sameEvent && !pendingIntent.confirmed && officialEligibility?.eligible);
-  const showRecovery = Boolean(pendingIntent) && !sameEventRetry;
+  // R02: qualquer tentativa anterior não resolvida (deste ou de outro evento) é tratada pelo cartão
+  // de recuperação, independentemente da elegibilidade para um novo ingresso.
+  const showRecovery = Boolean(pendingIntent);
+  const canChoose = Boolean(pendingIntent) && !pendingIntent.unreadable && !pendingIntent.confirmed;
   const blocked = Boolean(officialEligibility && !officialEligibility.eligible);
   const canConfirm = Boolean(officialEligibility?.eligible) && !busy && !recovering && !showRecovery
     && admission?.status !== 'complete';
+  const intentEvent = !pendingIntent || pendingIntent.unreadable ? null
+    : pendingIntent.sameEvent ? 'neste evento'
+      : pendingIntent.eventName ? `no evento “${pendingIntent.eventName}”` : 'em outro evento';
 
   const schedule = describeEventSchedule(event);
   const availability = officialEligibility ? describeEventAvailability(officialEligibility)
@@ -95,11 +101,12 @@ export default function EventConfirmationScreen({ navigation, route }) {
     }
   }
 
-  async function handleReconcile() {
-    if (inFlight.current || recovering || typeof reconcileEntryIntent !== 'function') return;
+  async function runRecovery(action) {
+    if (inFlight.current || recovering || typeof action !== 'function') return;
     inFlight.current = true;
+    setPendingChoice(null);
     try {
-      const result = await reconcileEntryIntent();
+      const result = await action();
       if (!isCurrentAdmission()) return;
       if (result?.kind === 'resolved' && result.outcome === 'current') {
         if (typeof refreshParticipation === 'function') void refreshParticipation();
@@ -119,10 +126,9 @@ export default function EventConfirmationScreen({ navigation, route }) {
 
   const message = !current ? 'Consulte novamente o evento para confirmar o ingresso.' : admission?.error;
   const historical = current && admission.outcome === 'historical';
-  const buttonTitle = busy ? 'Aguarde...'
-    : confirmed ? 'Atualizar participação'
-      : uncertain || sameEventRetry ? 'Verificar ingresso' : 'Confirmar entrada';
-  const showRefresh = current && !busy && (eligibilityStatus === 'error' || blocked || revalidating);
+  const buttonTitle = busy ? 'Aguarde...' : confirmed ? 'Atualizar participação' : 'Confirmar entrada';
+  // R02: atualização manual disponível em qualquer estado da situação, inclusive elegível.
+  const showRefresh = current && !busy;
 
   return (
     <AuthBackground variant="login" overlayOpacity={0.65} testID="event-confirmation-background">
@@ -135,9 +141,21 @@ export default function EventConfirmationScreen({ navigation, route }) {
         <View style={styles.heroSection}>
           <Badge label="EVENTO ENCONTRADO" variant="brand" />
           <Text style={styles.eventName} numberOfLines={3} accessibilityRole="header">{event?.name}</Text>
-          <View style={styles.statusRow} accessible accessibilityLabel={`Situação do evento: ${availability.label}`}
-            testID="event-confirmation-status">
-            <Badge label={availability.label} variant={availability.variant} />
+          <View style={styles.statusRow}>
+            <View accessible accessibilityLabel={`Situação do evento: ${availability.label}`} testID="event-confirmation-status">
+              <Badge label={availability.label} variant={availability.variant} />
+            </View>
+            {showRefresh ? (
+              <Button
+                title={revalidating ? 'Atualizando...' : 'Atualizar situação'}
+                accessibilityLabel={revalidating ? 'Atualizando a situação do evento' : 'Atualizar a situação do evento'}
+                variant="ghost"
+                size="sm"
+                onPress={() => { void revalidate(); }}
+                disabled={revalidating || recovering}
+                testID="event-confirmation-refresh-button"
+              />
+            ) : null}
           </View>
         </View>
 
@@ -151,7 +169,7 @@ export default function EventConfirmationScreen({ navigation, route }) {
               <Button
                 title="Completar questionário"
                 variant="secondary"
-                onPress={() => navigation.navigate('ProfileQuestionnaire', { mode: 'edit', returnTo: 'EventConfirmation' })}
+                onPress={() => navigation.navigate('ProfileQuestionnaire', { returnTo: 'EventConfirmation' })}
                 style={styles.blockedAction}
               />
             ) : null}
@@ -167,22 +185,58 @@ export default function EventConfirmationScreen({ navigation, route }) {
             <Text style={styles.recoveryText}>
               {pendingIntent.unreadable
                 ? 'Não foi possível ler uma tentativa de ingresso guardada neste aparelho.'
-                : pendingIntent.sameEvent
-                  ? 'Existe uma tentativa de ingresso anterior neste evento cujo resultado ainda não foi confirmado.'
-                  : 'Existe uma tentativa de ingresso anterior, em outro evento, cujo resultado ainda não foi confirmado. Verifique-a antes de entrar neste evento.'}
+                : pendingIntent.confirmed
+                  ? `Seu ingresso anterior ${intentEvent} foi registrado. Verifique para continuar a partir dele.`
+                  : `Existe uma tentativa de ingresso anterior ${intentEvent} cujo resultado ainda não foi confirmado.${
+                    pendingIntent.sameEvent ? '' : ' Resolva essa tentativa antes de entrar neste evento.'}`}
             </Text>
-            <Text style={styles.recoveryHint}>A verificação consulta o servidor e não cria um novo ingresso.</Text>
+            <Text style={styles.recoveryHint}>Verificar apenas consulta o servidor e não cria nenhum ingresso.</Text>
             {recovery?.message ? (
               <Text style={styles.recoveryMessage} testID="event-confirmation-recovery-message">{recovery.message}</Text>
             ) : null}
-            <Button
-              title={recovering ? 'Verificando...' : 'Verificar tentativa anterior'}
-              variant="secondary"
-              onPress={handleReconcile}
-              disabled={recovering || busy}
-              style={styles.blockedAction}
-              testID="event-confirmation-reconcile-button"
-            />
+            {pendingChoice === 'repeat' ? (
+              <View style={styles.choiceBox} testID="event-confirmation-repeat-confirm">
+                <Text style={styles.choiceText}>
+                  {`Repetir a tentativa ${intentEvent} pode concluir seu ingresso nesse evento, caso ele ainda não tenha sido registrado.`}
+                </Text>
+                <Button title="Sim, repetir ingresso" variant="primary" size="md" onPress={() => runRecovery(repeatPreviousEntry)}
+                  disabled={recovering || busy} style={styles.choiceAction} />
+                <Button title="Voltar" accessibilityLabel="Voltar sem alterar a tentativa anterior" variant="ghost" size="sm"
+                  onPress={() => setPendingChoice(null)} style={styles.choiceAction} testID="event-confirmation-choice-back" />
+              </View>
+            ) : pendingChoice === 'abandon' ? (
+              <View style={styles.choiceBox} testID="event-confirmation-abandon-confirm">
+                <Text style={styles.choiceText}>
+                  Cancelar a tentativa impede definitivamente que ela seja concluída. Se o ingresso já tiver sido registrado, ele será mantido.
+                </Text>
+                <Button title="Sim, cancelar tentativa" variant="secondary" size="md" onPress={() => runRecovery(abandonPreviousEntry)}
+                  disabled={recovering || busy} style={styles.choiceAction} />
+                <Button title="Voltar" accessibilityLabel="Voltar sem alterar a tentativa anterior" variant="ghost" size="sm"
+                  onPress={() => setPendingChoice(null)} style={styles.choiceAction} testID="event-confirmation-choice-back" />
+              </View>
+            ) : (
+              <>
+                <Button
+                  title={recovering && recovery.action === 'verify' ? 'Verificando...'
+                    : recovery?.status === 'unconfirmed' ? 'Verificar novamente' : 'Verificar tentativa anterior'}
+                  variant="secondary"
+                  onPress={() => runRecovery(reconcileEntryIntent)}
+                  disabled={recovering || busy || pendingIntent.unreadable}
+                  style={styles.blockedAction}
+                  testID="event-confirmation-reconcile-button"
+                />
+                {canChoose ? (
+                  <>
+                    <Button title={recovering && recovery.action === 'repeat' ? 'Repetindo...' : 'Repetir ingresso anterior'}
+                      variant="ghost" size="md" onPress={() => setPendingChoice('repeat')} disabled={recovering || busy}
+                      style={styles.choiceAction} testID="event-confirmation-repeat-button" />
+                    <Button title={recovering && recovery.action === 'abandon' ? 'Cancelando...' : 'Cancelar tentativa anterior'}
+                      variant="ghost" size="md" onPress={() => setPendingChoice('abandon')} disabled={recovering || busy}
+                      style={styles.choiceAction} testID="event-confirmation-abandon-button" />
+                  </>
+                ) : null}
+              </>
+            )}
           </View>
         ) : null}
 
@@ -213,17 +267,6 @@ export default function EventConfirmationScreen({ navigation, route }) {
             testID="event-confirmation-message">
             {message}
           </Text>
-        ) : null}
-
-        {showRefresh ? (
-          <Button
-            title={revalidating ? 'Atualizando situação...' : 'Atualizar situação do evento'}
-            variant="secondary"
-            onPress={() => { void revalidate(); }}
-            disabled={revalidating}
-            style={styles.refreshButton}
-            testID="event-confirmation-refresh-button"
-          />
         ) : null}
 
         <Button
@@ -270,7 +313,25 @@ const styles = StyleSheet.create({
   },
   statusRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
     marginTop: spacing.md,
+  },
+  choiceBox: {
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.semantic.warning,
+  },
+  choiceText: {
+    ...typography.body,
+    color: colors.text.primary,
+  },
+  choiceAction: {
+    marginTop: spacing.sm,
   },
   eventCard: {
     alignItems: 'stretch',
@@ -379,9 +440,6 @@ const styles = StyleSheet.create({
   },
   warningText: {
     color: colors.semantic.warning,
-  },
-  refreshButton: {
-    marginTop: spacing.lg,
   },
   confirmButton: {
     marginTop: spacing.xxl,

@@ -153,7 +153,12 @@ test('erro de rede ou timeout preserva a chave e repete a mesma operação', asy
     await h.store.lookup('ABC');
     assert.equal((await h.store.confirm(EVENT)).kind, 'uncertain');
     assert.equal((await h.intentStorage.get(USER_A)).key, KEY);
-    assert.equal((await h.store.confirm(EVENT)).kind, 'complete');
+    // R02: repetir é ação explícita; confirm não reenvia a tentativa incerta sozinho.
+    assert.equal((await h.store.confirm(EVENT)).kind, 'error');
+    assert.equal(h.requests.length, 2);
+    const repeated = await h.store.repeatPrevious();
+    assert.equal(repeated.kind, 'resolved');
+    assert.equal(repeated.outcome, 'current');
     assert.equal(h.requests[1][2].headers['Idempotency-Key'], h.requests[2][2].headers['Idempotency-Key']);
   }
 });
@@ -171,7 +176,7 @@ test('resposta HTTP inválida ou erro 5xx preserva chave para retry seguro', asy
     } });
     await h.store.lookup('ABC');
     assert.equal((await h.store.confirm(EVENT)).kind, 'uncertain');
-    assert.equal((await h.store.confirm(EVENT)).kind, 'complete');
+    assert.equal((await h.store.repeatPrevious()).outcome, 'current');
     assert.equal(h.requests[1][2].headers['Idempotency-Key'], KEY);
     assert.equal(h.requests[2][2].headers['Idempotency-Key'], KEY);
   }
@@ -201,7 +206,8 @@ test('intenção incerta persiste após reinicialização e fica isolada por usu
   assert.equal((await first.store.confirm(EVENT)).kind, 'uncertain');
   const second = rig({ storage });
   await second.store.lookup('ABC');
-  assert.equal((await second.store.confirm(EVENT)).kind, 'complete');
+  assert.equal(second.store.getSnapshot().pendingIntent.sameEvent, true);
+  assert.equal((await second.store.repeatPrevious()).outcome, 'current');
   assert.equal(second.requests[1][2].headers['Idempotency-Key'], KEY);
   second.switchTo(USER_B);
   assert.equal(await storage.get(USER_B), null);

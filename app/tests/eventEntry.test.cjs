@@ -849,24 +849,28 @@ test('P01-17: questionário incompleto leva ao questionário sem tentar o ingres
     { event, eligibility: { eligible: false, blockingReasons: ['PROFILE_INCOMPLETE'] } });
   await rig.button('Completar questionário').props.onPress();
   assert.equal(posts, 0);
-  // R01-12: o questionário volta para esta jornada; o parâmetro só define o destino da navegação.
+  // R01-12/R02: o questionário (modo de conclusão, que tolera perfil incompleto) volta para esta
+  // jornada; o parâmetro só define o destino da navegação.
   assert.deepEqual(structuredClone(rig.calls),
-    [{ name: 'ProfileQuestionnaire', value: { mode: 'edit', returnTo: 'EventConfirmation' } }]);
+    [{ name: 'ProfileQuestionnaire', value: { returnTo: 'EventConfirmation' } }]);
 });
 
-test('P01-21: resultado incerto oferece verificar o mesmo ingresso, sem nova intenção na tela', async () => {
+test('P01-21 (R02): resultado incerto oferece verificar, repetir ou cancelar — nunca repete pelo botão principal', async () => {
   const confirmations = [];
   const context = {
-    admission: { ...official(), status: 'uncertain', error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
+    admission: { ...official(), status: 'uncertain', pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false },
+      error: 'O tempo de resposta terminou. O resultado pode ter sido confirmado; tente novamente com segurança.' },
     isCurrentAdmission: () => true,
     confirmEventEntry: async (eventId) => { confirmations.push(eventId); return { kind: 'complete' }; },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context, { event, eligibility: eligible });
   assert.match(rig.text(), /O resultado pode ter sido confirmado/);
-  await rig.button('Verificar ingresso').props.onPress();
-  // A mesma chave persistida é reutilizada pelo store (ver eventAdmissionService.test).
-  assert.deepEqual(confirmations, [event.id]);
-  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Confirmar entrada').props.onPress?.();
+  assert.deepEqual(confirmations, []);
+  assert.ok(rig.button('Verificar tentativa anterior'));
+  assert.ok(rig.button('Repetir ingresso anterior'));
+  assert.ok(rig.button('Cancelar tentativa anterior'));
 });
 
 
@@ -882,6 +886,8 @@ function confirmationRig(admission, extra = {}, options = {}) {
     retryEntrySync: async () => ({ kind: 'complete' }),
     revalidateEventEntry: async () => { log.revalidations++; return extra.revalidateResult ?? { kind: 'found' }; },
     reconcileEntryIntent: async () => { log.reconciles++; return extra.reconcileResult ?? { kind: 'resolved', outcome: 'none' }; },
+    repeatPreviousEntry: async () => { log.repeats = (log.repeats ?? 0) + 1; return extra.repeatResult ?? { kind: 'unconfirmed' }; },
+    abandonPreviousEntry: async () => { log.abandons = (log.abandons ?? 0) + 1; return extra.abandonResult ?? { kind: 'resolved', outcome: 'abandoned' }; },
     refreshParticipation: async () => { log.refreshes++; },
   };
   const rig = screenRig('screens/event-entry/EventConfirmationScreen.js', context,
@@ -912,7 +918,7 @@ test('R01-09/23: durante a revalidação a autorização antiga não é apresent
   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
   await rig.button('Confirmar entrada').props.onPress?.();
   assert.equal(log.posts, 0);
-  assert.equal(rig.button('Atualizando situação...').props.disabled, true);
+  assert.equal(rig.button('Atualizando...').props.disabled, true);
 });
 
 test('R01-11: falha na revalidação mantém o botão bloqueado e oferece atualização manual', async () => {
@@ -920,7 +926,7 @@ test('R01-11: falha na revalidação mantém o botão bloqueado e oferece atuali
     eligibilityStatus: 'error', error: 'Não foi possível atualizar a situação do evento. Tente novamente antes de confirmar.' }));
   assert.match(rig.text(), /SITUAÇÃO NÃO CONFIRMADA/);
   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
-  await rig.button('Atualizar situação do evento').props.onPress();
+  await rig.button('Atualizar situação').props.onPress();
   assert.equal(log.revalidations, 1);
 });
 
@@ -958,7 +964,7 @@ test('R01-05/08: tentativa anterior de outro evento bloqueia novo ingresso e ofe
     reconcileResult: { kind: 'resolved', outcome: 'historical' } });
   assert.ok(rig.card('event-confirmation-recovery'));
   assert.match(rig.text(), /em outro evento/);
-  assert.match(rig.text(), /não cria um novo ingresso/);
+  assert.match(rig.text(), /não cria nenhum ingresso/);
   assert.equal(rig.button('Confirmar entrada').props.disabled, true);
   await rig.button('Confirmar entrada').props.onPress?.();
   assert.equal(log.posts, 0);
@@ -982,7 +988,7 @@ test('R01-05: mesma tentativa com participação corrente (ALREADY_CURRENT) é r
 
 test('R01-07/08: verificação em andamento ou bloqueada não libera ingresso nem mostra sucesso', async () => {
   const pendingIntent = { eventId: event.id, sameEvent: true, confirmed: true };
-  const checking = confirmationRig(official(eligible, { pendingIntent, recovery: { status: 'checking', message: null } }));
+  const checking = confirmationRig(official(eligible, { pendingIntent, recovery: { status: 'checking', message: null, action: 'verify' } }));
   assert.equal(checking.rig.button('Verificando...').props.disabled, true);
   assert.equal(checking.rig.button('Confirmar entrada').props.disabled, true);
   const blocked = confirmationRig(official(eligible, { pendingIntent,
@@ -991,12 +997,13 @@ test('R01-07/08: verificação em andamento ou bloqueada não libera ingresso ne
   assert.equal(blocked.rig.button('Confirmar entrada').props.disabled, true);
 });
 
-test('R01-02: intenção incerta do mesmo evento com entradas abertas usa o próprio botão (mesma chave)', async () => {
+test('R01-02 (R02): intenção incerta do mesmo evento é resolvida pelo cartão, não pelo botão principal', async () => {
   const { rig, log } = confirmationRig(official(eligible, {
     pendingIntent: { eventId: event.id, sameEvent: true, confirmed: false } }));
-  assert.ok(!rig.card('event-confirmation-recovery'));
-  await rig.button('Verificar ingresso').props.onPress();
-  assert.equal(log.posts, 1);
+  assert.ok(rig.card('event-confirmation-recovery'));
+  assert.equal(rig.button('Confirmar entrada').props.disabled, true);
+  await rig.button('Confirmar entrada').props.onPress?.();
+  assert.equal(log.posts, 0);
 });
 
 test('R01-20: fila externa aparece também com evento indisponível, sem sugerir ingresso possível', () => {
@@ -1066,4 +1073,77 @@ test('R01-22: toques repetidos na verificação da tentativa anterior geram uma 
 test('R01: ícones da confirmação são de linha, sem emojis permanentes', () => {
   const { rig } = confirmationRig(official());
   assert.doesNotMatch(rig.text(), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}]/u);
+});
+
+// -------------------------------------------------------------
+// PARTICIPANTE-01 R02 — consultar, repetir e cancelar; atualização manual
+// -------------------------------------------------------------
+
+const otherIntent = { eventId: '99999999-9999-4999-8999-999999999999', eventName: 'Copa Indie', sameEvent: false, confirmed: false };
+
+test('R02-01: verificar só consulta; repetir e cancelar exigem segunda confirmação explícita', async () => {
+  const { rig, log } = confirmationRig(official(eligible, { pendingIntent: otherIntent }), {
+    reconcileResult: { kind: 'unconfirmed', message: 'sem registro' } });
+  assert.match(rig.text(), /no evento “Copa Indie”/, 'identifica o evento original');
+  assert.match(rig.text(), /Verificar apenas consulta o servidor e não cria nenhum ingresso/);
+  await rig.button('Verificar tentativa anterior').props.onPress();
+  assert.equal(log.reconciles, 1);
+  assert.equal(log.repeats ?? 0, 0);
+
+  await rig.button('Repetir ingresso anterior').props.onPress();
+  rig.render();
+  assert.equal(log.repeats ?? 0, 0, 'primeiro toque só pede confirmação');
+  assert.ok(rig.card('event-confirmation-repeat-confirm'));
+  assert.match(rig.text(), /pode concluir seu ingresso nesse evento/);
+  await rig.card('event-confirmation-choice-back').props.onPress(); rig.render();
+  assert.equal(rig.calls.length, 0, 'voltar da confirmação não sai da tela');
+  assert.ok(!rig.card('event-confirmation-repeat-confirm'));
+  await rig.button('Repetir ingresso anterior').props.onPress(); rig.render();
+  await rig.button('Sim, repetir ingresso').props.onPress();
+  assert.equal(log.repeats, 1);
+  assert.equal(log.posts, 0, 'o botão principal nunca é usado para repetir');
+});
+
+test('R02-02/T13: cancelar tentativa anterior revalida o novo evento sem ingressar automaticamente', async () => {
+  const { rig, log } = confirmationRig(official(eligible, { pendingIntent: otherIntent }));
+  await rig.button('Cancelar tentativa anterior').props.onPress(); rig.render();
+  assert.match(rig.text(), /impede definitivamente que ela seja concluída/);
+  assert.match(rig.text(), /ele será mantido/);
+  await rig.button('Sim, cancelar tentativa').props.onPress();
+  assert.equal(log.abandons, 1);
+  assert.equal(log.revalidations, 1, 'novo evento é reconsultado');
+  assert.equal(log.posts, 0, 'nenhum ingresso automático após o cancelamento');
+  assert.deepEqual(rig.calls, []);
+});
+
+test('R02-02: cancelamento que encontra ingresso já concluído leva à participação corrente', async () => {
+  const { rig, log } = confirmationRig(official(eligible, { pendingIntent: otherIntent }), {
+    abandonResult: { kind: 'resolved', outcome: 'current' } });
+  await rig.button('Cancelar tentativa anterior').props.onPress(); rig.render();
+  await rig.button('Sim, cancelar tentativa').props.onPress();
+  assert.equal(log.refreshes, 1);
+  assert.deepEqual(structuredClone(rig.calls), [{ reset: { index: 0, routes: [{ name: 'MainTabs' }] } }]);
+});
+
+test('R02-01: tentativa já confirmada oferece só a verificação (sem repetir nem cancelar)', () => {
+  const { rig } = confirmationRig(official(eligible, { pendingIntent: { ...otherIntent, confirmed: true } }));
+  assert.match(rig.text(), /foi registrado/);
+  assert.ok(rig.button('Verificar tentativa anterior'));
+  assert.equal(rig.findButton('Repetir ingresso anterior'), undefined);
+  assert.equal(rig.findButton('Cancelar tentativa anterior'), undefined);
+});
+
+test('R02-04/T17: atualização manual disponível com evento elegível; bloqueada durante resolução', async () => {
+  const eligibleRig = confirmationRig(official());
+  const refresh = eligibleRig.rig.button('Atualizar situação');
+  assert.equal(refresh.props.disabled, false);
+  assert.equal(refresh.props.accessibilityLabel, 'Atualizar a situação do evento');
+  await refresh.props.onPress();
+  assert.equal(eligibleRig.log.revalidations, 1);
+  const resolving = confirmationRig(official(eligible, { pendingIntent: otherIntent,
+    recovery: { status: 'checking', message: null, action: 'abandon' } }));
+  assert.equal(resolving.rig.button('Atualizar situação').props.disabled, true);
+  assert.equal(resolving.rig.button('Cancelando...').props.disabled, true);
+  const joining = confirmationRig(official(eligible, { status: 'joining' }));
+  assert.equal(joining.rig.findButton('Atualizar situação'), undefined, 'não interfere em confirmação em andamento');
 });

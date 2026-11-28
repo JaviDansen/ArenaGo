@@ -85,6 +85,8 @@ export function ParticipationProvider({ children }) {
     confirmEventEntry: admissionStore.confirm,
     revalidateEventEntry: admissionStore.revalidate,
     reconcileEntryIntent: admissionStore.reconcile,
+    repeatPreviousEntry: admissionStore.repeatPrevious,
+    abandonPreviousEntry: admissionStore.abandonPrevious,
     retryEntrySync: admissionStore.retrySync,
     isCurrentAdmission: admissionStore.isCurrent,
   };

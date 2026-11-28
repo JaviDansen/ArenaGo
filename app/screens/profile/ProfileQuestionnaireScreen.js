@@ -147,7 +147,9 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
 
   // Aberto pela confirmação de ingresso: voltar à mesma jornada, que revalida tudo no servidor.
   // O parâmetro só decide o destino da navegação; nunca serve de prova de questionário concluído.
-  const returnsToEventEntry = isEditMode && route?.params?.returnTo === 'EventConfirmation';
+  // R02: vale também no modo de conclusão (perfil que deixou de atender aos requisitos atuais). O
+  // fluxo obrigatório de novos usuários é a raiz da pilha própria (sem tela anterior) e mantém o reset.
+  const returnsToEventEntry = route?.params?.returnTo === 'EventConfirmation';
 
   function returnToProfile(saved = false) {
     if (!saved && isSubmittingRef.current) return;
@@ -177,6 +179,10 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
       returnToProfile(true);
       return;
     }
+    if (returnsToEventEntry && navigation?.canGoBack?.()) {
+      navigation.goBack();
+      return;
+    }
     if (navigation?.reset) {
       navigation.reset({ index: 0, routes: [{ name: 'MainTabs' }] });
     } else if (navigation?.replace) {
@@ -184,7 +190,7 @@ export default function ProfileQuestionnaireScreen({ navigation, route }) {
     } else if (navigation?.navigate) {
       navigation.navigate('MainTabs');
     }
-  }, [hasSavedProfile, navigation, isEditMode]);
+  }, [hasSavedProfile, navigation, isEditMode, returnsToEventEntry]);
 
   // Redefine estado se o usuario autenticado mudou (isolamento de sessao)
   const lastActiveUserRef = useRef(auth?.user?.id);

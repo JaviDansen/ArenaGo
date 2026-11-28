@@ -10,9 +10,12 @@ import type { EventAvailabilityResult } from "../events/event-availability";
 import { epochMicrosText } from "../events/event-instant";
 import type { JoinEligibilityResult } from "./join-eligibility";
 import { combineJoinEligibility, recombineJoinEligibilityWithAvailability } from "./join-eligibility";
-import type { JsonValue } from "./join-idempotency";
+import type { CompletedJoinOutcome, JoinIntentLookupResult, JsonValue } from "./join-idempotency";
 import {
+  ABANDONED_JOIN_RESULT,
+  classifyCompletedJoin,
   completeIdempotencyOperationWithTx,
+  readJoinIntentWithExecutor,
   reserveJoinIntentWithTx,
 } from "./join-idempotency";
 
@@ -38,6 +41,19 @@ export type CreateParticipationResult =
   | { kind: "request_conflict"; operationId: string }
   | { kind: "in_progress"; operationId: string }
   | { kind: "blocked"; eligibility: JoinEligibilityResult };
+
+/** Identidade de negócio de uma intenção de ingresso: o ator vem sempre da sessão. */
+export interface JoinIntentInput {
+  userId: string;
+  eventId: string;
+  idempotencyKey: string;
+}
+
+/** `abandonedNow` distingue a gravação do abandono de um replay de abandono anterior. */
+export type AbandonJoinIntentResult =
+  | (CompletedJoinOutcome & { abandonedNow?: boolean })
+  | { state: "conflict" }
+  | { state: "in_progress" };
 
 export type ParticipationStatus = "waiting" | "active" | "finished" | "canceled";
 
@@ -600,5 +616,51 @@ export class ParticipationsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * R02: consulta somente-leitura de uma intenção de ingresso (sem reservar, travar ou escrever).
+   * Transação `READ ONLY`: o PostgreSQL recusa qualquer escrita acidental. Não cria participação,
+   * não toca fila externa, snapshots nem a reserva da chave.
+   */
+  async lookupJoinIntent(input: JoinIntentInput): Promise<JoinIntentLookupResult> {
+    return this.database.transaction(
+      tx => readJoinIntentWithExecutor(tx, {
+        actorUserId: input.userId, eventId: input.eventId, idempotencyKey: input.idempotencyKey,
+      }),
+      { isolationLevel: "read committed", accessMode: "read only" },
+    );
+  }
+
+  /**
+   * R02: abandona definitivamente uma intenção de ingresso ainda não concluída.
+   *
+   * Usa exatamente o protocolo do ingresso (`reserveJoinIntentWithTx`: evento `FOR UPDATE`,
+   * depois usuário `FOR UPDATE`, depois a chave UNIQUE), portanto compete com o POST original
+   * pela mesma serialização e sem inversão de locks. Se a chave estiver livre, a reserva e o
+   * resultado terminal de abandono são gravados na mesma transação (nunca fica `in_progress`
+   * confirmado). Se o ingresso venceu, devolve o resultado dele sem sobrescrever nem cancelar
+   * a participação. Fingerprint diferente devolve conflito sem tocar no registro existente.
+   */
+  async abandonJoinIntent(input: JoinIntentInput & { expiresAt: Date }): Promise<AbandonJoinIntentResult> {
+    return this.database.transaction(async (tx): Promise<AbandonJoinIntentResult> => {
+      const reservation = await reserveJoinIntentWithTx(tx, {
+        actorUserId: input.userId,
+        eventId: input.eventId,
+        idempotencyKey: input.idempotencyKey,
+        expiresAt: input.expiresAt,
+      });
+      if (reservation.kind === "request_conflict") return { state: "conflict" };
+      if (reservation.kind === "in_progress") return { state: "in_progress" };
+      if (reservation.kind === "replay") {
+        return classifyCompletedJoin({
+          httpStatus: reservation.httpStatus,
+          resultReference: reservation.resultReference,
+          resultPayload: reservation.resultPayload,
+        });
+      }
+      await completeIdempotencyOperationWithTx(tx, reservation.operationId, ABANDONED_JOIN_RESULT);
+      return { state: "abandoned", abandonedNow: true };
+    }, { isolationLevel: "read committed" });
   }
 }

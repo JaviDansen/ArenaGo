@@ -5,7 +5,7 @@
 **Módulo:** Participante (frontend Expo)
 **Branch:** `feature/heliom-participante-ux`
 **Origem:** `origin/develop` em `5758fe1dcda104f6bfacf3ddb922a3711b088298` (19/11/2026, "style(admin): atualizar logo exclusiva do cabecalho")
-**Estado atual:** Revisão 01 entregue para revalidação (não aprovada). Ver §10.
+**Estado atual:** Revisão 02 entregue para revalidação (não aprovada). Ver §11 (R02) e §10 (R01, histórico).
 
 ## 1. Objetivo e escopo
 
@@ -331,4 +331,200 @@ Não executada: não há aparelho Android/iOS, simulador ou emulador neste ambie
 - Commit seguinte: somente este registro de commits no documento.
 - Push para `origin/feature/heliom-participante-ux` sem force; o SHA final da branch é o do commit de registro, informado no resumo da entrega.
 
-**Estado da task:** Entregue para revalidação — não aprovada.
+**Estado da task ao final da R01:** Entregue para revalidação — não aprovada.
+
+## 11. Revisão 02 — Correções residuais após auditoria Git
+
+**Estado:** Revisão 02 entregue para revalidação (não aprovada).
+**HEAD auditado:** `970ae10338989bfa002bd457378f0db9ef5d5b2b` (commit principal da R01: `e82678a22903ac8ebc0debb3772f29b40cb82710`).
+**Ambiente:** macOS 12.7.6 (21H1320, x86_64), Node v22.23.5 (`~/.local/node`), dependências já instaladas em `app/`, `backend/` e `qa/regression/`. Validações executadas pelo assistente (Claude Code) com autorização explícita do responsável nesta sessão, inclusive commit e push (§15 da task). Nenhum banco foi acessado.
+
+### 11.1 Preparação
+
+- Branch `feature/heliom-participante-ux`; local e `origin` em `970ae10` (nenhum commit posterior à auditoria). Implementação feita como alterações sobre esse HEAD.
+- `develop` não incorporada; sem merge, rebase, force push ou reescrita de histórico.
+- **Nota de processo:** a implementação começou antes de esta seção existir. O item 2 da task pedia o diagnóstico registrado aqui antes do código. O diagnóstico abaixo foi consolidado ao final, junto com os resultados. Não há registro prévio a apresentar.
+- O documento indicado na task (`ProgramacaoMobile/docs/...`) corresponde a `docs/PARTICIPANTE_01_HOME_INGRESSO_IMPLEMENTACAO.md` (mesma observação de 10.1).
+
+### 11.2 Diagnóstico confirmado no código (HEAD `970ae10`)
+
+| Fonte | Fato verificado | Consequência |
+|---|---|---|
+| `app/services/eventAdmissionService.js` (`reconcile`) | "Verificar tentativa anterior" reenviava `POST /participations` com a chave e o corpo originais. | Sem registro da chave e com o evento aberto, a verificação **criava** a participação (cenário 3.2 da task). |
+| `join-idempotency.ts` (`reserveJoinIntentWithTx`) | Ordem: `events FOR UPDATE` → `users FOR UPDATE` → reserva da chave (UNIQUE ator+operação+chave) → elegibilidade. Recusa ⇒ rollback de tudo, inclusive da reserva. | Uma recusa só prova "não aplicado" para a requisição que a recebeu; outra requisição com a mesma chave ainda em trânsito pode ser aceita depois. |
+| `classifyJoinFailure()` (R01) | Tratava `VALIDATION_ERROR`/elegibilidade como `not_applied` e liberava a intenção, inclusive durante a recuperação. | Liberação insegura de intenção incerta (4.1 da task). |
+| `intentStorage.set()` (R01) | Gravação incondicional por conta; a resposta tardia gravava `{ ...intent, confirmedParticipationId }`. | Resposta tardia de A podia sobrescrever a intenção B da mesma conta (5.1). |
+| `ParticipantAdmissionController.joinResponse` | Replay válido pressupunha HTTP 201 com `participationId`; outro formato ⇒ erro 500. | Um registro terminal de abandono precisaria de tratamento próprio (4.6). |
+| `idempotency.schema.ts` | Status `in_progress`/`completed`, `http_status`, `result_reference` (anulável), `result_payload` (jsonb), `expires_at`; UNIQUE (ator, operação, chave). | O abandono cabe como linha `completed` sem referência, **sem migration**. |
+| Retenção (`expires_at`) | Gravado e indexado (`ix_idempotency_expires`), mas nenhum código do backend apaga linhas de `idempotency_operations` nem lê `expires_at` no replay. | O replay e o abandono são hoje permanentes; ver 11.9. |
+
+### 11.3 R02-01 — Separação entre consulta e execução de ingresso (P1)
+
+- **Problema:** a ação de consulta executava o ingresso.
+- **Causa confirmada:** `reconcile()` reaproveitava o `POST /participations` como consulta (11.2).
+- **Solução aplicada:**
+  - Backend: novo contrato somente-leitura `POST /api/v1/participations/admission-intents/lookup` (11.8). `ParticipationsService.lookupJoinIntent` roda `readJoinIntentWithExecutor` numa transação `READ ONLY` (`read committed`). O PostgreSQL recusa qualquer escrita acidental. Não reserva a chave, não trava linhas, não toca fila externa, snapshot nem participação.
+  - App: a jornada distingue três operações do store, todas com a chave e o corpo originais da intenção:
+    - `reconcile` (botão "Verificar tentativa anterior"/"Verificar novamente") usa **somente** o contrato de consulta;
+    - `repeatPrevious` ("Repetir ingresso anterior") reenvia o POST original e exige segunda confirmação na tela ("Repetir a tentativa … pode concluir seu ingresso nesse evento, caso ele ainda não tenha sido registrado.");
+    - `abandonPrevious` ("Cancelar tentativa anterior") também exige segunda confirmação e usa o contrato de abandono (R02-02).
+  - Resposta da consulta: `completed` ⇒ grava a prova na intenção (condicionada à chave) e recupera a participação pelas regras da R01 (`/current` ou `GET /participations/:id`, conferindo o evento). `not_found` ⇒ **não cria e não apaga**; mensagem "O servidor ainda não tem registro do resultado…" com as três opções. `in_progress` ⇒ preserva e pede nova consulta. `abandoned` ⇒ libera a intenção. `conflict` ⇒ bloqueia e orienta suporte.
+  - `confirm()` deixou de repetir automaticamente uma intenção incerta do mesmo evento. O botão principal recusa ("Verifique, repita ou cancele essa tentativa") e o cartão de recuperação assume.
+- **Arquivos:** `backend/src/participations/join-idempotency.ts`, `participations.service.ts`, `participant-admission.controller.ts`; `app/services/eventAdmissionService.js`, `app/context/ParticipationContext.js` (expõe `repeatPreviousEntry` e `abandonPreviousEntry`), `app/screens/event-entry/EventConfirmationScreen.js`.
+- **Decisões:** POST para transportar o corpo, com a chave no cabeçalho `Idempotency-Key` (nunca na URL). O ator vem só da sessão. A resposta tem apenas `state` e, se concluída, o `participationId` da própria conta (sem hash, chave ou dados administrativos).
+- **Testes:** backend R02-T01/T11, T02/T23, T03, T04 e "in_progress/abandoned" (serviço), R02-T01, T02, T03 e validação de sessão/corpo/chave (HTTP); app R02-T01 (cenário 3.2 completo: **0 participações** criadas pela consulta, intenção intacta), R02-T02, R02-T03/T16; tela R02-01 (verificar só consulta; repetir/cancelar com segunda confirmação; intenção já confirmada oferece só verificação), P01-21 e R01-02 revisados.
+- **Resultado:** aprovado (11.11).
+- **Limitação:** a consulta enxerga apenas registros confirmados (`read committed`). Um ingresso original ainda em transação aparece como `not_found`, e por isso `not_found` nunca libera nada.
+- **Status:** corrigido.
+
+### 11.4 R02-02 — Resolução autoritativa e cancelamento seguro de intenções (P1)
+
+- **Problema:** ausência de registro, recusa de elegibilidade e `VALIDATION_ERROR` eram tratadas como prova de que a intenção nunca seria aplicada.
+- **Causa confirmada:** `classifyJoinFailure()` da R01 e a falta de um resultado terminal persistido para "esta chave nunca poderá criar participação".
+- **Solução aplicada:**
+  - **Abandono persistido:** `POST /api/v1/participations/admission-intents/abandon` (11.8). `ParticipationsService.abandonJoinIntent` usa **o mesmo** `reserveJoinIntentWithTx` do ingresso (evento → usuário → chave). Com a chave livre, grava na mesma transação a reserva e o resultado terminal `ABANDONED_JOIN_RESULT`. Se o ingresso venceu, devolve o resultado dele. Com fingerprint diferente devolve conflito. Com `in_progress` confirmado (anomalia) devolve 409 sem alterar nada.
+  - **Representação persistida** (linha de `idempotency_operations`): `operation='join'`, `status='completed'`, `http_status=409`, `result_reference=NULL`, `result_payload={"code":"ADMISSION_INTENT_ABANDONED"}`, `request_hash` = fingerprint do `eventId` original, `expires_at` pela política de TTL do participante (igual ao ingresso).
+  - **Leitura semântica única:** `classifyCompletedJoin()` reconhece só dois formatos: ingresso (201, `result_reference = result_payload.participationId`, formato gravado desde a Etapa 3) e abandono (acima). Qualquer outro formato lança erro e nunca é tratado como ingresso nem como chave livre.
+  - **Ingresso com chave abandonada:** `joinResponse` reconhece o replay terminal e responde `409 ADMISSION_INTENT_ABANDONED` (RFC 7807). Não gera 500, não é tratado como ingresso confirmado e não volta a ser elegível. Replays de sucesso (201) seguem idênticos.
+  - **App, `classifyJoinFailure()`:** passou a distinguir `refused` (recusa recebida), `abandoned`, `uncertain`, `session`, `conflict`, `other_pending` e `unknown`. Uma recusa só libera a intenção quando a intenção tem `attempts === 1`, ou seja, quando aquela foi a **primeira e única** requisição enviada com a chave. A contagem é gravada **antes** do envio, por atualização condicional (11.5). Intenções antigas, sem `attempts`, contam como já enviadas e nunca são liberadas por recusa. Recusas durante repetição ou recuperação mantêm a intenção ("A tentativa anterior continua sem resultado confirmado…").
+  - O cliente HTTP não reenvia POST em falha de rede. Só repete após 401 com renovação de sessão, e o 401 é recusado antes da reserva da chave. Isso sustenta a regra da primeira e única tentativa.
+- **Garantias transacionais (4.5):**
+  - **Cenário A — ingresso conclui primeiro:** o abandono encontra a linha `completed` (201) e devolve `{ state: "completed", participationId }`. Nada é sobrescrito e a participação continua.
+  - **Cenário B — abandono conclui primeiro:** o ingresso atrasado encontra a linha terminal e responde 409 `ADMISSION_INTENT_ABANDONED`. Não cria participação, não mexe na fila externa (`external_last_order`) e não cria snapshot. Repetições devolvem o mesmo estado.
+  - **Cenário C — fingerprint diferente:** conflito sem modificar o registro.
+  - **Ordem de locks:** idêntica à do ingresso (`events FOR UPDATE` → `users FOR UPDATE` → UNIQUE da chave). Ingresso e abandono da mesma chave serializam no lock do evento. Abandono de A e ingresso em B da mesma conta travam eventos diferentes e depois o mesmo usuário, sem inversão. A consulta não trava nada.
+  - **Sem `in_progress` órfão:** reserva e resultado terminal são gravados na mesma transação. Falha ao gravar o resultado faz rollback (teste "abandono não confirma reserva in_progress sem resultado").
+- **Compatibilidade:** linhas de ingresso gravadas antes da R02 continuam com replay 201 (R02-T23). Nenhum mecanismo de idempotência de Staff/Admin foi alterado: `reserveIdempotencyOperationWithTx` e `completeIdempotencyOperationWithTx` foram reutilizados sem mudança.
+- **Arquivos:** os mesmos de 11.3, mais `app/tests/participante01Revisao01.test.cjs` (o teste R01-08 que aceitava "prova de não aplicação" foi substituído por R01-08 (R02-T11)).
+- **Testes:** backend R02-T07 (ordem dos locks e gravação terminal; ingresso atrasado vira replay terminal), T08, T09, rollback e formato desconhecido (serviço); T07/T08/T09, T04 e "POST com chave abandonada é 409, nunca 500" (HTTP). App: R02-T05, T06, T07, T08, T09/T10, T12, "só a primeira e única tentativa recusada libera; legado nunca", R02-T24 (app); tela R02-02/T13 e R02-02 (abandono que encontra ingresso concluído leva à participação corrente).
+- **Integração com PostgreSQL real:** `backend/test/integration/participant-admission-intents.integration.test.ts` (6 testes: T01, T07, T08, T03/T04 e dois de T24: abandono × ingresso concorrentes com a mesma chave; abandono de A × ingresso em B sem deadlock). Usa a guarda da Etapa 3 (`participant-admission-db-guard`, banco `arenago_admission_test` vazio, sem limpeza global, removendo só as próprias fixtures). **Não executado:** não há PostgreSQL neste ambiente e o `AGENTS.md` exige autorização por campanha. Os testes foram compilados (`tsc -p tsconfig.test.json`) e passaram no lint. **A garantia transacional não está homologada**: a evidência atual vem de testes de serviço com executor simulado, que verificam a ordem das chamadas e o desfecho.
+- **Status:** corrigido no código; pendente a campanha de concorrência em PostgreSQL isolado.
+
+### 11.5 R02-03 — Proteção do armazenamento de intenções contra respostas tardias (P1 preventivo)
+
+- **Problema:** gravação incondicional por conta (`intentStorage.set`).
+- **Causa confirmada:** leitura e gravação independentes. Uma resposta de A gravava `confirmedParticipationId` sobre o registro da conta, mesmo que ele já fosse de B.
+- **Solução aplicada:** `createAdmissionIntentStorage` passou a executar toda operação numa **fila serializada única** (seção crítica). A leitura, a comparação e a gravação acontecem dentro da mesma tarefa da fila:
+  - `create(intent)`: grava só se a conta não tiver intenção; senão devolve a existente intacta;
+  - `update(userId, expectedKey, patch)`: só altera se a chave atual for a esperada. `patch` pode ser função do valor atual (transição atômica, usada no contador `attempts`). Conta, evento e chave nunca mudam;
+  - `clear(userId, key, expected)`: só remove a chave esperada, opcionalmente exigindo campos (`attempts: 1`, `confirmedParticipationId`).
+  - `set` continua exportado para compatibilidade, mas **não é usado** por código de produção. O app usa uma única instância (`defaultAdmissionIntentStorage`).
+- **Ciclo de vida analisado:**
+
+| Evento | Comportamento |
+|---|---|
+| Logout / novo login na mesma conta / nova época | `setIdentity` incrementa geração e operação e descarta os voos. Respostas antigas não publicam estado. A intenção persiste por conta (não é apagada no logout). |
+| Resposta tardia da operação anterior | Grava a prova do servidor **só** se a chave ainda for a atual (`recordConfirmation` → `update` condicional). Se a intenção atual for outra, nada é gravado. A prova antiga pode ser recuperada depois pelo contrato de consulta. |
+| Troca de conta | Armazenamento isolado por UUID da conta. O contexto antigo é descartado por identidade. |
+| Reabertura do app | A intenção é lida do SecureStore. Não há concorrência entre processos. |
+| Reconciliação concorrente | Um voo de recuperação por operação. A mesma ação compartilha o voo; outra ação recebe "Aguarde…". O ingresso em voo bloqueia a recuperação e vice-versa. |
+| Cancelamento definitivo / nova intenção | `clear` condicionado à chave abandonada; a nova intenção só é criada por `create` com a conta livre, e recebe nova chave. |
+
+- **Testes:** R02-03 (create/update/clear condicionais e serializados), R02-T14 (resposta de A após criação de B não troca a chave de B), R02-T15 (logout e novo login na mesma conta), R02-T03/T16 (troca de conta durante a recuperação).
+- **Limitação:** a seção crítica vale dentro do processo JS (uma instância). Várias instâncias do armazenamento não compartilhariam a fila, situação que hoje não existe em produção.
+- **Status:** corrigido.
+
+### 11.6 R02-04 — Complementos da revalidação de elegibilidade (P2)
+
+- **Problema:** não havia atualização manual com elegibilidade positiva. A recuperação dependia da tela de evento elegível. O teste do questionário usava um usuário já completo.
+- **Solução aplicada:**
+  - "Atualizar situação" (botão `ghost` pequeno, ao lado do selo de situação, com `accessibilityLabel`) aparece em todos os estados da situação, inclusive elegível. Fica desabilitado durante a revalidação e a recuperação e some durante consulta ou ingresso. `revalidate()` tem voo único, marca `eligibilityStatus='revalidating'` (o que invalida a autorização de confirmar até a nova resposta) e devolve `busy` durante ingresso ou recuperação. Sem polling.
+  - O cartão de recuperação aparece sempre que existe intenção não resolvida, **independente da elegibilidade** (inclusive com evento encerrado). Consulta e cancelamento não exigem evento elegível. A repetição segue as regras do backend e o resultado terminal da chave.
+  - Questionário: a navegação usa `{ returnTo: 'EventConfirmation' }` sem forçar `mode: 'edit'`. Assim, o perfil que deixou de atender aos requisitos abre no modo de conclusão, pré-preenchido. `ProfileQuestionnaireScreen` volta (`goBack`) para a confirmação quando há tela anterior. O fluxo obrigatório de novos usuários é a raiz da própria pilha, sem tela anterior, e mantém o `reset`. A edição iniciada pelo Perfil continua voltando ao Perfil. O retorno revalida no servidor.
+- **Arquivos:** `app/screens/event-entry/EventConfirmationScreen.js`, `app/screens/profile/ProfileQuestionnaireScreen.js`, `app/services/eventAdmissionService.js`.
+- **Testes:** R02-T17 (atualização manual com evento antes aberto reflete o encerramento), R02-04 (recuperação com evento encerrado), R02-T18 ×3 (perfil **efetivamente incompleto** → questionário salvo → conta atualizada → retorno → nova consulta → elegível; questionário que deixou de atender os requisitos; fluxo obrigatório e edição pelo Perfil mantêm seus destinos); tela R02-04/T17.
+- **Status:** corrigido.
+
+### 11.7 R02-05 — Invalidação imediata dos estados obsoletos da Home (P2)
+
+- **Problema:** parte da invalidação ocorria em `useEffect`, deixando uma renderização com dados do contexto anterior.
+- **Causa confirmada:** o estado guardava só `key` (conta#sessão). O contexto completo era comparado apenas dentro dos efeitos, e o harness anterior rodava os efeitos antes de observar o resultado.
+- **Solução aplicada** (`app/screens/home/useHomeOverview.js`): cada dado guarda o **contexto em que foi confirmado**. Histórico: conta/sessão/identidade verificada, instância do cliente HTTP (token estável por `WeakMap`), versão do retorno, ciclo de foco e ciclo de nova tentativa. Pendência: os mesmos campos mais os IDs pendentes. O ciclo de foco é calculado no render. A **seleção do que é exibido acontece no render**, antes de qualquer efeito: dado com contexto diferente vira `loading`/`checking`. Só um histórico confirmado da mesma conta, sessão e cliente continua visível, marcado `refreshing`. Avaliação antiga nunca fica clicável. Respostas fora de ordem continuam descartadas por geração. `knownPending`/`pendingDeferred` (C-04/D09) e "Avaliar mais tarde" não foram alterados.
+- **Testes** (harness que observa a renderização **anterior** aos efeitos): R02-T19 (mudança de versão do retorno; perda e recuperação de foco e mudança de pendências; respostas fora de ordem), R02-T20 (mudança do cliente HTTP). T21 (C-04/D09) foi coberto pelas suítes existentes `homeReturnEvaluation`, `homeFlow` e `participante01Home`, todas aprovadas.
+- **Status:** corrigido.
+
+### 11.8 Contratos de backend criados ou modificados
+
+Prefixo global `api/v1`. Ambos exigem sessão (`Authorization: Bearer`), um único cabeçalho `Idempotency-Key` válido (`validateOperationIdempotencyKey`) e o corpo estrito `{ "eventId": "<uuid>" }`, o mesmo do ingresso, do qual sai o fingerprint. O ator é sempre o usuário da sessão.
+
+| Contrato | Respostas |
+|---|---|
+| `POST /participations/admission-intents/lookup` (novo, somente leitura) | `200 { intent: { state: "completed", participationId } }` · `200 { intent: { state: "not_found" | "in_progress" | "abandoned" | "conflict" } }` · 400 `VALIDATION_ERROR` (corpo/chave) · 401 sessão |
+| `POST /participations/admission-intents/abandon` (novo) | `200 { intent: { state: "abandoned" } }` · `200 { intent: { state: "completed", participationId } }` (ingresso venceu) · 409 `IDEMPOTENCY_KEY_REUSED` (fingerprint diferente) · 409 `IDEMPOTENCY_IN_PROGRESS` · 400/401 como acima |
+| `POST /participations` (modificado só no replay) | Chave abandonada ⇒ 409 `ADMISSION_INTENT_ABANDONED`. Demais respostas inalteradas. |
+
+Sem alteração de schema, migration, retenção, autenticação ou contratos de Staff/Admin.
+
+### 11.9 Retenção de idempotência e riscos futuros
+
+- **Política atual verificada:** `expires_at` é gravado (TTL `PARTICIPANT_QUEUE_IDEMPOTENCY_TTL_SECONDS`) e indexado, mas **não existe expurgo** de `idempotency_operations` nem verificação de expiração no replay. Os resultados de ingresso e de abandono são, na prática, permanentes. Nada foi alterado.
+- **Requisito para qualquer política futura:** uma linha `completed` de `join`, seja ingresso ou abandono, não pode ser removida enquanto uma requisição original com aquela chave puder ser aceita. Remover uma linha de abandono transformaria a chave de volta em livre, e um POST atrasado criaria participação. Um expurgo futuro precisa preservar o terminal ou introduzir um sinal explícito de "chave expirada" que o ingresso recuse. Esse ponto exige alinhamento e está fora desta revisão.
+- Nenhum mecanismo existente incompatível foi encontrado. Por isso esta parte não precisou ser interrompida (4.8 da task).
+
+### 11.10 R02-06 — Validação visual e acabamento
+
+- Os ajustes da R01 (`LineIcon`, card roxo de avaliação, rótulos de horário da participação) foram preservados e não foram reimplementados.
+- Novos elementos de interface: cartão "TENTATIVA ANTERIOR" com "Verificar tentativa anterior", "Repetir ingresso anterior" e "Cancelar tentativa anterior", caixas de segunda confirmação e "Atualizar situação". Todos usam os componentes existentes (`Badge`, `Button`).
+- **Comparação com os mockups: PENDENTE.** `ArenaGO_01_Home_Inicial_Padronizada(3).png` e `ArenaGO_03_Home_Apos_Evento_Padronizada(3).png` continuam indisponíveis neste computador (busca em Documentos, Downloads e Mesa sem resultado). O acesso foi solicitado novamente ao responsável. Nenhuma imagem da internet foi usada.
+- **Capturas reais: não produzidas.** Não há simulador, emulador nem aparelho neste ambiente. Ficam pendentes: Home inicial, Home com histórico, Home com avaliação pendente, confirmação de evento, recuperação e cancelamento seguro de tentativa anterior.
+- `npx expo export` (Android e iOS) concluiu com código 0, o que só prova que o bundle compila. Não prova fidelidade visual nem homologação física.
+- **Status:** pendente de homologação visual e física.
+
+### 11.11 Testes executados nesta revisão
+
+| Comando | SHA testado | Total | Aprov. | Falhas | Cancel. | Ignor. | Exit |
+|---|---|---|---|---|---|---|---|
+| `npm test` em `app/` (com deps de `qa/regression`) | working tree sobre `970ae10` (idêntico ao commit da R02) | **997** | **997** | 0 | 0 | 0 | 0 |
+| `npm test` em `backend/` — **linha de base** (worktree temporária) | `970ae10` | 1159 | 1146 | 13 | 0 | 0 | 1 |
+| `npm test` em `backend/` — R02 | working tree sobre `970ae10` | 1178 | 1165 | 13 | 0 | 0 | 1 |
+| Testes unitários R02 do backend (`participant-admission-intents*.test.ts`) | idem | 19 | 19 | 0 | 0 | 0 | 0 |
+| `npx tsc --noEmit -p .` (produção) e `-p tsconfig.test.json` (testes) em `backend/` | idem | — | — | — | — | — | 0 / 0 |
+| `npx eslint` nos arquivos R02 do backend | idem | — | — | — | — | — | 0 |
+| `npx eslint "src/**/*.ts" "test/**/*.ts"` (backend completo) | idem | — | — | 3 erros | — | — | 1 |
+| `npx expo export --platform android` / `ios` | idem | — | — | — | — | — | 0 / 0 (Hermes ≈ 2,9 MB cada) |
+| `git diff --check` (código e documentação) | idem | — | — | — | — | — | sem problemas |
+| Integração PostgreSQL (`participant-admission-intents.integration.test.ts`) | — | 6 | **não executados** | — | — | — | — |
+
+- **Backend: 13 falhas de ambiente, anteriores à R02.** Os testes unitários do backend precisam das variáveis do `.env.example` (`DATABASE_URL` local, `127.0.0.1:55432`; nenhuma conexão é aberta nos unitários). Executado com `set -a; . ./.env.example; set +a; NODE_ENV=test npm test`. Treze arquivos HTTP/DI de outros módulos (`admin-close-http`, `admin-external-queue-http`, `admin-schedule-http`, `evaluation-read-http`, `evaluation-write-http`, `experience-queue-control-http`, `experiences-http`, `mutation-session-http`, `participant-queue-http`, `participation-lifecycle-http`, `queue-entry-di`, `staff-queries-http`, `station-availability-http`) encerram o processo com código 1 sem mensagem. Os casos que chegam a rodar passam. A lista de arquivos com falha é **idêntica** na linha de base `970ae10` e na R02 (comparação por `diff`), então não foi introduzida por esta revisão. A causa não foi investigada, por estar fora do escopo. Fica registrada para o responsável.
+- **Lint completo do backend:** 3 erros em `src/events/admin-configuration.dto.ts`, `test/unit/staff-a4-homolog-fixture.test.ts` e `test/unit/staff-homolog-fixture.test.ts`, arquivos que a R02 não altera (anteriores).
+- **App:** 997 = 968 da R01 + 29 novos (24 em `participante01Revisao02.test.cjs` e 5 em `eventEntry.test.cjs`). Três testes anteriores foram substituídos por versões R02 (P01-21, R01-02 de tela e R01-08 do store), porque o comportamento antigo (repetir pelo botão principal; liberar por "prova de não aplicação") é justamente o que a R02 proíbe. A suíte completa inclui `eventAdmissionService`, `eventEntry`, `participante01Revisao01`, `participante01Home`, `homeReturnEvaluation`, `homeFlow`, `participationProvider`, autenticação, questionário e navegação. As asserções verificam requisições, chaves, número de participações no backend simulado, conteúdo do armazenamento e estados do store, não só textos.
+- A campanha de 968 testes da R01 permanece como resultado histórico (10.11). Não é resultado da R02.
+
+### 11.12 Matriz de regressão R02
+
+| ID | Cobertura | Resultado |
+|---|---|---|
+| R02-T01 | app (cenário 3.2) + backend serviço/HTTP; integração preparada | 0 participações; aprovado (integração pendente) |
+| R02-T02 | app + backend serviço/HTTP | resultado original recuperado; aprovado |
+| R02-T03 | app (isolamento por conta) + backend serviço/HTTP; integração preparada | aprovado |
+| R02-T04 | app + backend serviço/HTTP; integração preparada | conflito sem alteração; aprovado |
+| R02-T05 | app | ingresso só conforme backend, mesma chave; aprovado |
+| R02-T06 | app | replay sem duplicação; aprovado |
+| R02-T07 | app + backend serviço/HTTP; integração preparada | ingresso atrasado não cria; aprovado (integração pendente) |
+| R02-T08 | app + backend serviço/HTTP; integração preparada | resultado confirmado preservado; aprovado |
+| R02-T09 / T10 | app + backend serviço/HTTP | mesmo terminal; resposta perdida recuperada por consulta; aprovado |
+| R02-T11 | app (R02-T01 e R01-08 (R02-T11)) + backend | intenção não apagada; aprovado |
+| R02-T12 | app (2 testes) | nenhuma liberação insegura; aprovado |
+| R02-T13 | app + tela | nova chave independente para B, sem ingresso automático; aprovado |
+| R02-T14 | app | intenção B preservada; aprovado |
+| R02-T15 | app | sem sobrescrita; aprovado |
+| R02-T16 | app | isolamento integral; aprovado |
+| R02-T17 | app + tela | elegibilidade atualizada; aprovado |
+| R02-T18 | app (3 testes) | jornada retomada; aprovado |
+| R02-T19 | hook (3 testes, antes dos efeitos) | sem ações obsoletas; aprovado |
+| R02-T20 | hook | dados invalidados; aprovado |
+| R02-T21 | suítes existentes `homeReturnEvaluation`/`homeFlow` | preservado; aprovado |
+| R02-T22 | `participante01Revisao01.test.cjs` completo | preservado; aprovado |
+| R02-T23 | backend serviço/HTTP | replay 201 pré-R02 compatível; aprovado |
+| R02-T24 | app (voo único) + backend (integração: 2 testes) | app aprovado; **concorrência real pendente** |
+
+### 11.13 Evidências de diff e Git
+
+- **Patch da revisão:** `qa-evidence/PARTICIPANTE_01_R02-changes.diff`. Base: `970ae10338989bfa002bd457378f0db9ef5d5b2b` (HEAD auditado). Escopo: todas as alterações de código, testes e documentação da R02, exceto o próprio patch. Verificado com `git apply --check` sobre `970ae10`. Os patches anteriores (`PARTICIPANTE_01-changes.diff`, `PARTICIPANTE_01_R01-changes.diff`) foram preservados sem alteração como evidência histórica.
+- **Git:** commit e push na `feature/heliom-participante-ux` feitos pelo assistente por pedido explícito do responsável nesta sessão. O `AGENTS.md` da raiz atribui commits ao responsável, e essa instrução direta prevaleceu. Sem force push, sem merge na `develop`, sem integração da `develop`. PARTICIPANTE-02 não iniciada.
+
+### 11.14 Commits da revisão
+
+- Registrados no commit seguinte, após o push do commit principal.
+
+**Estado da task:** Revisão 02 entregue para revalidação — não aprovada.

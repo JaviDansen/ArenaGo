@@ -178,6 +178,93 @@ export async function reserveIdempotencyOperationWithTx(
   };
 }
 
+/** Código de domínio persistido como resultado terminal de uma intenção de ingresso abandonada. */
+export const ADMISSION_INTENT_ABANDONED = "ADMISSION_INTENT_ABANDONED";
+
+/**
+ * Resultado terminal de abandono gravado na própria linha de idempotência do ingresso
+ * (`status=completed`, sem referência de participação). Por ocupar a mesma chave UNIQUE
+ * (ator, `join`, chave), nenhuma requisição posterior com essa chave pode criar participação.
+ */
+export const ABANDONED_JOIN_RESULT = {
+  httpStatus: 409,
+  resultReference: null,
+  resultPayload: { code: ADMISSION_INTENT_ABANDONED },
+} as const satisfies CompleteIdempotencyOperationInput;
+
+/** Leitura semântica de uma operação `join` concluída. */
+export type CompletedJoinOutcome =
+  | { state: "completed"; participationId: string }
+  | { state: "abandoned" };
+
+/**
+ * Interpreta o resultado persistido de uma operação `join` concluída.
+ * Ingresso: HTTP 201 com `resultReference` igual a `resultPayload.participationId` (formato
+ * gravado desde a Etapa 3). Abandono: {@link ABANDONED_JOIN_RESULT}. Qualquer outro formato
+ * é violação de integridade e nunca é tratado como ingresso nem como chave livre.
+ */
+export function classifyCompletedJoin(result: {
+  httpStatus: number;
+  resultReference: string | null;
+  resultPayload: JsonValue | null;
+}): CompletedJoinOutcome {
+  const payload = result.resultPayload;
+  const isObject = payload !== null && typeof payload === "object" && !Array.isArray(payload);
+  if (result.httpStatus === 201 && result.resultReference && isObject
+    && (payload as { readonly [key: string]: JsonValue }).participationId === result.resultReference) {
+    return { state: "completed", participationId: result.resultReference };
+  }
+  if (result.httpStatus === ABANDONED_JOIN_RESULT.httpStatus && result.resultReference === null && isObject
+    && (payload as { readonly [key: string]: JsonValue }).code === ADMISSION_INTENT_ABANDONED) {
+    return { state: "abandoned" };
+  }
+  throw new Error("Resultado persistido de ingresso com formato desconhecido.");
+}
+
+/** Estado de uma intenção de ingresso visto pela consulta somente-leitura. */
+export type JoinIntentLookupResult =
+  | CompletedJoinOutcome
+  | { state: "not_found" }
+  | { state: "in_progress" }
+  | { state: "conflict" };
+
+/**
+ * Consulta a linha de idempotência `join` da chave, sem reservar, travar ou escrever.
+ * `not_found` significa apenas ausência visível no instante da leitura: uma requisição original
+ * ainda em trânsito pode criar o registro depois. Só `abandoned` impede a execução futura.
+ */
+export async function readJoinIntentWithExecutor(
+  executor: DatabaseTransactionExecutor,
+  input: { actorUserId: string; eventId: string; idempotencyKey: string },
+): Promise<JoinIntentLookupResult> {
+  const [existing] = await executor
+    .select({
+      requestHash: idempotencyOperations.requestHash,
+      status: idempotencyOperations.status,
+      httpStatus: idempotencyOperations.httpStatus,
+      resultReference: idempotencyOperations.resultReference,
+      resultPayload: idempotencyOperations.resultPayload,
+    })
+    .from(idempotencyOperations)
+    .where(and(
+      eq(idempotencyOperations.actorUserId, input.actorUserId),
+      eq(idempotencyOperations.operation, JOIN_IDEMPOTENCY_OPERATION),
+      eq(idempotencyOperations.idempotencyKey, input.idempotencyKey),
+    ))
+    .limit(1);
+  if (!existing) return { state: "not_found" };
+  if (existing.requestHash !== createJoinRequestFingerprint(input.eventId)) return { state: "conflict" };
+  if (existing.status === "in_progress") return { state: "in_progress" };
+  if (existing.status !== "completed" || existing.httpStatus === null) {
+    throw new Error("A operação idempotente persistida viola o contrato de status e resposta.");
+  }
+  return classifyCompletedJoin({
+    httpStatus: existing.httpStatus,
+    resultReference: existing.resultReference,
+    resultPayload: getPersistedJsonValue(existing.resultPayload),
+  });
+}
+
 /**
  * Reserva especificamente o ingresso depois de bloquear evento e usuário na ordem arquitetural.
  * A transação continua pertencendo ao chamador, que deve revalidar e concluir ou fazer rollback;
